@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
-import type { GraphNode, GraphEdge, GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode } from '../types'
+import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
+import type { GraphNode, GraphEdge, GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings } from '../types'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
@@ -10,6 +11,7 @@ interface LiveCodeGraphProps {
   focusBubbleNodeId: string | null
   recenterKey: number
   theme: ThemeMode
+  layoutSettings: GraphLayoutSettings
   onSelectNode: (id: string | null) => void
   onDoubleClickNode: (id: string) => void
   onUpdateNodes: (nodes: GraphNode[]) => void
@@ -83,12 +85,16 @@ const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
 const VISIBLE_SETTLE_MS = 1500
 const SETTLE_FADE_MS = 900
 const FIT_SETTLE_MS = 450
+const SPATIAL_GRID_THRESHOLD = 220
+const SPATIAL_CELL_SIZE = 260
+const SPATIAL_SEARCH_RADIUS = 2
 
 interface PhysicsOptions {
   dampingScale?: number
   dragScale?: number
   maxSpeedScale?: number
   maxForceScale?: number
+  layoutSettings?: GraphLayoutSettings
 }
 
 interface CanvasTheme {
@@ -101,6 +107,12 @@ interface CanvasTheme {
   textMuted: string
   gridDot: string
   focusMask: string
+}
+
+type LayoutWorkerResponse = {
+  type: 'layout'
+  signature: string
+  nodes: GraphNode[]
 }
 
 function canvasTheme(): CanvasTheme {
@@ -146,39 +158,138 @@ function fitGraphToView(nodes: GraphNode[], canvasW: number, canvasH: number, pa
   pan.y = canvasH / 2 - centerY * nextZoom
 }
 
+function visibleNodeIdsFor(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  depth: GraphFilters['depth'],
+  selectedNodeId: string | null,
+  focusBubbleNodeId: string | null,
+  layoutSettings: GraphLayoutSettings,
+) {
+  const visible = new Set<string>()
+  const pickDepthCenter = () => {
+    if (focusBubbleNodeId) return focusBubbleNodeId
+    if (selectedNodeId) return selectedNodeId
+    const nodeById = new Map(nodes.map(n => [n.id, n]))
+    const mainNode = nodes.find(n => n.type === 'Function' && n.label === 'main')
+    if (mainNode) return mainNode.id
+    const degree = new Map<string, number>()
+    edges.forEach(e => {
+      degree.set(e.source, (degree.get(e.source) ?? 0) + 1)
+      degree.set(e.target, (degree.get(e.target) ?? 0) + 1)
+    })
+    const semanticHub = [...degree.entries()]
+      .map(([id, count]) => ({ node: nodeById.get(id), count }))
+      .filter((entry): entry is { node: GraphNode; count: number } => !!entry.node && entry.node.type !== 'File' && entry.node.type !== 'Module')
+      .sort((a, b) => b.count - a.count)[0]
+    if (semanticHub) return semanticHub.node.id
+    return [...degree.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? nodes[0]?.id ?? null
+  }
+
+  const centerId = depth === 'full' ? null : pickDepthCenter()
+  if (!centerId) {
+    nodes.forEach(n => visible.add(n.id))
+    return visible
+  }
+
+  visible.add(centerId)
+  const maxDepth = typeof depth === 'number' ? depth : 99
+  const expand = (id: string, d: number) => {
+    if (d <= 0) return
+    edges.forEach(e => {
+      if (e.source === id && !visible.has(e.target)) { visible.add(e.target); expand(e.target, d - 1) }
+      if (e.target === id && !visible.has(e.source)) { visible.add(e.source); expand(e.source, d - 1) }
+    })
+  }
+  expand(centerId, maxDepth)
+  return visible
+}
+
+function visibleGraphSignature(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  filters: GraphFilters,
+  selectedNodeId: string | null,
+  focusBubbleNodeId: string | null,
+) {
+  const visibleIds = visibleNodeIdsFor(nodes, edges, filters.depth, selectedNodeId, focusBubbleNodeId)
+  return [
+    filters.depth,
+    [...visibleIds].sort().join('|'),
+    [...filters.nodeTypes].sort().join('|'),
+    [...filters.edgeTypes].sort().join('|'),
+  ].join('::')
+}
+
+function layoutSettingsSignature(layoutSettings: GraphLayoutSettings) {
+  return [
+    layoutSettings.spacing.toFixed(2),
+    layoutSettings.repulsion.toFixed(2),
+    layoutSettings.linkLength.toFixed(2),
+    layoutSettings.damping.toFixed(2),
+  ].join(':')
+}
+
+function runVisiblePhysicsTick(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  visibleIds: Set<string>,
+  filters: GraphFilters,
+  width: number,
+  height: number,
+  options: PhysicsOptions = {},
+) {
+  const activeIds = new Set(nodes.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type)).map(node => node.id))
+  if (activeIds.size === 0) {
+    return nodes
+  }
+
+  const activeEdges = edges.filter(edge =>
+    filters.edgeTypes.has(edge.type)
+    && activeIds.has(edge.source)
+    && activeIds.has(edge.target)
+  )
+  if (activeIds.size === nodes.length && activeEdges.length === edges.length) {
+    return runPhysicsTick(nodes, edges, width, height, options)
+  }
+
+  const activeNodes = nodes.filter(node => activeIds.has(node.id))
+  const updatedActive = runPhysicsTick(activeNodes, activeEdges, width, height, options)
+  const updatedById = new Map(updatedActive.map(node => [node.id, node]))
+  return nodes.map(node => updatedById.get(node.id) ?? node)
+}
+
 function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, height: number, options: PhysicsOptions = {}): GraphNode[] {
   const updated = nodes.map(n => ({ ...n }))
   const index = new Map(updated.map(n => [n.id, n]))
   const forces = new Map(updated.map(n => [n.id, { x: 0, y: 0 }]))
   const degree = buildDegreeMap(updated, edges)
+  const layout = options.layoutSettings ?? DEFAULT_GRAPH_LAYOUT_SETTINGS
   const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
-  const repulsion = BASE_REPULSION * densityScale * densityScale
-  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale)
+  const spacingScale = Math.max(0.55, layout.spacing)
+  const repulsion = BASE_REPULSION * densityScale * densityScale * Math.max(0.25, layout.repulsion) * spacingScale * spacingScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale) * Math.max(0.45, layout.linkLength) * spacingScale
   const centerGravity = CENTER_GRAVITY / densityScale
   const maxSpeed = MAX_SPEED * Math.min(1.8, Math.sqrt(densityScale)) * (options.maxSpeedScale ?? 1)
-  const springDamping = SPRING_DAMPING * (options.dampingScale ?? 1)
-  const mediumDrag = MEDIUM_DRAG_B * (options.dragScale ?? 1)
+  const springDamping = SPRING_DAMPING * Math.max(0.35, layout.damping) * (options.dampingScale ?? 1)
+  const mediumDrag = MEDIUM_DRAG_B * Math.max(0.35, layout.damping) * (options.dragScale ?? 1)
   const maxForceScale = options.maxForceScale ?? 1
 
-  // repulsion between all pairs
-  for (let i = 0; i < updated.length; i++) {
-    for (let j = i + 1; j < updated.length; j++) {
-      const a = updated[i], b = updated[j]
-      const dx = b.x - a.x
-      const dy = b.y - a.y
-      const distSq = dx * dx + dy * dy
-      const jitterAngle = ((i * 92821 + j * 68917) % 360) * Math.PI / 180
-      const dist = Math.sqrt(distSq) || 0.1
-      const nx = distSq < 0.01 ? Math.cos(jitterAngle) : dx / dist
-      const ny = distSq < 0.01 ? Math.sin(jitterAngle) : dy / dist
-      const minDist = (NODE_SIZES[a.type] ?? 16) + (NODE_SIZES[b.type] ?? 16) + COLLISION_PADDING
-      const collision = Math.max(0, minDist - dist) * COLLISION_STRENGTH
-      const massScale = Math.sqrt(nodeMass(a, degree) * nodeMass(b, degree))
-      const force = clampForce(((repulsion / Math.max(180, distSq) + collision) / massScale) * maxForceScale)
-      addForce(forces, a.id, -nx * force, -ny * force)
-      addForce(forces, b.id, nx * force, ny * force)
-    }
-  }
+  forRepulsionPairs(updated, (i, j, a, b) => {
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const distSq = dx * dx + dy * dy
+    const jitterAngle = ((i * 92821 + j * 68917) % 360) * Math.PI / 180
+    const dist = Math.sqrt(distSq) || 0.1
+    const nx = distSq < 0.01 ? Math.cos(jitterAngle) : dx / dist
+    const ny = distSq < 0.01 ? Math.sin(jitterAngle) : dy / dist
+    const minDist = (NODE_SIZES[a.type] ?? 16) + (NODE_SIZES[b.type] ?? 16) + COLLISION_PADDING * spacingScale
+    const collision = Math.max(0, minDist - dist) * COLLISION_STRENGTH
+    const massScale = Math.sqrt(nodeMass(a, degree) * nodeMass(b, degree))
+    const force = clampForce(((repulsion / Math.max(180, distSq) + collision) / massScale) * maxForceScale)
+    addForce(forces, a.id, -nx * force, -ny * force)
+    addForce(forces, b.id, nx * force, ny * force)
+  })
 
   // spring-damper attraction along edges
   for (const edge of edges) {
@@ -206,7 +317,7 @@ function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, h
     force.x += -n.x * centerGravity
     force.y += -n.y * centerGravity
     const nodeDegree = degree.get(n.id) ?? 0
-    const drag = mediumDrag + Math.sqrt(nodeDegree) * HUB_DRAG_B * (options.dragScale ?? 1)
+    const drag = mediumDrag + Math.sqrt(nodeDegree) * HUB_DRAG_B * Math.max(0.35, layout.damping) * (options.dragScale ?? 1)
     force.x += -drag * n.vx
     force.y += -drag * n.vy
     const maxNodeForce = MAX_NODE_FORCE * maxForceScale * Math.sqrt(nodeMass(n, degree))
@@ -230,6 +341,47 @@ function buildDegreeMap(nodes: GraphNode[], edges: GraphEdge[]) {
     degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1)
   }
   return degree
+}
+
+function forRepulsionPairs(
+  nodes: GraphNode[],
+  visit: (i: number, j: number, a: GraphNode, b: GraphNode) => void,
+) {
+  if (nodes.length < SPATIAL_GRID_THRESHOLD) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        visit(i, j, nodes[i], nodes[j])
+      }
+    }
+    return
+  }
+
+  const grid = new Map<string, number[]>()
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i]
+    const cellX = Math.floor(node.x / SPATIAL_CELL_SIZE)
+    const cellY = Math.floor(node.y / SPATIAL_CELL_SIZE)
+    const key = `${cellX}:${cellY}`
+    const bucket = grid.get(key) ?? []
+    bucket.push(i)
+    grid.set(key, bucket)
+  }
+
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i]
+    const cellX = Math.floor(node.x / SPATIAL_CELL_SIZE)
+    const cellY = Math.floor(node.y / SPATIAL_CELL_SIZE)
+    for (let dx = -SPATIAL_SEARCH_RADIUS; dx <= SPATIAL_SEARCH_RADIUS; dx++) {
+      for (let dy = -SPATIAL_SEARCH_RADIUS; dy <= SPATIAL_SEARCH_RADIUS; dy++) {
+        const bucket = grid.get(`${cellX + dx}:${cellY + dy}`)
+        if (!bucket) continue
+        for (const j of bucket) {
+          if (j <= i) continue
+          visit(i, j, node, nodes[j])
+        }
+      }
+    }
+  }
 }
 
 function nodeMass(node: GraphNode, degree: Map<string, number>) {
@@ -280,9 +432,14 @@ function springLengthFor(edgeType: EdgeType, base: number) {
   }
 }
 
-function prepareInitialLayout(nodes: GraphNode[], edges: GraphEdge[], previous: Map<string, GraphNode>) {
+function prepareInitialLayout(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  previous: Map<string, GraphNode>,
+  layoutSettings: GraphLayoutSettings = DEFAULT_GRAPH_LAYOUT_SETTINGS,
+) {
   const seeded = seedLayout(nodes, edges, previous)
-  const relaxed = solveEquilibriumLayout(seeded, edges)
+  const relaxed = solveEquilibriumLayout(seeded, edges, layoutSettings)
   return relaxed.map((node, index) => {
     const drift = unitVectorFromId(node.id)
     const shouldDrift = hash01(`${node.id}:drift`) > 0.72
@@ -297,46 +454,53 @@ function prepareInitialLayout(nodes: GraphNode[], edges: GraphEdge[], previous: 
   })
 }
 
-function solveEquilibriumLayout(nodes: GraphNode[], edges: GraphEdge[]) {
+function solveEquilibriumLayout(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  layoutSettings: GraphLayoutSettings = DEFAULT_GRAPH_LAYOUT_SETTINGS,
+) {
   const iterations = nodes.length > 500 ? 128 : nodes.length > 220 ? 96 : 64
   let current = nodes.map(node => ({ ...node, vx: 0, vy: 0 }))
   for (let i = 0; i < iterations; i++) {
     const progress = i / Math.max(1, iterations - 1)
     const temperature = 1 - progress
     const step = 0.72 * temperature + 0.08
-    current = runEquilibriumStep(current, edges, step)
+    current = runEquilibriumStep(current, edges, step, layoutSettings)
   }
   return current.map(node => ({ ...node, vx: 0, vy: 0 }))
 }
 
-function runEquilibriumStep(nodes: GraphNode[], edges: GraphEdge[], step: number) {
+function runEquilibriumStep(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  step: number,
+  layoutSettings: GraphLayoutSettings = DEFAULT_GRAPH_LAYOUT_SETTINGS,
+) {
   const updated = nodes.map(node => ({ ...node }))
   const index = new Map(updated.map(node => [node.id, node]))
   const forces = new Map(updated.map(node => [node.id, { x: 0, y: 0 }]))
   const degree = buildDegreeMap(updated, edges)
   const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
-  const repulsion = BASE_REPULSION * densityScale * densityScale
-  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale)
+  const spacingScale = Math.max(0.55, layoutSettings.spacing)
+  const repulsion = BASE_REPULSION * densityScale * densityScale * Math.max(0.25, layoutSettings.repulsion) * spacingScale * spacingScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale) * Math.max(0.45, layoutSettings.linkLength) * spacingScale
   const centerGravity = CENTER_GRAVITY / densityScale
 
-  for (let i = 0; i < updated.length; i++) {
-    for (let j = i + 1; j < updated.length; j++) {
-      const a = updated[i], b = updated[j]
-      const dx = b.x - a.x
-      const dy = b.y - a.y
-      const distSq = dx * dx + dy * dy
-      const jitterAngle = ((i * 92821 + j * 68917) % 360) * Math.PI / 180
-      const dist = Math.sqrt(distSq) || 0.1
-      const nx = distSq < 0.01 ? Math.cos(jitterAngle) : dx / dist
-      const ny = distSq < 0.01 ? Math.sin(jitterAngle) : dy / dist
-      const minDist = (NODE_SIZES[a.type] ?? 16) + (NODE_SIZES[b.type] ?? 16) + COLLISION_PADDING
-      const collision = Math.max(0, minDist - dist) * COLLISION_STRENGTH
-      const massScale = Math.sqrt(nodeMass(a, degree) * nodeMass(b, degree))
-      const force = clampForce((repulsion / Math.max(180, distSq) + collision) / massScale)
-      addForce(forces, a.id, -nx * force, -ny * force)
-      addForce(forces, b.id, nx * force, ny * force)
-    }
-  }
+  forRepulsionPairs(updated, (i, j, a, b) => {
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const distSq = dx * dx + dy * dy
+    const jitterAngle = ((i * 92821 + j * 68917) % 360) * Math.PI / 180
+    const dist = Math.sqrt(distSq) || 0.1
+    const nx = distSq < 0.01 ? Math.cos(jitterAngle) : dx / dist
+    const ny = distSq < 0.01 ? Math.sin(jitterAngle) : dy / dist
+    const minDist = (NODE_SIZES[a.type] ?? 16) + (NODE_SIZES[b.type] ?? 16) + COLLISION_PADDING * spacingScale
+    const collision = Math.max(0, minDist - dist) * COLLISION_STRENGTH
+    const massScale = Math.sqrt(nodeMass(a, degree) * nodeMass(b, degree))
+    const force = clampForce((repulsion / Math.max(180, distSq) + collision) / massScale)
+    addForce(forces, a.id, -nx * force, -ny * force)
+    addForce(forces, b.id, nx * force, ny * force)
+  })
 
   for (const edge of edges) {
     const a = index.get(edge.source)
@@ -785,7 +949,7 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, focusBubbleNodeId, recenterKey, theme, onSelectNode, onDoubleClickNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, focusBubbleNodeId, recenterKey, theme, layoutSettings, onSelectNode, onDoubleClickNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
   const animFrameRef = useRef<number>(0)
@@ -798,26 +962,80 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
   const hoveredNodeRef = useRef<string | null>(null)
   const userNavigatedRef = useRef(false)
   const graphSignatureRef = useRef('')
+  const visibleSignatureRef = useRef('')
+  const layoutWorkerSignatureRef = useRef('')
+  const layoutWorkerRef = useRef<Worker | null>(null)
+  const layoutSettingsRef = useRef(layoutSettings)
+  const onUpdateNodesRef = useRef(onUpdateNodes)
   const [hoveredNode, setHoveredNode] = useState<string | null>(null)
   const physicsTicksRef = useRef(0)
   const settleStartedAtRef = useRef<number | null>(null)
   const settledRef = useRef(false)
+
+  layoutSettingsRef.current = layoutSettings
+  onUpdateNodesRef.current = onUpdateNodes
 
   const fitCurrentGraph = useCallback((force = false) => {
     const canvas = canvasRef.current
     if (!canvas || nodesRef.current.length === 0) return
     if (!force && userNavigatedRef.current) return
     const rect = canvas.getBoundingClientRect()
-    fitGraphToView(nodesRef.current, rect.width, rect.height, panRef.current, zoomRef)
-  }, [])
+    const visibleIds = visibleNodeIdsFor(nodesRef.current, edges, filters.depth, selectedNodeId, focusBubbleNodeId)
+    const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
+    fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, rect.width, rect.height, panRef.current, zoomRef)
+  }, [edges, filters.depth, filters.nodeTypes, focusBubbleNodeId, selectedNodeId])
+
+  useEffect(() => {
+    let worker: Worker | null = null
+    try {
+      worker = new Worker(new URL('../physics/graphLayoutWorker.ts', import.meta.url), { type: 'module' })
+      layoutWorkerRef.current = worker
+      worker.onmessage = (event: MessageEvent<LayoutWorkerResponse>) => {
+        const message = event.data
+        if (message.type !== 'layout' || message.signature !== layoutWorkerSignatureRef.current) return
+        nodesRef.current = message.nodes
+        physicsTicksRef.current = 0
+        settleStartedAtRef.current = null
+        settledRef.current = false
+        userNavigatedRef.current = false
+        requestAnimationFrame(() => fitCurrentGraph(true))
+      }
+    } catch (error) {
+      console.warn('Graph layout worker is unavailable, falling back to main-thread layout.', error)
+      layoutWorkerRef.current = null
+    }
+
+    return () => {
+      worker?.terminate()
+      if (layoutWorkerRef.current === worker) {
+        layoutWorkerRef.current = null
+      }
+    }
+  }, [fitCurrentGraph])
 
   // keep nodesRef in sync
   useEffect(() => {
     const signature = `${nodes.map(n => n.id).join('|')}::${edges.map(e => e.id).join('|')}`
     if (signature !== graphSignatureRef.current) {
-      const previous = new Map(nodesRef.current.map(node => [node.id, node]))
+      const previousNodes = nodesRef.current
+      const previous = new Map(previousNodes.map(node => [node.id, node]))
       graphSignatureRef.current = signature
-      nodesRef.current = prepareInitialLayout(nodes, edges, previous)
+      visibleSignatureRef.current = visibleGraphSignature(nodes, edges, filters, selectedNodeId, focusBubbleNodeId)
+      if (layoutWorkerRef.current && nodes.length >= SPATIAL_GRID_THRESHOLD) {
+        const workerSignature = `${signature}::${layoutSettingsSignature(layoutSettings)}`
+        layoutWorkerSignatureRef.current = workerSignature
+        nodesRef.current = seedLayout(nodes, edges, previous)
+        layoutWorkerRef.current.postMessage({
+          type: 'layout',
+          signature: workerSignature,
+          nodes,
+          edges,
+          previousNodes,
+          layoutSettings,
+        })
+      } else {
+        nodesRef.current = prepareInitialLayout(nodes, edges, previous, layoutSettings)
+      }
       physicsTicksRef.current = 0
       settleStartedAtRef.current = null
       settledRef.current = false
@@ -830,7 +1048,25 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
         return existing ? { ...node, x: existing.x, y: existing.y, vx: existing.vx, vy: existing.vy } : { ...node, vx: 0, vy: 0 }
       })
     }
-  }, [edges, fitCurrentGraph, nodes])
+  }, [edges, filters, fitCurrentGraph, focusBubbleNodeId, nodes, selectedNodeId])
+
+  useEffect(() => {
+    const signature = visibleGraphSignature(nodesRef.current, edges, filters, selectedNodeId, focusBubbleNodeId)
+    if (signature === visibleSignatureRef.current) return
+    visibleSignatureRef.current = signature
+    layoutWorkerSignatureRef.current = ''
+    physicsTicksRef.current = 0
+    settleStartedAtRef.current = null
+    settledRef.current = false
+    userNavigatedRef.current = false
+    requestAnimationFrame(() => fitCurrentGraph(true))
+  }, [edges, filters, fitCurrentGraph, focusBubbleNodeId, selectedNodeId])
+
+  useEffect(() => {
+    physicsTicksRef.current = 0
+    settleStartedAtRef.current = null
+    settledRef.current = false
+  }, [layoutSettings])
 
   useEffect(() => {
     userNavigatedRef.current = false
@@ -857,43 +1093,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
   }, [toWorld])
 
   const getVisibleNodeIds = useCallback(() => {
-    const visible = new Set<string>()
-    const pickDepthCenter = () => {
-      if (focusBubbleNodeId) return focusBubbleNodeId
-      if (selectedNodeId) return selectedNodeId
-      const nodeById = new Map(nodesRef.current.map(n => [n.id, n]))
-      const mainNode = nodesRef.current.find(n => n.type === 'Function' && n.label === 'main')
-      if (mainNode) return mainNode.id
-      const degree = new Map<string, number>()
-      edges.forEach(e => {
-        degree.set(e.source, (degree.get(e.source) ?? 0) + 1)
-        degree.set(e.target, (degree.get(e.target) ?? 0) + 1)
-      })
-      const semanticHub = [...degree.entries()]
-        .map(([id, count]) => ({ node: nodeById.get(id), count }))
-        .filter((entry): entry is { node: GraphNode; count: number } => !!entry.node && entry.node.type !== 'File' && entry.node.type !== 'Module')
-        .sort((a, b) => b.count - a.count)[0]
-      if (semanticHub) return semanticHub.node.id
-      return [...degree.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? nodesRef.current[0]?.id ?? null
-    }
-
-    const centerId = filters.depth === 'full' ? null : pickDepthCenter()
-    if (!centerId) {
-      nodesRef.current.forEach(n => visible.add(n.id))
-      return visible
-    }
-    // depth mode: show center + neighbors up to D1/D2/D3.
-    visible.add(centerId)
-    const depth = typeof filters.depth === 'number' ? filters.depth : 99
-    const expand = (id: string, d: number) => {
-      if (d <= 0) return
-      edges.forEach(e => {
-        if (e.source === id && !visible.has(e.target)) { visible.add(e.target); expand(e.target, d - 1) }
-        if (e.target === id && !visible.has(e.source)) { visible.add(e.source); expand(e.source, d - 1) }
-      })
-    }
-    expand(centerId, depth)
-    return visible
+    return visibleNodeIdsFor(nodesRef.current, edges, filters.depth, selectedNodeId, focusBubbleNodeId)
   }, [focusBubbleNodeId, selectedNodeId, edges, filters.depth])
 
   // main render + physics loop
@@ -919,30 +1119,34 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       const W = canvas.width / dpr
       const H = canvas.height / dpr
       const canvasColors = canvasTheme()
+      const visibleIds = getVisibleNodeIds()
+      const currentLayoutSettings = layoutSettingsRef.current
 
       if (settleStartedAtRef.current === null) {
         settleStartedAtRef.current = ts
       }
       const settleElapsed = ts - settleStartedAtRef.current
       if (settleElapsed <= VISIBLE_SETTLE_MS) {
-        nodesRef.current = runPhysicsTick(nodesRef.current, edges, W, H)
+        nodesRef.current = runVisiblePhysicsTick(nodesRef.current, edges, visibleIds, filters, W, H, { layoutSettings: currentLayoutSettings })
         physicsTicksRef.current++
         if (!userNavigatedRef.current && settleElapsed < FIT_SETTLE_MS) {
-          fitGraphToView(nodesRef.current, W, H, panRef.current, zoomRef)
+          const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
+          fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, W, H, panRef.current, zoomRef)
         }
         if (physicsTicksRef.current % 60 === 0) {
-          onUpdateNodes([...nodesRef.current])
+          onUpdateNodesRef.current([...nodesRef.current])
         }
       } else if (!settledRef.current) {
         const fadeProgress = Math.min(1, (settleElapsed - VISIBLE_SETTLE_MS) / SETTLE_FADE_MS)
         const dampingScale = 2.4 + fadeProgress * 4.6
         const dragScale = 2.2 + fadeProgress * 5.2
         const velocityFade = 1 - 0.08 - fadeProgress * 0.18
-        nodesRef.current = runPhysicsTick(nodesRef.current, edges, W, H, {
+        nodesRef.current = runVisiblePhysicsTick(nodesRef.current, edges, visibleIds, filters, W, H, {
           dampingScale,
           dragScale,
           maxSpeedScale: 0.55,
           maxForceScale: 0.45,
+          layoutSettings: currentLayoutSettings,
         }).map(node => ({
           ...node,
           vx: node.vx * Math.max(0.68, velocityFade),
@@ -951,7 +1155,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
         physicsTicksRef.current++
         if (averageSpeed(nodesRef.current) < 0.012 || fadeProgress >= 1) {
           settledRef.current = true
-          onUpdateNodes([...nodesRef.current])
+          onUpdateNodesRef.current([...nodesRef.current])
         }
       }
 
@@ -982,7 +1186,6 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
         }
       }
 
-      const visibleIds = getVisibleNodeIds()
       const nodeMap = new Map(nodesRef.current.map(n => [n.id, n]))
       const hoveredConnections = new Set<string>()
       const selectedConnections = new Set<string>()
@@ -1085,7 +1288,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       cancelAnimationFrame(animFrameRef.current)
       ro.disconnect()
     }
-  }, [edges, selectedNodeId, focusBubbleNodeId, filters, getVisibleNodeIds, onUpdateNodes, theme])
+  }, [edges, selectedNodeId, focusBubbleNodeId, filters, getVisibleNodeIds, theme])
 
   // mouse events
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

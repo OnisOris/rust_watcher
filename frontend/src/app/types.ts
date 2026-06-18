@@ -32,6 +32,20 @@ export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
 export type AnalyzerStatus = 'Starting' | 'Indexing' | 'Ready' | 'Fallback' | 'Stale' | 'Error'
 export type ThemeMode = 'light' | 'dark'
 
+export interface GraphLayoutSettings {
+  spacing: number
+  repulsion: number
+  linkLength: number
+  damping: number
+}
+
+export const DEFAULT_GRAPH_LAYOUT_SETTINGS: GraphLayoutSettings = {
+  spacing: 1,
+  repulsion: 1,
+  linkLength: 1,
+  damping: 1,
+}
+
 export interface GraphNode {
   id: string
   type: NodeType

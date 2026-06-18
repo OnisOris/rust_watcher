@@ -1,10 +1,19 @@
 # Rust Code Command Center
 
-Local browser app for exploring Rust projects as a live code graph.
+Local browser app for exploring Rust and React/TypeScript projects as a live code graph.
+
+![Rust Code Command Center](docs/rust-code-command-center.png)
+
+## What It Does
+
+- Builds an interactive graph of crates, files, modules, symbols, calls, traits, impls, React components, hooks, and API routes.
+- Connects frontend API calls to Rust backend endpoints when both sides are in the same project.
+- Provides graph modes for macro/meso/micro views, call flow, data flow, and trait/impl relationships.
+- Includes depth filters, focus bubbles, graph clarity presets, light/dark themes, and layout tuning.
 
 ## Setup
 
-Build the frontend first:
+Install and build the frontend:
 
 ```bash
 cd frontend
@@ -18,40 +27,23 @@ Build the Rust workspace:
 cargo build
 ```
 
-## Run
+## Run A Project
 
-Production-style local run:
+Index any local project and open the browser UI:
 
 ```bash
 cargo run -p web-server -- serve --project /path/to/rust/project --open
 ```
 
 If `--project` is omitted, the server indexes the current working directory.
-The default host is `127.0.0.1`, and `--port 0` binds a free local port.
-
-Useful options:
-
-```bash
-cargo run -p web-server -- serve \
-  --project /path/to/rust/project \
-  --host 127.0.0.1 \
-  --port 0 \
-  --frontend-dist frontend/dist \
-  --rust-analyzer rust-analyzer \
-  --open
-```
+The default host is `127.0.0.1`; `--port 0` picks a free local port.
 
 ## Frontend Development
 
-Run the backend on the Vite proxy port:
+Run the backend on the Vite proxy port, then start Vite:
 
 ```bash
 cargo run -p web-server -- serve --project /path/to/rust/project --port 34127
-```
-
-Then run Vite:
-
-```bash
 cd frontend
 pnpm dev
 ```

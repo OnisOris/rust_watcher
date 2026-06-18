@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
-import { AlertCircle, Check, EyeOff, Focus, Layers, Minimize2, Waypoints, X } from 'lucide-react'
+import { AlertCircle, Check, EyeOff, Focus, Layers, Minimize2, RotateCcw, SlidersHorizontal, Waypoints, X } from 'lucide-react'
+import type { GraphLayoutSettings } from '../types'
 
 type GraphLens = 'all' | 'architecture' | 'api'
 
@@ -13,8 +14,11 @@ interface DenseGraphSuggestionProps {
   externalHidden: boolean
   testsHidden: boolean
   canFocus: boolean
+  layoutSettings: GraphLayoutSettings
   onDismiss: () => void
   onLensChange: (lens: GraphLens) => void
+  onLayoutSettingsChange: (settings: GraphLayoutSettings) => void
+  onResetLayoutSettings: () => void
   onHideExternal: () => void
   onHideTests: () => void
   onDepth2: () => void
@@ -31,8 +35,11 @@ export function DenseGraphSuggestion({
   externalHidden,
   testsHidden,
   canFocus,
+  layoutSettings,
   onDismiss,
   onLensChange,
+  onLayoutSettingsChange,
+  onResetLayoutSettings,
   onHideExternal,
   onHideTests,
   onDepth2,
@@ -120,8 +127,98 @@ export function DenseGraphSuggestion({
             onClick={onFocusBubble}
           />
         </div>
+
+        <div
+          className="mt-3 rounded-xl px-3 py-3"
+          style={{ background: 'var(--cc-card)', border: '1px solid var(--cc-border)' }}
+        >
+          <div className="mb-2 flex items-center gap-2">
+            <SlidersHorizontal size={12} color="#06B6D4" />
+            <div className="min-w-0 flex-1" style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 650 }}>Layout</div>
+            <button
+              onClick={onResetLayoutSettings}
+              title="Reset layout tuning"
+              className="flex items-center justify-center rounded-md"
+              style={{ width: 24, height: 22, background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', color: 'var(--cc-text-subtle)', cursor: 'pointer' }}
+            >
+              <RotateCcw size={11} />
+            </button>
+          </div>
+          <div className="flex flex-col gap-2.5">
+            <LayoutSlider
+              label="Spacing"
+              value={layoutSettings.spacing}
+              min={0.7}
+              max={2.6}
+              step={0.05}
+              onChange={spacing => onLayoutSettingsChange({ ...layoutSettings, spacing })}
+            />
+            <LayoutSlider
+              label="Repulsion"
+              value={layoutSettings.repulsion}
+              min={0.5}
+              max={2.8}
+              step={0.05}
+              onChange={repulsion => onLayoutSettingsChange({ ...layoutSettings, repulsion })}
+            />
+            <LayoutSlider
+              label="Links"
+              value={layoutSettings.linkLength}
+              min={0.65}
+              max={2.4}
+              step={0.05}
+              onChange={linkLength => onLayoutSettingsChange({ ...layoutSettings, linkLength })}
+            />
+            <LayoutSlider
+              label="Damping"
+              value={layoutSettings.damping}
+              min={0.55}
+              max={2.2}
+              step={0.05}
+              onChange={damping => onLayoutSettingsChange({ ...layoutSettings, damping })}
+            />
+          </div>
+        </div>
       </div>
     </div>
+  )
+}
+
+function LayoutSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="grid items-center gap-2" style={{ gridTemplateColumns: '72px 1fr 34px' }}>
+      <span style={{ fontSize: 10, color: 'var(--cc-text-muted)', fontWeight: 550 }}>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={event => onChange(Number(event.target.value))}
+        style={{
+          width: '100%',
+          accentColor: '#06B6D4',
+          cursor: 'pointer',
+        }}
+      />
+      <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+        {value.toFixed(2)}
+      </span>
+    </label>
   )
 }
 

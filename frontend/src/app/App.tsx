@@ -10,7 +10,8 @@ import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { FocusBubbleControls } from './components/FocusBubbleControls'
 import { useBackendGraph } from './api/useBackendGraph'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge } from './types'
+import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
@@ -26,6 +27,12 @@ const DEFAULT_FILTERS: GraphFilters = {
 }
 
 type GraphLens = 'all' | 'architecture' | 'api'
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  const tagName = target.tagName.toLowerCase()
+  return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+}
 
 function initialTheme(): ThemeMode {
   const stored = localStorage.getItem('rust-watcher-theme')
@@ -43,6 +50,7 @@ export default function App() {
   const [clarityOpen, setClarityOpen] = useState(false)
   const [focusModeActive, setFocusModeActive] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
+  const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
   const [pinnedNodeIds, setPinnedNodeIds] = useState<Set<string>>(new Set())
   const {
@@ -84,12 +92,29 @@ export default function App() {
     })
   }, [])
 
-  // keyboard shortcut ⌘K
+  // keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
         setSearchOpen(prev => !prev)
+        return
+      }
+
+      if (e.metaKey || e.ctrlKey || e.altKey || isEditableTarget(e.target)) {
+        return
+      }
+
+      const depthByKey: Record<string, GraphFilters['depth']> = {
+        '1': 1,
+        '2': 2,
+        '3': 3,
+        '4': 'full',
+      }
+      const depth = depthByKey[e.key]
+      if (depth) {
+        e.preventDefault()
+        setFilters(current => current.depth === depth ? current : { ...current, depth })
       }
     }
     window.addEventListener('keydown', handler)
@@ -207,6 +232,7 @@ export default function App() {
             focusBubbleNodeId={focusBubbleNodeId}
             recenterKey={recenterKey}
             theme={theme}
+            layoutSettings={layoutSettings}
             onSelectNode={handleSelectNode}
             onDoubleClickNode={handleDoubleClickNode}
             onUpdateNodes={() => {}}
@@ -247,8 +273,11 @@ export default function App() {
               externalHidden={!filters.showExternal || !filters.nodeTypes.has('ExternalCrate')}
               testsHidden={!filters.showTests}
               canFocus={!!selectedNodeId}
+              layoutSettings={layoutSettings}
               onDismiss={() => setClarityOpen(false)}
               onLensChange={setGraphLens}
+              onLayoutSettingsChange={setLayoutSettings}
+              onResetLayoutSettings={() => setLayoutSettings(DEFAULT_GRAPH_LAYOUT_SETTINGS)}
               onHideExternal={() => {
                 setFilters(f => {
                   const next = new Set(f.nodeTypes)
