@@ -7,14 +7,19 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
-use graph_builder::{build_fallback_graph, enrich_file_symbols, filter_snapshot, focus_subgraph};
+use graph_builder::{
+    build_fallback_graph, enrich_file_symbols, filter_snapshot, focus_subgraph,
+    push_unique_edge_with_confidence,
+};
 use graph_core::{
-    AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, FocusDepth,
-    FocusRequest, FocusResponse, GraphMode, GraphNode, GraphSnapshot, SearchResult, ServerMessage,
+    AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, EdgeConfidence,
+    EdgeType, FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphSnapshot,
+    NodeDetailsResponse, SearchResult, ServerMessage, SymbolIndex,
 };
 use parking_lot::RwLock;
 use project_indexer::{index_project, start_watcher};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -178,6 +183,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/status", get(status))
         .route("/api/graph/snapshot", get(snapshot))
         .route("/api/node/:id", get(node))
+        .route("/api/node/:id/details", get(node_details))
         .route("/api/search", get(search))
         .route("/api/focus", post(focus))
         .route("/api/editor/open", post(open_in_editor))
@@ -240,6 +246,66 @@ async fn node(
         Some(node) => (StatusCode::OK, Json(node.clone())).into_response(),
         None => (StatusCode::NOT_FOUND, "node not found").into_response(),
     }
+}
+
+async fn node_details(
+    State(state): State<AppStateHandle>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let graph = state.graph.read();
+    let Some(node) = graph.nodes.iter().find(|node| node.id == id).cloned() else {
+        return (StatusCode::NOT_FOUND, "node not found").into_response();
+    };
+    let node_by_id = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let incoming_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.target == id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let outgoing_edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.source == id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let callers = incoming_edges
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::Calls)
+        .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied().cloned())
+        .collect::<Vec<_>>();
+    let callees = outgoing_edges
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::Calls)
+        .filter_map(|edge| node_by_id.get(edge.target.as_str()).copied().cloned())
+        .collect::<Vec<_>>();
+    let references = incoming_edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.edge_type,
+                EdgeType::Calls | EdgeType::TypeReference | EdgeType::Uses | EdgeType::DataFlow
+            )
+        })
+        .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied().cloned())
+        .collect::<Vec<_>>();
+
+    (
+        StatusCode::OK,
+        Json(NodeDetailsResponse {
+            node,
+            incoming_edges,
+            outgoing_edges,
+            callers,
+            callees,
+            references,
+        }),
+    )
+        .into_response()
 }
 
 async fn search(
@@ -826,6 +892,11 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
                 let progress = 55 + ((idx as f32 / index.files.len().max(1) as f32) * 35.0) as u8;
                 update_status(&state, |status| status.progress = Some(progress.min(90)));
             }
+            update_status(&state, |status| {
+                status.message = Some("Resolving semantic call graph".into());
+                status.progress = Some(92);
+            });
+            enrich_semantic_call_edges(&mut snapshot, &project_root, &client).await;
             let _ = client.shutdown().await;
             snapshot.status = ready_status(&state, "Ready");
             publish_snapshot(&state, snapshot);
@@ -866,6 +937,92 @@ fn publish_analyzer_fallback(
         .events
         .push(analysis_event(AnalysisEventType::Warning, message, None));
     publish_snapshot(state, snapshot);
+}
+
+async fn enrich_semantic_call_edges(
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+    client: &ra_client::RaClient,
+) {
+    let symbol_index = SymbolIndex::from_nodes(&snapshot.nodes);
+    if symbol_index.symbols.is_empty() {
+        return;
+    }
+    let existing_edges = snapshot
+        .edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<HashSet<_>>();
+    let callable_nodes = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                graph_core::NodeType::Function
+                    | graph_core::NodeType::Method
+                    | graph_core::NodeType::Component
+                    | graph_core::NodeType::Hook
+            )
+        })
+        .filter_map(|node| {
+            let range = node.selection_range?;
+            let file = node.file.as_ref()?;
+            Some((node.id.clone(), project_root.join(file), range.start))
+        })
+        .collect::<Vec<_>>();
+
+    for (source_id, file, position) in callable_nodes {
+        let items = match timeout(
+            Duration::from_secs(2),
+            client.prepare_call_hierarchy(&file, position.line, position.character),
+        )
+        .await
+        {
+            Ok(Ok(items)) => items,
+            Ok(Err(error)) => {
+                warn!(?error, source = %source_id, "prepareCallHierarchy failed");
+                continue;
+            }
+            Err(_) => {
+                warn!(source = %source_id, "prepareCallHierarchy timed out");
+                continue;
+            }
+        };
+        for item in items {
+            let outgoing = match timeout(Duration::from_secs(2), client.outgoing_calls(&item)).await
+            {
+                Ok(Ok(outgoing)) => outgoing,
+                Ok(Err(error)) => {
+                    warn!(?error, source = %source_id, "outgoingCalls failed");
+                    continue;
+                }
+                Err(_) => {
+                    warn!(source = %source_id, "outgoingCalls timed out");
+                    continue;
+                }
+            };
+            for call in outgoing {
+                let Ok(target_path) = call.to.uri.to_file_path() else {
+                    continue;
+                };
+                if let Some(target) = symbol_index.find_by_uri_path_position(
+                    &target_path,
+                    call.to.selection_range.start.line,
+                    call.to.selection_range.start.character,
+                ) {
+                    push_unique_edge_with_confidence(
+                        &mut snapshot.edges,
+                        &existing_edges,
+                        EdgeType::Calls,
+                        &source_id,
+                        &target.id,
+                        EdgeConfidence::Semantic,
+                    );
+                }
+            }
+        }
+    }
 }
 
 async fn check_rust_analyzer(rust_analyzer: &PathBuf) -> Result<()> {
@@ -975,5 +1132,75 @@ fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
         Some(2)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graph_core::{EdgeConfidence, Visibility};
+
+    fn test_node(label: &str, file: Option<&str>, module: Option<&str>) -> GraphNode {
+        GraphNode {
+            id: format!("fn:{}@1", label),
+            node_type: graph_core::NodeType::Function,
+            label: label.into(),
+            file: file.map(str::to_string),
+            module: module.map(str::to_string),
+            crate_name: Some("demo".into()),
+            line: Some(1),
+            visibility: Some(Visibility::Pub),
+            is_async: None,
+            is_unsafe: None,
+            is_generic: None,
+            signature: None,
+            description: None,
+            pinned: None,
+            bookmarked: None,
+            connections: None,
+            range: None,
+            selection_range: None,
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+        }
+    }
+
+    #[test]
+    fn search_scoring_prefers_exact_then_prefix_then_contains() {
+        let exact = test_node("main", Some("src/main.rs"), Some("app"));
+        let prefix = test_node("main_handler", Some("src/routes.rs"), Some("app"));
+        let contains = test_node("domain_main", Some("src/domain.rs"), Some("app"));
+        let miss = test_node("health", Some("src/health.rs"), Some("app"));
+
+        assert_eq!(score_node(&exact, "main"), Some(0));
+        assert_eq!(score_node(&prefix, "main"), Some(1));
+        assert_eq!(score_node(&contains, "main"), Some(2));
+        assert_eq!(score_node(&miss, "main"), None);
+    }
+
+    #[test]
+    fn node_details_shape_can_hold_confidence_edges() {
+        let node = test_node("main", Some("src/main.rs"), Some("app"));
+        let edge = graph_core::GraphEdge {
+            id: "Calls:a->b".into(),
+            source: "a".into(),
+            target: "b".into(),
+            edge_type: EdgeType::Calls,
+            confidence: EdgeConfidence::Semantic,
+        };
+        let response = NodeDetailsResponse {
+            node,
+            incoming_edges: vec![edge.clone()],
+            outgoing_edges: vec![edge],
+            callers: Vec::new(),
+            callees: Vec::new(),
+            references: Vec::new(),
+        };
+        assert_eq!(
+            response.incoming_edges[0].confidence,
+            EdgeConfidence::Semantic
+        );
     }
 }

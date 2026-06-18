@@ -1,39 +1,13 @@
 use graph_core::{
-    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, EdgeType, GraphEdge,
-    GraphMode, GraphNode, GraphSnapshot, NodeType, ProjectFile, Visibility,
+    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, DiscoveredSymbol,
+    EdgeConfidence, EdgeType, GraphEdge, GraphMode, GraphNode, GraphSnapshot, NodeType,
+    ProjectFile, SymbolKindName, Visibility,
 };
 use project_indexer::{relative_to, IndexedFile, ProjectIndex};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
-
-#[derive(Debug, Clone)]
-pub struct DiscoveredSymbol {
-    pub name: String,
-    pub detail: Option<String>,
-    pub kind: SymbolKindName,
-    pub line: u32,
-    pub children: Vec<DiscoveredSymbol>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolKindName {
-    File,
-    Module,
-    Struct,
-    Enum,
-    Trait,
-    Function,
-    Method,
-    Constructor,
-    Object,
-    Package,
-    Namespace,
-    Class,
-    Macro,
-    Other,
-}
 
 pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> GraphSnapshot {
     status.project_name = Some(index.name.clone());
@@ -277,15 +251,12 @@ pub fn discover_syntax_symbols(file: &IndexedFile) -> Vec<DiscoveredSymbol> {
             continue;
         }
 
-        if let Some(last) = symbols.last() {
-            if matches!(last.kind, SymbolKindName::Trait) {
-                let symbol = symbols.pop().expect("last symbol exists");
-                container_depth = brace_delta(line);
-                if container_depth > 0 {
-                    container = Some(symbol);
-                } else {
-                    symbols.push(symbol);
-                }
+        if let Some(symbol) = symbols.pop_if(|last| matches!(last.kind, SymbolKindName::Trait)) {
+            container_depth = brace_delta(line);
+            if container_depth > 0 {
+                container = Some(symbol);
+            } else {
+                symbols.push(symbol);
             }
         }
     }
@@ -401,6 +372,8 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                     pinned: None,
                     bookmarked: None,
                     connections: None,
+                    range: None,
+                    selection_range: None,
                     x: 360.0 + (line_no as f64 % 23.0) * 11.0,
                     y: (line_no as f64 * 17.0) % 520.0 - 260.0,
                     vx: 0.0,
@@ -504,6 +477,8 @@ fn enrich_typescript_graph(snapshot: &mut GraphSnapshot, project_root: &Path) ->
                 pinned: None,
                 bookmarked: None,
                 connections: None,
+                range: None,
+                selection_range: None,
                 x: 650.0 + (symbol.line as f64 % 19.0) * 18.0,
                 y: (symbol.line as f64 * 23.0) % 560.0 - 280.0,
                 vx: 0.0,
@@ -581,10 +556,8 @@ fn discover_ts_symbols(file: &TsFile) -> Vec<TsSymbol> {
             } else {
                 None
             }
-        } else if let Some(name) = ts_item_name(line, "class ") {
-            Some((name, NodeType::Component))
         } else {
-            None
+            ts_item_name(line, "class ").map(|name| (name, NodeType::Component))
         };
 
         if let Some((name, node_type)) = discovered {
@@ -859,6 +832,24 @@ fn push_unique_edge(
     source: &str,
     target: &str,
 ) {
+    push_unique_edge_with_confidence(
+        edges,
+        existing_edges,
+        edge_type,
+        source,
+        target,
+        EdgeConfidence::SyntaxFallback,
+    );
+}
+
+pub fn push_unique_edge_with_confidence(
+    edges: &mut Vec<GraphEdge>,
+    existing_edges: &HashSet<String>,
+    edge_type: EdgeType,
+    source: &str,
+    target: &str,
+    confidence: EdgeConfidence,
+) {
     let id = edge_id(edge_type, source, target);
     if existing_edges.contains(&id) || edges.iter().any(|edge| edge.id == id) {
         return;
@@ -868,6 +859,7 @@ fn push_unique_edge(
         source: source.to_string(),
         target: target.to_string(),
         edge_type,
+        confidence,
     });
 }
 
@@ -1174,6 +1166,8 @@ fn push_symbol(
         pinned: None,
         bookmarked: None,
         connections: None,
+        range: symbol.range,
+        selection_range: symbol.selection_range,
         x: 120.0 + (depth as f64 * 60.0) + (symbol.line as f64 % 17.0) * 6.0,
         y: (symbol.line as f64 * 13.0) % 420.0 - 210.0,
         vx: 0.0,
@@ -1207,8 +1201,7 @@ fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
 }
 
 fn extract_first_string(line: &str) -> Option<String> {
-    let mut chars = line.char_indices();
-    while let Some((start, ch)) = chars.next() {
+    for (start, ch) in line.char_indices() {
         if !matches!(ch, '"' | '\'' | '`') {
             continue;
         }
@@ -1264,8 +1257,7 @@ fn first_ident(text: &str) -> Option<String> {
 fn endpoint_id(file: &str, method: &str, path: &str, line: u32) -> String {
     let safe_path = path
         .trim_matches('/')
-        .replace('/', "_")
-        .replace(':', "_")
+        .replace(['/', ':'], "_")
         .replace(['{', '}', '$'], "");
     format!("endpoint:{file}::{method}:{safe_path}@{line}")
 }
@@ -1475,7 +1467,10 @@ fn syntax_symbol(
         name: name.into(),
         detail: Some(raw_line.trim().to_string()),
         kind,
+        file: None,
         line: line_idx as u32 + 1,
+        range: None,
+        selection_range: None,
         children: Vec::new(),
     }
 }
@@ -1529,6 +1524,7 @@ fn build_project_files_from_snapshot(nodes: &[GraphNode], edges: &[GraphEdge]) -
     files
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node(
     id: String,
     node_type: NodeType,
@@ -1557,6 +1553,8 @@ fn node(
         pinned: None,
         bookmarked: None,
         connections: None,
+        range: None,
+        selection_range: None,
         x,
         y,
         vx: 0.0,
@@ -1570,6 +1568,7 @@ fn edge(edge_type: EdgeType, source: &str, target: &str) -> GraphEdge {
         source: source.to_string(),
         target: target.to_string(),
         edge_type,
+        confidence: EdgeConfidence::Heuristic,
     }
 }
 
@@ -1607,6 +1606,151 @@ fn update_connections(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
             .filter(|edge| edge.source == node.id || edge.target == node.id)
             .count() as u32;
         node.connections = Some(count);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use graph_core::{AnalyzerStatus, AppState};
+    use std::path::PathBuf;
+
+    fn test_status() -> AppStatus {
+        AppStatus {
+            app_state: AppState::Normal,
+            analyzer_status: AnalyzerStatus::Ready,
+            project_name: Some("test".into()),
+            project_path: None,
+            last_updated: None,
+            message: None,
+            progress: None,
+        }
+    }
+
+    fn test_snapshot() -> GraphSnapshot {
+        let nodes = vec![
+            node(
+                "file:src/main.rs".into(),
+                NodeType::File,
+                "main.rs".into(),
+                Some("src/main.rs".into()),
+                Some("main".into()),
+                Some("test".into()),
+                None,
+                0.0,
+                0.0,
+            ),
+            node(
+                "fn:src/main.rs::main@1".into(),
+                NodeType::Function,
+                "main".into(),
+                Some("src/main.rs".into()),
+                Some("main".into()),
+                Some("test".into()),
+                Some(1),
+                0.0,
+                0.0,
+            ),
+            node(
+                "fn:src/main.rs::helper@5".into(),
+                NodeType::Function,
+                "helper".into(),
+                Some("src/main.rs".into()),
+                Some("main".into()),
+                Some("test".into()),
+                Some(5),
+                0.0,
+                0.0,
+            ),
+            node(
+                "struct:src/main.rs::Person@9".into(),
+                NodeType::Struct,
+                "Person".into(),
+                Some("src/main.rs".into()),
+                Some("main".into()),
+                Some("test".into()),
+                Some(9),
+                0.0,
+                0.0,
+            ),
+        ];
+        let edges = vec![
+            edge(
+                EdgeType::Contains,
+                "file:src/main.rs",
+                "fn:src/main.rs::main@1",
+            ),
+            edge(
+                EdgeType::Contains,
+                "file:src/main.rs",
+                "fn:src/main.rs::helper@5",
+            ),
+            edge(
+                EdgeType::Calls,
+                "fn:src/main.rs::main@1",
+                "fn:src/main.rs::helper@5",
+            ),
+            edge(
+                EdgeType::TypeReference,
+                "fn:src/main.rs::helper@5",
+                "struct:src/main.rs::Person@9",
+            ),
+        ];
+        GraphSnapshot {
+            nodes,
+            edges,
+            files: Vec::new(),
+            events: Vec::new(),
+            status: test_status(),
+        }
+    }
+
+    #[test]
+    fn focus_subgraph_returns_neighborhood() {
+        let snapshot = test_snapshot();
+        let (nodes, edges) = focus_subgraph(&snapshot, "fn:src/main.rs::main@1", Some(1)).unwrap();
+        let ids = nodes
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<HashSet<_>>();
+        assert!(ids.contains("fn:src/main.rs::main@1"));
+        assert!(ids.contains("file:src/main.rs"));
+        assert!(ids.contains("fn:src/main.rs::helper@5"));
+        assert!(!ids.contains("struct:src/main.rs::Person@9"));
+        assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
+    fn filter_snapshot_call_flow_keeps_call_edges() {
+        let snapshot = test_snapshot();
+        let filtered = filter_snapshot(&snapshot, GraphMode::CallFlow);
+        assert!(filtered.nodes.iter().all(|node| matches!(
+            node.node_type,
+            NodeType::Function
+                | NodeType::Method
+                | NodeType::Component
+                | NodeType::Hook
+                | NodeType::Endpoint
+        )));
+        assert!(filtered
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Calls));
+    }
+
+    #[test]
+    fn symbol_ids_are_stable() {
+        let file = IndexedFile {
+            absolute_path: PathBuf::from("/tmp/project/src/main.rs"),
+            relative_path: "src/main.rs".into(),
+            package_name: "project".into(),
+            module_path: "main".into(),
+        };
+        let first = symbol_id(NodeType::Function, &file, "main", 10);
+        let second = symbol_id(NodeType::Function, &file, "main", 10);
+        assert_eq!(first, second);
+        assert_eq!(first, "fn:project::main::main@10");
     }
 }
 

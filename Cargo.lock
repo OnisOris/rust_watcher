@@ -1098,7 +1098,7 @@ name = "ra-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "graph-builder",
+ "graph-core",
  "lsp-types",
  "parking_lot",
  "serde",

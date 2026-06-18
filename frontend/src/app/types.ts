@@ -27,6 +27,7 @@ export type EdgeType =
   | 'ModDeclaration'
   | 'ExternalDependency'
 
+export type EdgeConfidence = 'Exact' | 'Semantic' | 'SyntaxFallback' | 'Heuristic'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
 export type AnalyzerStatus = 'Starting' | 'Indexing' | 'Ready' | 'Fallback' | 'Stale' | 'Error'
@@ -63,6 +64,8 @@ export interface GraphNode {
   pinned?: boolean
   bookmarked?: boolean
   connections?: number
+  range?: LspRange
+  selectionRange?: LspRange
   x: number
   y: number
   vx: number
@@ -74,6 +77,17 @@ export interface GraphEdge {
   source: string
   target: string
   type: EdgeType
+  confidence?: EdgeConfidence
+}
+
+export interface LspPosition {
+  line: number
+  character: number
+}
+
+export interface LspRange {
+  start: LspPosition
+  end: LspPosition
 }
 
 export interface ProjectFile {
@@ -137,6 +151,15 @@ export interface FocusResponse {
   center: string
   nodes: GraphNode[]
   edges: GraphEdge[]
+}
+
+export interface NodeDetailsResponse {
+  node: GraphNode
+  incomingEdges: GraphEdge[]
+  outgoingEdges: GraphEdge[]
+  callers: GraphNode[]
+  callees: GraphNode[]
+  references: GraphNode[]
 }
 
 export interface GraphFilters {

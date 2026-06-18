@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-graph-builder = { path = "../graph-builder" }
+graph-core = { path = "../graph-core" }
 lsp-types.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

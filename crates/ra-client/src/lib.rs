@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context, Result};
-use graph_builder::{DiscoveredSymbol, SymbolKindName};
+use graph_core::{DiscoveredSymbol, LspPosition, LspRange, SymbolKindName};
 use lsp_types::{
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, InitializeParams,
-    InitializedParams, SymbolInformation, TextDocumentIdentifier, WorkDoneProgressParams,
-    WorkspaceFolder,
+    CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionResponse, InitializeParams,
+    InitializedParams, Location, Position, ReferenceContext, ReferenceParams, SymbolInformation,
+    TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams, WorkspaceFolder,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -117,31 +118,122 @@ impl RaClient {
             return Ok(Vec::new());
         }
         let response: DocumentSymbolResponse = serde_json::from_value(value)?;
+        let file_name = file.display().to_string();
         Ok(match response {
-            DocumentSymbolResponse::Nested(symbols) => {
-                symbols.iter().map(convert_document_symbol).collect()
-            }
-            DocumentSymbolResponse::Flat(symbols) => {
-                symbols.iter().map(convert_flat_symbol).collect()
-            }
+            DocumentSymbolResponse::Nested(symbols) => symbols
+                .iter()
+                .map(|symbol| convert_document_symbol(symbol, &file_name))
+                .collect(),
+            DocumentSymbolResponse::Flat(symbols) => symbols
+                .iter()
+                .map(|symbol| convert_flat_symbol(symbol, &file_name))
+                .collect(),
         })
     }
 
-    pub async fn prepare_call_hierarchy(&self, params: Value) -> Result<Value> {
-        self.request("textDocument/prepareCallHierarchy", params)
-            .await
+    pub async fn prepare_call_hierarchy(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<CallHierarchyItem>> {
+        let value = self
+            .request(
+                "textDocument/prepareCallHierarchy",
+                text_document_position_params(file, line, character)?,
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_value(value)?)
     }
 
-    pub async fn incoming_calls(&self, params: Value) -> Result<Value> {
-        self.request("callHierarchy/incomingCalls", params).await
+    pub async fn incoming_calls(
+        &self,
+        item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyIncomingCall>> {
+        let value = self
+            .request("callHierarchy/incomingCalls", json!({ "item": item }))
+            .await?;
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_value(value)?)
     }
 
-    pub async fn outgoing_calls(&self, params: Value) -> Result<Value> {
-        self.request("callHierarchy/outgoingCalls", params).await
+    pub async fn outgoing_calls(
+        &self,
+        item: &CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyOutgoingCall>> {
+        let value = self
+            .request("callHierarchy/outgoingCalls", json!({ "item": item }))
+            .await?;
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_value(value)?)
     }
 
-    pub async fn references(&self, params: Value) -> Result<Value> {
-        self.request("textDocument/references", params).await
+    pub async fn references(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>> {
+        let value = self
+            .request(
+                "textDocument/references",
+                ReferenceParams {
+                    text_document_position: text_document_position_params(file, line, character)?,
+                    context: ReferenceContext {
+                        include_declaration: true,
+                    },
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: Default::default(),
+                },
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_value(value)?)
+    }
+
+    pub async fn definition(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let value = self
+            .request(
+                "textDocument/definition",
+                text_document_position_params(file, line, character)?,
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(value)?))
+    }
+
+    pub async fn type_definition(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let value = self
+            .request(
+                "textDocument/typeDefinition",
+                text_document_position_params(file, line, character)?,
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(value)?))
     }
 
     async fn request<T: Serialize>(&self, method: &str, params: T) -> Result<Value> {
@@ -235,27 +327,64 @@ where
     Ok(Some(serde_json::from_slice(&body)?))
 }
 
-fn convert_document_symbol(symbol: &DocumentSymbol) -> DiscoveredSymbol {
+fn text_document_position_params(
+    file: &Path,
+    line: u32,
+    character: u32,
+) -> Result<TextDocumentPositionParams> {
+    let uri = Url::from_file_path(file)
+        .map_err(|_| anyhow!("failed to convert file path to URL: {}", file.display()))?;
+    Ok(TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier { uri },
+        position: Position { line, character },
+    })
+}
+
+fn convert_document_symbol(symbol: &DocumentSymbol, file: &str) -> DiscoveredSymbol {
     DiscoveredSymbol {
         name: symbol.name.clone(),
         detail: symbol.detail.clone(),
         kind: convert_kind(symbol.kind),
+        file: Some(file.to_string()),
         line: symbol.range.start.line + 1,
+        range: Some(convert_range(symbol.range)),
+        selection_range: Some(convert_range(symbol.selection_range)),
         children: symbol
             .children
             .as_ref()
-            .map(|children| children.iter().map(convert_document_symbol).collect())
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|child| convert_document_symbol(child, file))
+                    .collect()
+            })
             .unwrap_or_default(),
     }
 }
 
-fn convert_flat_symbol(symbol: &SymbolInformation) -> DiscoveredSymbol {
+fn convert_flat_symbol(symbol: &SymbolInformation, file: &str) -> DiscoveredSymbol {
     DiscoveredSymbol {
         name: symbol.name.clone(),
         detail: None,
         kind: convert_kind(symbol.kind),
+        file: Some(file.to_string()),
         line: symbol.location.range.start.line + 1,
+        range: Some(convert_range(symbol.location.range)),
+        selection_range: Some(convert_range(symbol.location.range)),
         children: Vec::new(),
+    }
+}
+
+fn convert_range(range: lsp_types::Range) -> LspRange {
+    LspRange {
+        start: LspPosition {
+            line: range.start.line,
+            character: range.start.character,
+        },
+        end: LspPosition {
+            line: range.end.line,
+            character: range.end.character,
+        },
     }
 }
 
