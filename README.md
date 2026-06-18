@@ -2,7 +2,7 @@
 
 Local browser app for exploring Rust and React/TypeScript projects as a live code graph.
 
-![Rust Code Command Center](docs/rust-code-command-center.png)
+![Rust Code Command Center](docs/img.jpg)
 
 ## What It Does
 
