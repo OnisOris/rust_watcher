@@ -15,6 +15,28 @@ trait Greeter {
     fn greeting(&self) -> String;
 }
 
+struct DemoRouter;
+
+struct RouteHandler;
+
+impl DemoRouter {
+    fn new() -> Self {
+        Self
+    }
+
+    fn route(self, _path: &str, _handler: RouteHandler) -> Self {
+        self
+    }
+}
+
+fn get<T>(_handler: T) -> RouteHandler {
+    RouteHandler
+}
+
+fn post<T>(_handler: T) -> RouteHandler {
+    RouteHandler
+}
+
 impl Person {
     fn new(name: &str, age: u32, height_cm: f32) -> Self {
         Self {
@@ -51,8 +73,23 @@ fn print_greeting(person: &Person) {
     println!("{} / {:?}", person.greeting(), mood);
 }
 
+fn get_person() -> Person {
+    Person::new("Ada", 29, 170.5)
+}
+
+fn update_person() -> Person {
+    Person::new("Grace", 37, 168.0)
+}
+
+fn api_router() -> DemoRouter {
+    DemoRouter::new()
+        .route("/api/person", get(get_person))
+        .route("/api/person/:name", post(update_person))
+}
+
 fn main() {
     let mut person = Person::new("Ada", 29, 170.5);
     person.birthday();
     print_greeting(&person);
+    let _router = api_router();
 }

@@ -1,16 +1,17 @@
 import type { ReactNode } from 'react'
-import { AlertCircle, X, Minimize2, EyeOff, Layers, Focus } from 'lucide-react'
+import { AlertCircle, X, Minimize2, EyeOff, Layers, Focus, Waypoints } from 'lucide-react'
 
 interface DenseGraphSuggestionProps {
   onDismiss: () => void
-  onCollapseModules: () => void
+  onArchitectureView: () => void
+  onApiBridge: () => void
   onHideExternal: () => void
   onHideTests: () => void
   onDepth2: () => void
   onFocusBubble: () => void
 }
 
-export function DenseGraphSuggestion({ onDismiss, onCollapseModules, onHideExternal, onHideTests, onDepth2, onFocusBubble }: DenseGraphSuggestionProps) {
+export function DenseGraphSuggestion({ onDismiss, onArchitectureView, onApiBridge, onHideExternal, onHideTests, onDepth2, onFocusBubble }: DenseGraphSuggestionProps) {
   return (
     <div
       className="absolute bottom-24 right-5 z-20 rounded-xl shadow-2xl"
@@ -35,7 +36,8 @@ export function DenseGraphSuggestion({ onDismiss, onCollapseModules, onHideExter
         <p style={{ fontSize: 11, color: 'var(--cc-text-muted)', marginBottom: 10 }}>Reduce visual noise?</p>
 
         <div className="flex flex-col gap-1.5">
-          <SuggestionAction icon={<Minimize2 size={12} />} label="Collapse modules" onClick={onCollapseModules} />
+          <SuggestionAction icon={<Minimize2 size={12} />} label="Architecture map" onClick={onArchitectureView} accent />
+          <SuggestionAction icon={<Waypoints size={12} />} label="API bridge only" onClick={onApiBridge} accent />
           <SuggestionAction icon={<EyeOff size={12} />} label="Hide external crates" onClick={onHideExternal} />
           <SuggestionAction icon={<EyeOff size={12} />} label="Hide tests" onClick={onHideTests} />
           <SuggestionAction icon={<Layers size={12} />} label="Show only Depth 2" onClick={onDepth2} />

@@ -2,7 +2,7 @@ use graph_core::{
     edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, EdgeType, GraphEdge,
     GraphMode, GraphNode, GraphSnapshot, NodeType, ProjectFile, Visibility,
 };
-use project_indexer::{IndexedFile, ProjectIndex};
+use project_indexer::{relative_to, IndexedFile, ProjectIndex};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
@@ -148,15 +148,19 @@ pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> Grap
         enrich_file_symbols(&mut snapshot, file, &symbols);
     }
     enrich_syntax_relationships(&mut snapshot, &index.files);
+    let endpoint_count = enrich_api_routes(&mut snapshot, &index.files);
+    let frontend_count = enrich_typescript_graph(&mut snapshot, &index.root);
 
     update_connections(&mut snapshot.nodes, &snapshot.edges);
-    snapshot.files = build_project_files(&index.files, &snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
     snapshot.events = vec![event(
         AnalysisEventType::Graph,
         format!(
-            "Fallback graph built: {} files, {} syntax symbols, {} nodes, {} edges",
+            "Fallback graph built: {} files, {} syntax symbols, {} endpoints, {} frontend symbols, {} nodes, {} edges",
             snapshot.files.len(),
             syntax_symbols_count,
+            endpoint_count,
+            frontend_count,
             snapshot.nodes.len(),
             snapshot.edges.len()
         ),
@@ -351,6 +355,327 @@ fn enrich_syntax_relationships(snapshot: &mut GraphSnapshot, files: &[IndexedFil
     for edge in new_edges {
         if !snapshot.edges.iter().any(|existing| existing.id == edge.id) {
             snapshot.edges.push(edge);
+        }
+    }
+}
+
+fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usize {
+    let mut new_nodes = Vec::new();
+    let mut new_edges = Vec::new();
+    let node_index = SyntaxNodeIndex::new(&snapshot.nodes);
+
+    for file in files {
+        let Ok(source) = fs::read_to_string(&file.absolute_path) else {
+            continue;
+        };
+        let file_node_id = file_id(&file.relative_path);
+        for (line_idx, raw_line) in source.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.starts_with("//") || !line.contains(".route(") {
+                continue;
+            }
+            let Some(path) = extract_first_string(line) else {
+                continue;
+            };
+            if !path.starts_with('/') {
+                continue;
+            }
+            for (method, handler) in extract_route_handlers(line) {
+                let line_no = line_idx as u32 + 1;
+                let id = endpoint_id(&file.relative_path, &method, &path, line_no);
+                let label = format!("{} {}", method.to_ascii_uppercase(), path);
+                new_nodes.push(GraphNode {
+                    id: id.clone(),
+                    node_type: NodeType::Endpoint,
+                    label,
+                    file: Some(file.relative_path.clone()),
+                    module: Some(file.module_path.clone()),
+                    crate_name: Some(file.package_name.clone()),
+                    line: Some(line_no),
+                    visibility: Some(Visibility::Pub),
+                    is_async: None,
+                    is_unsafe: None,
+                    is_generic: None,
+                    signature: Some(raw_line.trim().to_string()),
+                    description: Some(format!("Rust route handled by {handler}")),
+                    pinned: None,
+                    bookmarked: None,
+                    connections: None,
+                    x: 360.0 + (line_no as f64 % 23.0) * 11.0,
+                    y: (line_no as f64 * 17.0) % 520.0 - 260.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                });
+                new_edges.push(edge(EdgeType::Contains, &file_node_id, &id));
+                if let Some(handler_node) = node_index
+                    .first_of_type(&handler, NodeType::Function)
+                    .or_else(|| node_index.first_of_type(&handler, NodeType::Method))
+                {
+                    new_edges.push(edge(EdgeType::Calls, &id, &handler_node.id));
+                }
+            }
+        }
+    }
+
+    let count = new_nodes.len();
+    snapshot.nodes.extend(new_nodes);
+    snapshot.edges.extend(new_edges);
+    dedupe_graph(snapshot);
+    count
+}
+
+#[derive(Debug, Clone)]
+struct TsFile {
+    relative_path: String,
+    module_path: String,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct TsSymbol {
+    id: String,
+    label: String,
+    node_type: NodeType,
+    line: u32,
+    signature: String,
+}
+
+fn enrich_typescript_graph(snapshot: &mut GraphSnapshot, project_root: &Path) -> usize {
+    let mut files = Vec::new();
+    collect_ts_files(project_root, project_root, &mut files);
+    if files.is_empty() {
+        return 0;
+    }
+
+    let frontend_id = "frontend:typescript".to_string();
+    snapshot.nodes.push(node(
+        frontend_id.clone(),
+        NodeType::Module,
+        "frontend".to_string(),
+        None,
+        Some("typescript/react".to_string()),
+        Some("frontend".to_string()),
+        None,
+        520.0,
+        0.0,
+    ));
+
+    let mut symbol_count = 0usize;
+    let mut ts_symbols_by_file: HashMap<String, Vec<TsSymbol>> = HashMap::new();
+    for (idx, file) in files.iter().enumerate() {
+        let file_node_id = file_id(&file.relative_path);
+        let angle = spread_angle(idx, files.len().max(1));
+        snapshot.nodes.push(node(
+            file_node_id.clone(),
+            NodeType::File,
+            Path::new(&file.relative_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file.relative_path)
+                .to_string(),
+            Some(file.relative_path.clone()),
+            Some(file.module_path.clone()),
+            Some("frontend".to_string()),
+            None,
+            650.0 + angle.cos() * 280.0,
+            angle.sin() * 280.0,
+        ));
+        snapshot
+            .edges
+            .push(edge(EdgeType::Contains, &frontend_id, &file_node_id));
+
+        let symbols = discover_ts_symbols(file);
+        symbol_count += symbols.len();
+        for symbol in &symbols {
+            snapshot.nodes.push(GraphNode {
+                id: symbol.id.clone(),
+                node_type: symbol.node_type,
+                label: symbol.label.clone(),
+                file: Some(file.relative_path.clone()),
+                module: Some(file.module_path.clone()),
+                crate_name: Some("frontend".to_string()),
+                line: Some(symbol.line),
+                visibility: Some(Visibility::Pub),
+                is_async: Some(symbol.signature.contains("async ")),
+                is_unsafe: None,
+                is_generic: Some(symbol.signature.contains('<') && symbol.signature.contains('>')),
+                signature: Some(symbol.signature.clone()),
+                description: None,
+                pinned: None,
+                bookmarked: None,
+                connections: None,
+                x: 650.0 + (symbol.line as f64 % 19.0) * 18.0,
+                y: (symbol.line as f64 * 23.0) % 560.0 - 280.0,
+                vx: 0.0,
+                vy: 0.0,
+            });
+            snapshot
+                .edges
+                .push(edge(EdgeType::Contains, &file_node_id, &symbol.id));
+        }
+        ts_symbols_by_file.insert(file.relative_path.clone(), symbols);
+    }
+
+    enrich_ts_relationships(snapshot, &files, &ts_symbols_by_file);
+    dedupe_graph(snapshot);
+    symbol_count
+}
+
+fn collect_ts_files(root: &Path, current: &Path, files: &mut Vec<TsFile>) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if path.is_dir() {
+            if matches!(
+                name,
+                "node_modules" | "dist" | "build" | "coverage" | "target" | ".git" | ".vite"
+            ) {
+                continue;
+            }
+            collect_ts_files(root, &path, files);
+            continue;
+        }
+        let extension = path.extension().and_then(|e| e.to_str());
+        if !matches!(extension, Some("ts" | "tsx" | "js" | "jsx")) {
+            continue;
+        }
+        let relative_path = relative_to(root, &path);
+        if relative_path.ends_with(".d.ts") {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        files.push(TsFile {
+            module_path: ts_module_path(&relative_path),
+            relative_path,
+            source,
+        });
+    }
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+}
+
+fn discover_ts_symbols(file: &TsFile) -> Vec<TsSymbol> {
+    let mut symbols = Vec::new();
+    for (line_idx, raw_line) in file.source.lines().enumerate() {
+        let line = normalize_ts_declaration(raw_line.trim());
+        if line.is_empty() || line.starts_with("//") || line.starts_with("import ") {
+            continue;
+        }
+        let line_no = line_idx as u32 + 1;
+        let discovered = if let Some(name) = ts_item_name(line, "interface ") {
+            Some((name, NodeType::Interface))
+        } else if let Some(name) = ts_item_name(line, "type ") {
+            Some((name, NodeType::TypeAlias))
+        } else if let Some(name) = ts_item_name(line, "function ") {
+            Some((name, classify_ts_callable(name)))
+        } else if let Some(name) = ts_item_name(line, "const ") {
+            if line.contains("=>") || line.contains("memo(") || line.contains("forwardRef(") {
+                Some((name, classify_ts_callable(name)))
+            } else {
+                None
+            }
+        } else if let Some(name) = ts_item_name(line, "class ") {
+            Some((name, NodeType::Component))
+        } else {
+            None
+        };
+
+        if let Some((name, node_type)) = discovered {
+            symbols.push(TsSymbol {
+                id: ts_symbol_id(node_type, &file.relative_path, name, line_no),
+                label: name.to_string(),
+                node_type,
+                line: line_no,
+                signature: raw_line.trim().to_string(),
+            });
+        }
+    }
+    symbols
+}
+
+fn enrich_ts_relationships(
+    snapshot: &mut GraphSnapshot,
+    files: &[TsFile],
+    symbols_by_file: &HashMap<String, Vec<TsSymbol>>,
+) {
+    let endpoint_by_path = build_endpoint_path_index(&snapshot.nodes);
+    let all_symbols = symbols_by_file
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let components = all_symbols
+        .iter()
+        .filter(|symbol| symbol.node_type == NodeType::Component)
+        .cloned()
+        .collect::<Vec<_>>();
+    let callables = all_symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.node_type, NodeType::Function | NodeType::Hook))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for file in files {
+        let file_node_id = file_id(&file.relative_path);
+        let symbols = symbols_by_file
+            .get(&file.relative_path)
+            .cloned()
+            .unwrap_or_default();
+        let mut active_symbol: Option<TsSymbol> = None;
+        let mut active_depth = 0i32;
+
+        for (line_idx, raw_line) in file.source.lines().enumerate() {
+            let line_no = line_idx as u32 + 1;
+            if let Some(symbol) = symbols.iter().find(|symbol| symbol.line == line_no) {
+                active_symbol = Some(symbol.clone());
+                active_depth = brace_delta(raw_line);
+            }
+            let source_id = active_symbol
+                .as_ref()
+                .map(|symbol| symbol.id.as_str())
+                .unwrap_or(&file_node_id);
+            let line = raw_line.trim();
+            if line.starts_with("//") {
+                continue;
+            }
+
+            for component in &components {
+                if component.id != source_id && contains_jsx_tag(line, &component.label) {
+                    snapshot
+                        .edges
+                        .push(edge(EdgeType::Renders, source_id, &component.id));
+                }
+            }
+            for callable in &callables {
+                if callable.id != source_id && contains_call(line, &callable.label) {
+                    snapshot
+                        .edges
+                        .push(edge(EdgeType::Calls, source_id, &callable.id));
+                }
+            }
+            for api_path in extract_api_paths(line) {
+                if let Some(endpoint_ids) = endpoint_by_path.get(&api_path) {
+                    for endpoint_id in endpoint_ids {
+                        snapshot
+                            .edges
+                            .push(edge(EdgeType::ApiCall, source_id, endpoint_id));
+                    }
+                }
+            }
+
+            if active_symbol.is_some() {
+                active_depth += brace_delta(raw_line);
+                if active_depth <= 0 && line.contains('}') {
+                    active_symbol = None;
+                }
+            }
         }
     }
 }
@@ -585,12 +910,18 @@ fn method_call_matches(
 pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapshot {
     let (node_types, edge_types): (HashSet<NodeType>, HashSet<EdgeType>) = match mode {
         GraphMode::Macro => (
-            [NodeType::Module, NodeType::File, NodeType::ExternalCrate]
-                .into_iter()
-                .collect(),
+            [
+                NodeType::Module,
+                NodeType::File,
+                NodeType::Endpoint,
+                NodeType::ExternalCrate,
+            ]
+            .into_iter()
+            .collect(),
             [
                 EdgeType::Contains,
                 EdgeType::Uses,
+                EdgeType::ApiCall,
                 EdgeType::ModDeclaration,
                 EdgeType::ExternalDependency,
             ]
@@ -607,12 +938,20 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Impl,
                 NodeType::Function,
                 NodeType::Method,
+                NodeType::Component,
+                NodeType::Hook,
+                NodeType::Interface,
+                NodeType::TypeAlias,
+                NodeType::Endpoint,
                 NodeType::Macro,
             ]
             .into_iter()
             .collect(),
             [
                 EdgeType::Contains,
+                EdgeType::Calls,
+                EdgeType::Renders,
+                EdgeType::ApiCall,
                 EdgeType::TypeReference,
                 EdgeType::Implements,
                 EdgeType::Uses,
@@ -621,22 +960,42 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
             .collect(),
         ),
         GraphMode::CallFlow => (
-            [NodeType::Function, NodeType::Method].into_iter().collect(),
-            [EdgeType::Calls].into_iter().collect(),
+            [
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::Component,
+                NodeType::Hook,
+                NodeType::Endpoint,
+            ]
+            .into_iter()
+            .collect(),
+            [EdgeType::Calls, EdgeType::Renders, EdgeType::ApiCall]
+                .into_iter()
+                .collect(),
         ),
         GraphMode::DataFlow => (
             [
                 NodeType::Function,
                 NodeType::Method,
+                NodeType::Component,
+                NodeType::Hook,
+                NodeType::Endpoint,
                 NodeType::Struct,
                 NodeType::Enum,
                 NodeType::Trait,
+                NodeType::Interface,
+                NodeType::TypeAlias,
             ]
             .into_iter()
             .collect(),
-            [EdgeType::DataFlow, EdgeType::Contains]
-                .into_iter()
-                .collect(),
+            [
+                EdgeType::DataFlow,
+                EdgeType::ApiCall,
+                EdgeType::Calls,
+                EdgeType::Contains,
+            ]
+            .into_iter()
+            .collect(),
         ),
         GraphMode::Traits => (
             [
@@ -693,17 +1052,26 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
         mode,
         GraphMode::CallFlow | GraphMode::DataFlow | GraphMode::Traits
     ) {
-        let semantic_edge_type = match mode {
-            GraphMode::CallFlow => Some(EdgeType::Calls),
-            GraphMode::DataFlow => Some(EdgeType::DataFlow),
+        let semantic_edge_types: Option<HashSet<EdgeType>> = match mode {
+            GraphMode::CallFlow => Some(
+                [EdgeType::Calls, EdgeType::Renders, EdgeType::ApiCall]
+                    .into_iter()
+                    .collect(),
+            ),
+            GraphMode::DataFlow => Some(
+                [EdgeType::DataFlow, EdgeType::ApiCall]
+                    .into_iter()
+                    .collect(),
+            ),
             GraphMode::Traits => None,
             _ => None,
         };
         let semantic_node_ids: HashSet<_> = edges
             .iter()
             .filter(|edge| {
-                semantic_edge_type
-                    .map(|edge_type| edge.edge_type == edge_type)
+                semantic_edge_types
+                    .as_ref()
+                    .map(|edge_types| edge_types.contains(&edge.edge_type))
                     .unwrap_or(true)
             })
             .flat_map(|edge| [edge.source.clone(), edge.target.clone()])
@@ -838,6 +1206,211 @@ fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
     }
 }
 
+fn extract_first_string(line: &str) -> Option<String> {
+    let mut chars = line.char_indices();
+    while let Some((start, ch)) = chars.next() {
+        if !matches!(ch, '"' | '\'' | '`') {
+            continue;
+        }
+        let quote = ch;
+        let mut escaped = false;
+        for (end, next) in line[start + ch.len_utf8()..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if next == '\\' {
+                escaped = true;
+                continue;
+            }
+            if next == quote {
+                return Some(line[start + ch.len_utf8()..start + ch.len_utf8() + end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_route_handlers(line: &str) -> Vec<(String, String)> {
+    const METHODS: [&str; 7] = ["get", "post", "put", "patch", "delete", "head", "options"];
+    let mut handlers = Vec::new();
+    for method in METHODS {
+        let pattern = format!("{method}(");
+        let mut search_from = 0usize;
+        while let Some(offset) = line[search_from..].find(&pattern) {
+            let start = search_from + offset + pattern.len();
+            if let Some(handler) = first_ident(&line[start..]) {
+                handlers.push((method.to_string(), handler));
+            }
+            search_from = start;
+        }
+    }
+    handlers
+}
+
+fn first_ident(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let ident = trimmed
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == ':')
+        .collect::<String>();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident.rsplit("::").next().unwrap_or(&ident).to_string())
+    }
+}
+
+fn endpoint_id(file: &str, method: &str, path: &str, line: u32) -> String {
+    let safe_path = path
+        .trim_matches('/')
+        .replace('/', "_")
+        .replace(':', "_")
+        .replace(['{', '}', '$'], "");
+    format!("endpoint:{file}::{method}:{safe_path}@{line}")
+}
+
+fn normalize_ts_declaration(line: &str) -> &str {
+    let line = line.strip_prefix("export default ").unwrap_or(line);
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let line = line.strip_prefix("async ").unwrap_or(line);
+    line.strip_prefix("declare ").unwrap_or(line)
+}
+
+fn ts_item_name<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(prefix)?.trim_start();
+    let name = rest
+        .split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '{' | '(' | '<' | ':' | ';' | '=' | ',' | '!')
+        })
+        .next()
+        .unwrap_or_default();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn classify_ts_callable(name: &str) -> NodeType {
+    if name.starts_with("use") && name.chars().nth(3).map(char::is_uppercase).unwrap_or(false) {
+        NodeType::Hook
+    } else if name.chars().next().map(char::is_uppercase).unwrap_or(false) {
+        NodeType::Component
+    } else {
+        NodeType::Function
+    }
+}
+
+fn ts_module_path(relative_path: &str) -> String {
+    let mut parts = Path::new(relative_path)
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if matches!(parts.first().map(String::as_str), Some("frontend")) {
+        parts.remove(0);
+    }
+    if matches!(parts.first().map(String::as_str), Some("src")) {
+        parts.remove(0);
+    }
+    if let Some(last) = parts.last_mut() {
+        *last = last
+            .trim_end_matches(".tsx")
+            .trim_end_matches(".ts")
+            .trim_end_matches(".jsx")
+            .trim_end_matches(".js")
+            .to_string();
+    }
+    if parts.is_empty() {
+        "frontend".to_string()
+    } else {
+        parts.join("::")
+    }
+}
+
+fn ts_symbol_id(node_type: NodeType, relative_path: &str, name: &str, line: u32) -> String {
+    let prefix = match node_type {
+        NodeType::Component => "component",
+        NodeType::Hook => "hook",
+        NodeType::Interface => "interface",
+        NodeType::TypeAlias => "type",
+        NodeType::Function => "ts-fn",
+        _ => "ts-symbol",
+    };
+    format!("{prefix}:{relative_path}::{name}@{line}")
+}
+
+fn contains_jsx_tag(line: &str, name: &str) -> bool {
+    line.contains(&format!("<{name}"))
+}
+
+fn extract_api_paths(line: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut rest = line;
+    while let Some(path_start) = rest.find("/api/") {
+        let after_start = &rest[path_start..];
+        let path = after_start
+            .split(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        '"' | '\'' | '`' | ')' | ']' | '}' | ',' | ';' | '<' | '>'
+                    )
+            })
+            .next()
+            .unwrap_or_default();
+        if let Some(normalized) = normalize_api_path(path) {
+            paths.push(normalized);
+        }
+        rest = &after_start[path.len().max(1)..];
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn normalize_api_path(path: &str) -> Option<String> {
+    let path = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'));
+    if !path.starts_with("/api/") {
+        return None;
+    }
+    let segments = path
+        .trim_end_matches('/')
+        .split('/')
+        .map(|segment| {
+            if segment.starts_with(':') || segment.contains("${") {
+                ":param"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(segments.join("/"))
+}
+
+fn build_endpoint_path_index(nodes: &[GraphNode]) -> HashMap<String, Vec<String>> {
+    let mut endpoints: HashMap<String, Vec<String>> = HashMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| node.node_type == NodeType::Endpoint)
+    {
+        let path = node.label.split_whitespace().nth(1).unwrap_or_default();
+        if let Some(normalized) = normalize_api_path(path) {
+            endpoints
+                .entry(normalized)
+                .or_default()
+                .push(node.id.clone());
+        }
+    }
+    endpoints
+}
+
 fn strip_visibility(line: &str) -> &str {
     line.strip_prefix("pub(crate) ")
         .or_else(|| line.strip_prefix("pub(super) "))
@@ -907,31 +1480,6 @@ fn syntax_symbol(
     }
 }
 
-fn build_project_files(
-    files: &[IndexedFile],
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Vec<ProjectFile> {
-    files
-        .iter()
-        .map(|file| {
-            let file_node_id = file_id(&file.relative_path);
-            let functions_count = nodes
-                .iter()
-                .filter(|node| {
-                    node.file.as_deref() == Some(&file.relative_path)
-                        && matches!(node.node_type, NodeType::Function | NodeType::Method)
-                })
-                .count() as u32;
-            let links_count = edges
-                .iter()
-                .filter(|edge| edge.source == file_node_id || edge.target == file_node_id)
-                .count() as u32;
-            project_file(file, functions_count, links_count)
-        })
-        .collect()
-}
-
 fn build_project_files_from_snapshot(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<ProjectFile> {
     let mut by_path: HashMap<String, (&GraphNode, u32)> = HashMap::new();
     for node in nodes.iter().filter(|node| node.node_type == NodeType::File) {
@@ -940,7 +1488,14 @@ fn build_project_files_from_snapshot(nodes: &[GraphNode], edges: &[GraphEdge]) -
                 .iter()
                 .filter(|symbol| {
                     symbol.file.as_deref() == Some(file)
-                        && matches!(symbol.node_type, NodeType::Function | NodeType::Method)
+                        && matches!(
+                            symbol.node_type,
+                            NodeType::Function
+                                | NodeType::Method
+                                | NodeType::Component
+                                | NodeType::Hook
+                                | NodeType::Endpoint
+                        )
                 })
                 .count() as u32;
             by_path.insert(file.clone(), (node, functions_count));
@@ -972,24 +1527,6 @@ fn build_project_files_from_snapshot(nodes: &[GraphNode], edges: &[GraphEdge]) -
         .collect::<Vec<_>>();
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files
-}
-
-fn project_file(file: &IndexedFile, functions_count: u32, links_count: u32) -> ProjectFile {
-    ProjectFile {
-        id: file_id(&file.relative_path),
-        name: Path::new(&file.relative_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&file.relative_path)
-            .to_string(),
-        path: file.relative_path.clone(),
-        module: file.module_path.clone(),
-        crate_name: file.package_name.clone(),
-        functions_count,
-        links_count,
-        diagnostics_count: 0,
-        complexity: complexity(links_count),
-    }
 }
 
 fn node(
@@ -1121,6 +1658,11 @@ fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, line: u32) -> 
         NodeType::Impl => "impl",
         NodeType::Function => "fn",
         NodeType::Method => "method",
+        NodeType::Component => "component",
+        NodeType::Hook => "hook",
+        NodeType::Interface => "interface",
+        NodeType::TypeAlias => "type",
+        NodeType::Endpoint => "endpoint",
         NodeType::Macro => "macro",
         NodeType::Module => "module",
         NodeType::File => "file",

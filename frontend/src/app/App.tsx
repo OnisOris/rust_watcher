@@ -10,10 +10,10 @@ import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { FocusBubbleControls } from './components/FocusBubbleControls'
 import { useBackendGraph } from './api/useBackendGraph'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge } from './types'
 
-const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Macro', 'ExternalCrate'])
-const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Uses', 'Calls', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
+const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate'])
+const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
 
 const DEFAULT_FILTERS: GraphFilters = {
   nodeTypes: ALL_NODE_TYPES,
@@ -24,6 +24,8 @@ const DEFAULT_FILTERS: GraphFilters = {
   depth: 'full',
   onlyCurrentFile: false,
 }
+
+type GraphLens = 'all' | 'architecture' | 'api'
 
 function initialTheme(): ThemeMode {
   const stored = localStorage.getItem('rust-watcher-theme')
@@ -40,6 +42,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showDenseSuggestion, setShowDenseSuggestion] = useState(false)
   const [focusModeActive, setFocusModeActive] = useState(false)
+  const [graphLens, setGraphLens] = useState<GraphLens>('all')
   const [recenterKey, setRecenterKey] = useState(0)
   const [pinnedNodeIds, setPinnedNodeIds] = useState<Set<string>>(new Set())
   const {
@@ -69,6 +72,10 @@ export default function App() {
     [nodes, pinnedNodeIds],
   )
   const selectedNode = selectedNodeId ? graphNodes.find(n => n.id === selectedNodeId) ?? null : null
+  const { nodes: visibleGraphNodes, edges: visibleGraphEdges } = useMemo(
+    () => applyGraphLens(graphNodes, edges, graphLens),
+    [graphNodes, edges, graphLens],
+  )
   const togglePinNode = useCallback((id: string) => {
     setPinnedNodeIds(prev => {
       const next = new Set(prev)
@@ -96,6 +103,12 @@ export default function App() {
   useEffect(() => {
     if (nodes.length > 120) setShowDenseSuggestion(true)
   }, [nodes.length])
+
+  useEffect(() => {
+    if (nodes.length > 250 && graphLens === 'all' && mode === 'Meso') {
+      setGraphLens('architecture')
+    }
+  }, [graphLens, mode, nodes.length])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -171,7 +184,7 @@ export default function App() {
         onSearchOpen={() => setSearchOpen(true)}
         onSettingsOpen={() => setSettingsOpen(true)}
         onRecenter={() => setRecenterKey(key => key + 1)}
-        onCollapse={() => {}}
+        onCollapse={() => setGraphLens(current => current === 'architecture' ? 'all' : 'architecture')}
         onFocusMode={handleFocusModeToggle}
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         focusModeActive={focusModeActive}
@@ -193,8 +206,8 @@ export default function App() {
         {/* graph area */}
         <div className="relative flex-1 min-w-0 overflow-hidden">
           <LiveCodeGraph
-            nodes={graphNodes}
-            edges={edges}
+            nodes={visibleGraphNodes}
+            edges={visibleGraphEdges}
             mode={mode}
             filters={filters}
             selectedNodeId={selectedNodeId}
@@ -226,12 +239,12 @@ export default function App() {
           {showDenseSuggestion && (
             <DenseGraphSuggestion
               onDismiss={() => setShowDenseSuggestion(false)}
-              onCollapseModules={() => {
-                setFilters(f => {
-                  const next = new Set(f.nodeTypes)
-                  next.delete('Module')
-                  return { ...f, nodeTypes: next }
-                })
+              onArchitectureView={() => {
+                setGraphLens('architecture')
+                setShowDenseSuggestion(false)
+              }}
+              onApiBridge={() => {
+                setGraphLens('api')
                 setShowDenseSuggestion(false)
               }}
               onHideExternal={() => {
@@ -260,6 +273,14 @@ export default function App() {
               <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{graphNodes.length} nodes</span>
               <span style={{ color: 'var(--cc-border)' }}>·</span>
               <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{edges.length} edges</span>
+              {graphLens !== 'all' && (
+                <>
+                  <span style={{ color: 'var(--cc-border)' }}>·</span>
+                  <span style={{ fontSize: 10, color: '#06B6D4' }}>
+                    {graphLens === 'architecture' ? 'Architecture' : 'API Bridge'}: {visibleGraphNodes.length}/{visibleGraphEdges.length}
+                  </span>
+                </>
+              )}
               <span style={{ color: 'var(--cc-border)' }}>·</span>
               <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{mode}</span>
             </div>
@@ -273,8 +294,8 @@ export default function App() {
         {/* right panel */}
         <InspectorPanel
           selectedNode={selectedNode}
-          nodes={graphNodes}
-          edges={edges}
+          nodes={visibleGraphNodes}
+          edges={visibleGraphEdges}
           projectName={projectName}
           analyzerStatus={analyzerStatus}
           appState={appState}
@@ -307,6 +328,82 @@ export default function App() {
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   )
+}
+
+function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens) {
+  if (lens === 'all') return { nodes, edges }
+
+  const byId = new Map(nodes.map(node => [node.id, node]))
+  const keep = new Set<string>()
+  const keepEdgeTypes = new Set<EdgeType>()
+
+  const keepContainerChain = (node: GraphNode) => {
+    if (node.file) {
+      const fileNode = nodes.find(candidate => candidate.type === 'File' && candidate.file === node.file)
+      if (fileNode) keep.add(fileNode.id)
+    }
+    if (node.crate) {
+      nodes
+        .filter(candidate => candidate.type === 'Module' && candidate.crate === node.crate)
+        .forEach(candidate => keep.add(candidate.id))
+    }
+  }
+
+  if (lens === 'architecture') {
+    nodes
+      .filter(node => node.type === 'Module' || node.type === 'File' || node.type === 'Endpoint')
+      .forEach(node => keep.add(node.id))
+    keepEdgeTypes.add('Contains')
+    keepEdgeTypes.add('ExternalDependency')
+    keepEdgeTypes.add('Uses')
+    keepEdgeTypes.add('ApiCall')
+  } else {
+    keepEdgeTypes.add('Contains')
+    keepEdgeTypes.add('Calls')
+    keepEdgeTypes.add('ApiCall')
+  }
+
+  edges
+    .filter(edge => edge.type === 'ApiCall')
+    .forEach(edge => {
+      const source = byId.get(edge.source)
+      const target = byId.get(edge.target)
+      if (!source || !target) return
+      keep.add(source.id)
+      keep.add(target.id)
+      keepContainerChain(source)
+      keepContainerChain(target)
+    })
+
+  if (lens === 'api') {
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const edge of edges) {
+        if (edge.type !== 'Contains' && edge.type !== 'Calls') continue
+        const sourceKept = keep.has(edge.source)
+        const targetKept = keep.has(edge.target)
+        if (edge.type === 'Contains' && targetKept && !sourceKept) {
+          if (!sourceKept) {
+            keep.add(edge.source)
+            grew = true
+          }
+        }
+        if (edge.type === 'Calls' && sourceKept && !targetKept && byId.get(edge.target)?.type === 'Endpoint') {
+          keep.add(edge.target)
+          grew = true
+        }
+      }
+    }
+  }
+
+  const filteredNodes = nodes.filter(node => keep.has(node.id))
+  const filteredNodeIds = new Set(filteredNodes.map(node => node.id))
+  const filteredEdges = edges.filter(edge =>
+    keepEdgeTypes.has(edge.type) && filteredNodeIds.has(edge.source) && filteredNodeIds.has(edge.target)
+  )
+
+  return { nodes: filteredNodes, edges: filteredEdges }
 }
 
 // ── Indexing screen ─────────────────────────────────────────────────────────

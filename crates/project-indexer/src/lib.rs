@@ -114,8 +114,9 @@ where
         move |event: std::result::Result<Event, notify::Error>| match event {
             Ok(event) => {
                 let interesting = event.paths.iter().any(|path| {
+                    let extension = path.extension().and_then(|e| e.to_str());
                     path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
-                        || path.extension().and_then(|e| e.to_str()) == Some("rs")
+                        || matches!(extension, Some("rs" | "ts" | "tsx" | "js" | "jsx"))
                 });
                 if interesting {
                     on_event(event);

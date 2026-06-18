@@ -20,7 +20,8 @@ interface InspectorPanelProps {
 const NODE_TYPE_COLORS: Record<string, string> = {
   File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Enum: '#F59E0B',
   Trait: '#10B981', Impl: '#6366F1', Function: '#EC4899', Method: '#F97316',
-  Macro: '#EF4444', ExternalCrate: '#7D8795',
+  Component: '#14B8A6', Hook: '#A855F7', Interface: '#22C55E', TypeAlias: '#84CC16',
+  Endpoint: '#E11D48', Macro: '#EF4444', ExternalCrate: '#7D8795',
 }
 
 export function InspectorPanel({
@@ -157,6 +158,10 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onFocusBubble, onSelec
 
   const callers = incoming.filter(e => e.type === 'Calls').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const callees = outgoing.filter(e => e.type === 'Calls').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  const apiCallers = incoming.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
+  const apiTargets = outgoing.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  const renders = outgoing.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  const renderedBy = incoming.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const typeRefs = outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const dataFlowTargets = outgoing.filter(e => e.type === 'DataFlow').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
@@ -213,7 +218,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onFocusBubble, onSelec
         )}
 
         {/* call graph */}
-        {(callers.length > 0 || callees.length > 0) && (
+        {(callers.length > 0 || callees.length > 0 || apiCallers.length > 0 || apiTargets.length > 0 || renders.length > 0 || renderedBy.length > 0) && (
           <Card>
             <SectionLabel label="Call Graph" />
             {callers.length > 0 && (
@@ -221,6 +226,18 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onFocusBubble, onSelec
             )}
             {callees.length > 0 && (
               <NodeList label="Calls" icon={<ArrowUpRight size={11} color="#EC4899" />} nodes={callees} onSelect={onSelectNode} />
+            )}
+            {apiCallers.length > 0 && (
+              <NodeList label="API called by" icon={<ArrowDownRight size={11} color="#E11D48" />} nodes={apiCallers} onSelect={onSelectNode} />
+            )}
+            {apiTargets.length > 0 && (
+              <NodeList label="API calls" icon={<ArrowUpRight size={11} color="#E11D48" />} nodes={apiTargets} onSelect={onSelectNode} />
+            )}
+            {renders.length > 0 && (
+              <NodeList label="Renders" icon={<ArrowUpRight size={11} color="#14B8A6" />} nodes={renders} onSelect={onSelectNode} />
+            )}
+            {renderedBy.length > 0 && (
+              <NodeList label="Rendered by" icon={<ArrowDownRight size={11} color="#14B8A6" />} nodes={renderedBy} onSelect={onSelectNode} />
             )}
           </Card>
         )}
@@ -363,6 +380,12 @@ function TypeDot({ type }: { type: string }) {
 function TypeIcon({ type, color }: { type: string; color: string }) {
   const icons: Record<string, ReactNode> = {
     Function: <Zap size={16} color={color} />,
+    Method: <Zap size={16} color={color} />,
+    Component: <Layers size={16} color={color} />,
+    Hook: <GitBranch size={16} color={color} />,
+    Interface: <Layers size={16} color={color} />,
+    TypeAlias: <Layers size={16} color={color} />,
+    Endpoint: <ExternalLink size={16} color={color} />,
     Trait: <GitBranch size={16} color={color} />,
     Struct: <Layers size={16} color={color} />,
     default: <ChevronRight size={16} color={color} />,

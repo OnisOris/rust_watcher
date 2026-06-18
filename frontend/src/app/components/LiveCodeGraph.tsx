@@ -25,6 +25,11 @@ const NODE_COLORS: Record<NodeType, string> = {
   Impl: '#6366F1',
   Function: '#EC4899',
   Method: '#F97316',
+  Component: '#14B8A6',
+  Hook: '#A855F7',
+  Interface: '#22C55E',
+  TypeAlias: '#84CC16',
+  Endpoint: '#E11D48',
   Macro: '#EF4444',
   ExternalCrate: '#7D8795',
 }
@@ -33,6 +38,8 @@ const EDGE_COLORS: Record<EdgeType, string> = {
   Contains: '#374151',
   Uses: '#4B5870',
   Calls: '#06B6D4',
+  Renders: '#14B8A6',
+  ApiCall: '#E11D48',
   Implements: '#10B981',
   TypeReference: '#3B82F6',
   DataFlow: '#8B5CF6',
@@ -50,6 +57,11 @@ const NODE_SIZES: Record<NodeType, number> = {
   Impl: 10,
   Function: 14,
   Method: 12,
+  Component: 18,
+  Hook: 13,
+  Interface: 16,
+  TypeAlias: 15,
+  Endpoint: 16,
   Macro: 12,
 }
 
@@ -251,7 +263,7 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
   ctx.strokeStyle = isSelected ? theme.text : isHovered ? color : color
   ctx.lineWidth = isSelected ? 2.5 : isHovered ? 2 : 1.5
 
-  if (n.type === 'ExternalCrate') {
+  if (n.type === 'ExternalCrate' || n.type === 'Interface') {
     ctx.setLineDash([4, 3])
   } else {
     ctx.setLineDash([])
@@ -301,6 +313,28 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
       ctx.fill()
       break
     }
+    case 'Component': {
+      ctx.beginPath()
+      ctx.roundRect(n.x - size, n.y - size * 0.7, size * 2, size * 1.4, 5)
+      ctx.fill()
+      ctx.stroke()
+      ctx.strokeStyle = color
+      ctx.globalAlpha = alpha * 0.45
+      ctx.strokeRect(n.x - size * 0.45, n.y - size * 0.3, size * 0.9, size * 0.6)
+      break
+    }
+    case 'Endpoint': {
+      ctx.beginPath()
+      ctx.roundRect(n.x - size * 1.35, n.y - size * 0.65, size * 2.7, size * 1.3, 9)
+      ctx.fill()
+      ctx.stroke()
+      ctx.fillStyle = color
+      ctx.globalAlpha = alpha * 0.85
+      ctx.beginPath()
+      ctx.arc(n.x - size * 0.85, n.y, 3, 0, Math.PI * 2)
+      ctx.fill()
+      break
+    }
     case 'Impl': {
       ctx.beginPath()
       ctx.arc(n.x, n.y, size, 0, Math.PI * 2)
@@ -342,9 +376,9 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
       break
     }
     default: {
-      // Function, Method, Struct, ExternalCrate
+      // Function, Hook, Interface, TypeAlias, Struct, ExternalCrate
       ctx.beginPath()
-      if (n.type === 'Struct') {
+      if (n.type === 'Struct' || n.type === 'Interface' || n.type === 'TypeAlias') {
         ctx.roundRect(n.x - size, n.y - size * 0.65, size * 2, size * 1.3, 5)
       } else {
         ctx.arc(n.x, n.y, size, 0, Math.PI * 2)
@@ -642,9 +676,9 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
           || selectedConnections.has(edge.source) && selectedConnections.has(edge.target)
         const baseColor = EDGE_COLORS[edge.type]
         const color = isActive ? baseColor : baseColor + '99'
-        const width = edge.type === 'DataFlow' ? 2.5 : edge.type === 'Calls' ? 1.8 : 1.2
-        const dashed = edge.type === 'Implements' || edge.type === 'ExternalDependency'
-        const animated = edge.type === 'DataFlow'
+        const width = edge.type === 'DataFlow' || edge.type === 'ApiCall' ? 2.5 : edge.type === 'Calls' || edge.type === 'Renders' ? 1.8 : 1.2
+        const dashed = edge.type === 'Implements' || edge.type === 'ExternalDependency' || edge.type === 'Renders'
+        const animated = edge.type === 'DataFlow' || edge.type === 'ApiCall'
 
         drawArrow(ctx, src.x, src.y, tgt.x, tgt.y, color, width, dashed, animated, ts, NODE_SIZES[src.type], NODE_SIZES[tgt.type])
       }
