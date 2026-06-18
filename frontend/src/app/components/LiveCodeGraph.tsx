@@ -66,12 +66,30 @@ const NODE_SIZES: Record<NodeType, number> = {
 }
 
 // ── Physics constants ───────────────────────────────────────────────────────
-const REPULSION = 6000
-const SPRING_STRENGTH = 0.04
-const SPRING_LENGTH = 120
-const DAMPING = 0.82
-const CENTER_GRAVITY = 0.008
-const MAX_SPEED = 8
+const BASE_REPULSION = 9000
+const SPRING_STRENGTH = 0.028
+const SPRING_DAMPING = 0.09
+const BASE_SPRING_LENGTH = 132
+const MEDIUM_DRAG_B = 0.14
+const HUB_DRAG_B = 0.035
+const HUB_MASS = 0.72
+const CENTER_GRAVITY = 0.0035
+const COLLISION_PADDING = 18
+const COLLISION_STRENGTH = 0.18
+const MAX_FORCE = 48
+const MAX_NODE_FORCE = 24
+const MAX_SPEED = 14
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+const VISIBLE_SETTLE_MS = 1500
+const SETTLE_FADE_MS = 900
+const FIT_SETTLE_MS = 450
+
+interface PhysicsOptions {
+  dampingScale?: number
+  dragScale?: number
+  maxSpeedScale?: number
+  maxForceScale?: number
+}
 
 interface CanvasTheme {
   bg: string
@@ -128,9 +146,19 @@ function fitGraphToView(nodes: GraphNode[], canvasW: number, canvasH: number, pa
   pan.y = canvasH / 2 - centerY * nextZoom
 }
 
-function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, height: number): GraphNode[] {
+function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, height: number, options: PhysicsOptions = {}): GraphNode[] {
   const updated = nodes.map(n => ({ ...n }))
   const index = new Map(updated.map(n => [n.id, n]))
+  const forces = new Map(updated.map(n => [n.id, { x: 0, y: 0 }]))
+  const degree = buildDegreeMap(updated, edges)
+  const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
+  const repulsion = BASE_REPULSION * densityScale * densityScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale)
+  const centerGravity = CENTER_GRAVITY / densityScale
+  const maxSpeed = MAX_SPEED * Math.min(1.8, Math.sqrt(densityScale)) * (options.maxSpeedScale ?? 1)
+  const springDamping = SPRING_DAMPING * (options.dampingScale ?? 1)
+  const mediumDrag = MEDIUM_DRAG_B * (options.dragScale ?? 1)
+  const maxForceScale = options.maxForceScale ?? 1
 
   // repulsion between all pairs
   for (let i = 0; i < updated.length; i++) {
@@ -138,16 +166,21 @@ function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, h
       const a = updated[i], b = updated[j]
       const dx = b.x - a.x
       const dy = b.y - a.y
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1
-      const force = REPULSION / (dist * dist)
-      const fx = (dx / dist) * force
-      const fy = (dy / dist) * force
-      a.vx -= fx; a.vy -= fy
-      b.vx += fx; b.vy += fy
+      const distSq = dx * dx + dy * dy
+      const jitterAngle = ((i * 92821 + j * 68917) % 360) * Math.PI / 180
+      const dist = Math.sqrt(distSq) || 0.1
+      const nx = distSq < 0.01 ? Math.cos(jitterAngle) : dx / dist
+      const ny = distSq < 0.01 ? Math.sin(jitterAngle) : dy / dist
+      const minDist = (NODE_SIZES[a.type] ?? 16) + (NODE_SIZES[b.type] ?? 16) + COLLISION_PADDING
+      const collision = Math.max(0, minDist - dist) * COLLISION_STRENGTH
+      const massScale = Math.sqrt(nodeMass(a, degree) * nodeMass(b, degree))
+      const force = clampForce(((repulsion / Math.max(180, distSq) + collision) / massScale) * maxForceScale)
+      addForce(forces, a.id, -nx * force, -ny * force)
+      addForce(forces, b.id, nx * force, ny * force)
     }
   }
 
-  // spring attraction along edges
+  // spring-damper attraction along edges
   for (const edge of edges) {
     const a = index.get(edge.source)
     const b = index.get(edge.target)
@@ -155,27 +188,298 @@ function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, h
     const dx = b.x - a.x
     const dy = b.y - a.y
     const dist = Math.sqrt(dx * dx + dy * dy) || 1
-    const stretch = dist - SPRING_LENGTH
-    const force = SPRING_STRENGTH * stretch
-    const fx = (dx / dist) * force
-    const fy = (dy / dist) * force
-    a.vx += fx; a.vy += fy
-    b.vx -= fx; b.vy -= fy
+    const nx = dx / dist
+    const ny = dy / dist
+    const desiredLength = springLengthFor(edge.type, springLength)
+    const stretch = dist - desiredLength
+    const relativeVelocity = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
+    const springScale = springDegreeScale(edge.type, a, b, degree)
+    const force = clampForce((SPRING_STRENGTH * stretch + springDamping * relativeVelocity) * springScale * maxForceScale)
+    addForce(forces, a.id, nx * force, ny * force)
+    addForce(forces, b.id, -nx * force, -ny * force)
   }
 
-  // center gravity + integrate
+  // center gravity + viscous drag + semi-implicit Euler integration
   for (const n of updated) {
     if (n.pinned) { n.vx = 0; n.vy = 0; continue }
-    n.vx += -n.x * CENTER_GRAVITY
-    n.vy += -n.y * CENTER_GRAVITY
-    n.vx *= DAMPING
-    n.vy *= DAMPING
+    const force = forces.get(n.id) ?? { x: 0, y: 0 }
+    force.x += -n.x * centerGravity
+    force.y += -n.y * centerGravity
+    const nodeDegree = degree.get(n.id) ?? 0
+    const drag = mediumDrag + Math.sqrt(nodeDegree) * HUB_DRAG_B * (options.dragScale ?? 1)
+    force.x += -drag * n.vx
+    force.y += -drag * n.vy
+    const maxNodeForce = MAX_NODE_FORCE * maxForceScale * Math.sqrt(nodeMass(n, degree))
+    clampVector(force, maxNodeForce)
+    const mass = nodeMass(n, degree)
+    n.vx += force.x / mass
+    n.vy += force.y / mass
     const speed = Math.sqrt(n.vx * n.vx + n.vy * n.vy)
-    if (speed > MAX_SPEED) { n.vx = (n.vx / speed) * MAX_SPEED; n.vy = (n.vy / speed) * MAX_SPEED }
+    const nodeMaxSpeed = maxSpeed / Math.sqrt(mass)
+    if (speed > nodeMaxSpeed) { n.vx = (n.vx / speed) * nodeMaxSpeed; n.vy = (n.vy / speed) * nodeMaxSpeed }
     n.x += n.vx
     n.y += n.vy
   }
   return updated
+}
+
+function buildDegreeMap(nodes: GraphNode[], edges: GraphEdge[]) {
+  const degree = new Map(nodes.map(node => [node.id, 0]))
+  for (const edge of edges) {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1)
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1)
+  }
+  return degree
+}
+
+function nodeMass(node: GraphNode, degree: Map<string, number>) {
+  const links = degree.get(node.id) ?? 0
+  const typeMass = node.type === 'Module' ? 1.5 : node.type === 'File' ? 1.25 : 1
+  return typeMass + Math.sqrt(links) * HUB_MASS
+}
+
+function springDegreeScale(edgeType: EdgeType, a: GraphNode, b: GraphNode, degree: Map<string, number>) {
+  const aDegree = Math.max(1, degree.get(a.id) ?? 1)
+  const bDegree = Math.max(1, degree.get(b.id) ?? 1)
+  const hubScale = 1 / Math.sqrt(Math.max(aDegree, bDegree))
+  const typeScale = edgeType === 'Contains' ? 0.82 : edgeType === 'ApiCall' ? 0.72 : 1
+  return Math.max(0.08, hubScale * typeScale)
+}
+
+function addForce(forces: Map<string, { x: number; y: number }>, id: string, x: number, y: number) {
+  const force = forces.get(id)
+  if (!force) return
+  force.x += x
+  force.y += y
+}
+
+function clampForce(force: number) {
+  return Math.max(-MAX_FORCE, Math.min(MAX_FORCE, force))
+}
+
+function clampVector(vector: { x: number; y: number }, maxLength: number) {
+  const length = Math.sqrt(vector.x * vector.x + vector.y * vector.y)
+  if (length <= maxLength || length === 0) return
+  vector.x = (vector.x / length) * maxLength
+  vector.y = (vector.y / length) * maxLength
+}
+
+function springLengthFor(edgeType: EdgeType, base: number) {
+  switch (edgeType) {
+    case 'Contains':
+      return base * 0.86
+    case 'ApiCall':
+    case 'ExternalDependency':
+      return base * 1.45
+    case 'Renders':
+      return base * 1.18
+    case 'Calls':
+      return base * 1.08
+    default:
+      return base
+  }
+}
+
+function prepareInitialLayout(nodes: GraphNode[], edges: GraphEdge[], previous: Map<string, GraphNode>) {
+  const seeded = seedLayout(nodes, edges, previous)
+  const relaxed = solveEquilibriumLayout(seeded, edges)
+  return relaxed.map((node, index) => {
+    const drift = unitVectorFromId(node.id)
+    const shouldDrift = hash01(`${node.id}:drift`) > 0.72
+    const driftSize = shouldDrift ? 8 + (index % 5) * 1.5 : 2
+    return {
+      ...node,
+      x: node.x + drift.x * driftSize,
+      y: node.y + drift.y * driftSize,
+      vx: shouldDrift ? drift.x * 0.18 : drift.x * 0.035,
+      vy: shouldDrift ? drift.y * 0.18 : drift.y * 0.035,
+    }
+  })
+}
+
+function solveEquilibriumLayout(nodes: GraphNode[], edges: GraphEdge[]) {
+  const iterations = nodes.length > 500 ? 128 : nodes.length > 220 ? 96 : 64
+  let current = nodes.map(node => ({ ...node, vx: 0, vy: 0 }))
+  for (let i = 0; i < iterations; i++) {
+    const progress = i / Math.max(1, iterations - 1)
+    const temperature = 1 - progress
+    const step = 0.72 * temperature + 0.08
+    current = runEquilibriumStep(current, edges, step)
+  }
+  return current.map(node => ({ ...node, vx: 0, vy: 0 }))
+}
+
+function runEquilibriumStep(nodes: GraphNode[], edges: GraphEdge[], step: number) {
+  const updated = nodes.map(node => ({ ...node }))
+  const index = new Map(updated.map(node => [node.id, node]))
+  const forces = new Map(updated.map(node => [node.id, { x: 0, y: 0 }]))
+  const degree = buildDegreeMap(updated, edges)
+  const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
+  const repulsion = BASE_REPULSION * densityScale * densityScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale)
+  const centerGravity = CENTER_GRAVITY / densityScale
+
+  for (let i = 0; i < updated.length; i++) {
+    for (let j = i + 1; j < updated.length; j++) {
+      const a = updated[i], b = updated[j]
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const distSq = dx * dx + dy * dy
+      const jitterAngle = ((i * 92821 + j * 68917) % 360) * Math.PI / 180
+      const dist = Math.sqrt(distSq) || 0.1
+      const nx = distSq < 0.01 ? Math.cos(jitterAngle) : dx / dist
+      const ny = distSq < 0.01 ? Math.sin(jitterAngle) : dy / dist
+      const minDist = (NODE_SIZES[a.type] ?? 16) + (NODE_SIZES[b.type] ?? 16) + COLLISION_PADDING
+      const collision = Math.max(0, minDist - dist) * COLLISION_STRENGTH
+      const massScale = Math.sqrt(nodeMass(a, degree) * nodeMass(b, degree))
+      const force = clampForce((repulsion / Math.max(180, distSq) + collision) / massScale)
+      addForce(forces, a.id, -nx * force, -ny * force)
+      addForce(forces, b.id, nx * force, ny * force)
+    }
+  }
+
+  for (const edge of edges) {
+    const a = index.get(edge.source)
+    const b = index.get(edge.target)
+    if (!a || !b) continue
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1
+    const nx = dx / dist
+    const ny = dy / dist
+    const stretch = dist - springLengthFor(edge.type, springLength)
+    const force = clampForce(SPRING_STRENGTH * stretch * springDegreeScale(edge.type, a, b, degree))
+    addForce(forces, a.id, nx * force, ny * force)
+    addForce(forces, b.id, -nx * force, -ny * force)
+  }
+
+  for (const node of updated) {
+    const force = forces.get(node.id) ?? { x: 0, y: 0 }
+    force.x += -node.x * centerGravity
+    force.y += -node.y * centerGravity
+    const mass = nodeMass(node, degree)
+    clampVector(force, MAX_NODE_FORCE * Math.sqrt(mass))
+    node.x += (force.x / mass) * step
+    node.y += (force.y / mass) * step
+    node.vx = 0
+    node.vy = 0
+  }
+
+  return updated
+}
+
+function averageSpeed(nodes: GraphNode[]) {
+  if (nodes.length === 0) return 0
+  const total = nodes.reduce((sum, node) => sum + Math.sqrt(node.vx * node.vx + node.vy * node.vy), 0)
+  return total / nodes.length
+}
+
+function seedLayout(nodes: GraphNode[], edges: GraphEdge[], previous: Map<string, GraphNode>) {
+  const neighbors = buildNeighborIds(edges)
+  const groups = groupNodes(nodes)
+  const groupCenters = groupCenterMap(groups)
+  const prepared = new Map<string, GraphNode>()
+  const result = nodes.map(node => {
+    const prev = previous.get(node.id)
+    if (prev) {
+      const next = { ...node, x: prev.x, y: prev.y, vx: 0, vy: 0 }
+      prepared.set(node.id, next)
+      return next
+    }
+    const placed = placeNewNode(node, prepared, previous, neighbors, groups, groupCenters)
+    prepared.set(node.id, placed)
+    return placed
+  })
+  return result
+}
+
+function buildNeighborIds(edges: GraphEdge[]) {
+  const neighbors = new Map<string, string[]>()
+  for (const edge of edges) {
+    const source = neighbors.get(edge.source) ?? []
+    source.push(edge.target)
+    neighbors.set(edge.source, source)
+    const target = neighbors.get(edge.target) ?? []
+    target.push(edge.source)
+    neighbors.set(edge.target, target)
+  }
+  return neighbors
+}
+
+function groupNodes(nodes: GraphNode[]) {
+  const groups = new Map<string, GraphNode[]>()
+  for (const node of nodes) {
+    const key = node.crate ?? node.module ?? 'workspace'
+    const group = groups.get(key) ?? []
+    group.push(node)
+    groups.set(key, group)
+  }
+  return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
+}
+
+function groupCenterMap(groups: Array<[string, GraphNode[]]>) {
+  const centers = new Map<string, { x: number; y: number }>()
+  if (groups.length <= 1) {
+    if (groups[0]) centers.set(groups[0][0], { x: 0, y: 0 })
+    return centers
+  }
+  const radius = Math.max(360, groups.length * 115)
+  groups.forEach(([key], index) => {
+    const angle = (Math.PI * 2 * index) / groups.length
+    centers.set(key, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius })
+  })
+  return centers
+}
+
+function placeNewNode(
+  node: GraphNode,
+  prepared: Map<string, GraphNode>,
+  previous: Map<string, GraphNode>,
+  neighbors: Map<string, string[]>,
+  groups: Array<[string, GraphNode[]]>,
+  groupCenters: Map<string, { x: number; y: number }>,
+) {
+  const neighborPositions = (neighbors.get(node.id) ?? [])
+    .map(id => prepared.get(id) ?? previous.get(id))
+    .filter((candidate): candidate is GraphNode => !!candidate)
+
+  if (neighborPositions.length > 0) {
+    const center = neighborPositions.reduce((acc, n) => ({ x: acc.x + n.x, y: acc.y + n.y }), { x: 0, y: 0 })
+    center.x /= neighborPositions.length
+    center.y /= neighborPositions.length
+    const jitter = unitVectorFromId(node.id)
+    const radius = 72 + Math.min(120, neighborPositions.length * 8)
+    return { ...node, x: center.x + jitter.x * radius, y: center.y + jitter.y * radius, vx: 0, vy: 0 }
+  }
+
+  const groupKey = node.crate ?? node.module ?? 'workspace'
+  const group = groups.find(([key]) => key === groupKey)?.[1] ?? []
+  const localIndex = Math.max(0, group.findIndex(candidate => candidate.id === node.id))
+  const center = groupCenters.get(groupKey) ?? { x: 0, y: 0 }
+  const isHub = node.type === 'Module' || node.type === 'File'
+  const ringRadius = isHub ? 55 + Math.sqrt(localIndex + 1) * 18 : 120 + Math.sqrt(localIndex + 1) * 58
+  const angle = localIndex * GOLDEN_ANGLE + hash01(node.id) * Math.PI * 2
+  return {
+    ...node,
+    x: center.x + Math.cos(angle) * ringRadius,
+    y: center.y + Math.sin(angle) * ringRadius,
+    vx: 0,
+    vy: 0,
+  }
+}
+
+function unitVectorFromId(id: string) {
+  const angle = hash01(id) * Math.PI * 2
+  return { x: Math.cos(angle), y: Math.sin(angle) }
+}
+
+function hash01(text: string) {
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0) / 4294967295
 }
 
 // ── Canvas drawing helpers ─────────────────────────────────────────────────
@@ -496,6 +800,8 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
   const graphSignatureRef = useRef('')
   const [hoveredNode, setHoveredNode] = useState<string | null>(null)
   const physicsTicksRef = useRef(0)
+  const settleStartedAtRef = useRef<number | null>(null)
+  const settledRef = useRef(false)
 
   const fitCurrentGraph = useCallback((force = false) => {
     const canvas = canvasRef.current
@@ -507,15 +813,24 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
 
   // keep nodesRef in sync
   useEffect(() => {
-    const signature = nodes.map(n => n.id).join('|')
-    nodesRef.current = nodes
+    const signature = `${nodes.map(n => n.id).join('|')}::${edges.map(e => e.id).join('|')}`
     if (signature !== graphSignatureRef.current) {
+      const previous = new Map(nodesRef.current.map(node => [node.id, node]))
       graphSignatureRef.current = signature
+      nodesRef.current = prepareInitialLayout(nodes, edges, previous)
       physicsTicksRef.current = 0
+      settleStartedAtRef.current = null
+      settledRef.current = false
       userNavigatedRef.current = false
       requestAnimationFrame(() => fitCurrentGraph(true))
+    } else {
+      const current = new Map(nodesRef.current.map(node => [node.id, node]))
+      nodesRef.current = nodes.map(node => {
+        const existing = current.get(node.id)
+        return existing ? { ...node, x: existing.x, y: existing.y, vx: existing.vx, vy: existing.vy } : { ...node, vx: 0, vy: 0 }
+      })
     }
-  }, [fitCurrentGraph, nodes])
+  }, [edges, fitCurrentGraph, nodes])
 
   useEffect(() => {
     userNavigatedRef.current = false
@@ -605,14 +920,37 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       const H = canvas.height / dpr
       const canvasColors = canvasTheme()
 
-      // run physics for first 300 ticks then slow down
-      if (physicsTicksRef.current < 300) {
+      if (settleStartedAtRef.current === null) {
+        settleStartedAtRef.current = ts
+      }
+      const settleElapsed = ts - settleStartedAtRef.current
+      if (settleElapsed <= VISIBLE_SETTLE_MS) {
         nodesRef.current = runPhysicsTick(nodesRef.current, edges, W, H)
         physicsTicksRef.current++
-        if (!userNavigatedRef.current && physicsTicksRef.current < 120) {
+        if (!userNavigatedRef.current && settleElapsed < FIT_SETTLE_MS) {
           fitGraphToView(nodesRef.current, W, H, panRef.current, zoomRef)
         }
         if (physicsTicksRef.current % 60 === 0) {
+          onUpdateNodes([...nodesRef.current])
+        }
+      } else if (!settledRef.current) {
+        const fadeProgress = Math.min(1, (settleElapsed - VISIBLE_SETTLE_MS) / SETTLE_FADE_MS)
+        const dampingScale = 2.4 + fadeProgress * 4.6
+        const dragScale = 2.2 + fadeProgress * 5.2
+        const velocityFade = 1 - 0.08 - fadeProgress * 0.18
+        nodesRef.current = runPhysicsTick(nodesRef.current, edges, W, H, {
+          dampingScale,
+          dragScale,
+          maxSpeedScale: 0.55,
+          maxForceScale: 0.45,
+        }).map(node => ({
+          ...node,
+          vx: node.vx * Math.max(0.68, velocityFade),
+          vy: node.vy * Math.max(0.68, velocityFade),
+        }))
+        physicsTicksRef.current++
+        if (averageSpeed(nodesRef.current) < 0.012 || fadeProgress >= 1) {
+          settledRef.current = true
           onUpdateNodes([...nodesRef.current])
         }
       }

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import {
   Search, RefreshCw, Minimize2, Focus, Download, Settings,
-  Clock, Zap, Sun, Moon
+  Clock, Zap, Sun, Moon, SlidersHorizontal
 } from 'lucide-react'
 import type { AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
 
@@ -17,7 +17,10 @@ interface TopToolbarProps {
   onCollapse: () => void
   onFocusMode: () => void
   onThemeToggle: () => void
+  onClarityToggle: () => void
   focusModeActive: boolean
+  clarityOpen: boolean
+  clarityActive: boolean
   theme: ThemeMode
 }
 
@@ -44,7 +47,7 @@ const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: s
 }
 
 export function TopToolbar({
-  appState, analyzerStatus, message, mode, onModeChange, onSearchOpen, onSettingsOpen, onRecenter, onCollapse, onFocusMode, onThemeToggle, focusModeActive, theme
+  appState, analyzerStatus, message, mode, onModeChange, onSearchOpen, onSettingsOpen, onRecenter, onCollapse, onFocusMode, onThemeToggle, onClarityToggle, focusModeActive, clarityOpen, clarityActive, theme
 }: TopToolbarProps) {
   const status = appState === 'empty' ? STATUS_CONFIG.empty : STATUS_CONFIG[analyzerStatus]
 
@@ -164,6 +167,29 @@ export function TopToolbar({
         >
           ⌘K
         </span>
+      </button>
+
+      <button
+        onClick={onClarityToggle}
+        className="flex items-center gap-1.5 rounded-lg transition-all shrink-0"
+        title="Graph clarity"
+        style={{
+          height: 32,
+          padding: '6px 10px',
+          background: clarityOpen ? 'rgba(6,182,212,0.14)' : clarityActive ? 'rgba(6,182,212,0.08)' : 'var(--cc-surface)',
+          border: clarityOpen ? '1px solid rgba(6,182,212,0.38)' : '1px solid var(--cc-border)',
+          color: clarityOpen || clarityActive ? '#06B6D4' : 'var(--cc-text-subtle)',
+          cursor: 'pointer',
+          fontSize: 11,
+          fontWeight: clarityOpen ? 650 : 550,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <SlidersHorizontal size={13} />
+        <span>Clarity</span>
+        {clarityActive && (
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#06B6D4' }} />
+        )}
       </button>
 
       <div className="flex-1" />

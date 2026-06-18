@@ -40,7 +40,7 @@ export default function App() {
   const [timelineCollapsed, setTimelineCollapsed] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [showDenseSuggestion, setShowDenseSuggestion] = useState(false)
+  const [clarityOpen, setClarityOpen] = useState(false)
   const [focusModeActive, setFocusModeActive] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
   const [recenterKey, setRecenterKey] = useState(0)
@@ -99,16 +99,6 @@ export default function App() {
   useEffect(() => {
     refreshSnapshot(mode)
   }, [mode, refreshSnapshot])
-
-  useEffect(() => {
-    if (nodes.length > 120) setShowDenseSuggestion(true)
-  }, [nodes.length])
-
-  useEffect(() => {
-    if (nodes.length > 250 && graphLens === 'all' && mode === 'Meso') {
-      setGraphLens('architecture')
-    }
-  }, [graphLens, mode, nodes.length])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -187,7 +177,10 @@ export default function App() {
         onCollapse={() => setGraphLens(current => current === 'architecture' ? 'all' : 'architecture')}
         onFocusMode={handleFocusModeToggle}
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
+        onClarityToggle={() => setClarityOpen(open => !open)}
         focusModeActive={focusModeActive}
+        clarityOpen={clarityOpen}
+        clarityActive={graphLens !== 'all' || filters.depth !== 'full' || !filters.showExternal || !filters.showTests}
         theme={theme}
       />
 
@@ -235,34 +228,45 @@ export default function App() {
             />
           )}
 
-          {/* dense graph suggestion */}
-          {showDenseSuggestion && (
+          <div
+            className="absolute top-3 right-5 z-20 transition-all duration-200 ease-out"
+            style={{
+              opacity: clarityOpen ? 1 : 0,
+              transform: clarityOpen ? 'translateY(0) scale(1)' : 'translateY(-8px) scale(0.98)',
+              transformOrigin: 'top right',
+              pointerEvents: clarityOpen ? 'auto' : 'none',
+            }}
+          >
             <DenseGraphSuggestion
-              onDismiss={() => setShowDenseSuggestion(false)}
-              onArchitectureView={() => {
-                setGraphLens('architecture')
-                setShowDenseSuggestion(false)
-              }}
-              onApiBridge={() => {
-                setGraphLens('api')
-                setShowDenseSuggestion(false)
-              }}
+              graphLens={graphLens}
+              totalNodes={graphNodes.length}
+              visibleNodes={visibleGraphNodes.length}
+              totalEdges={edges.length}
+              visibleEdges={visibleGraphEdges.length}
+              depth={filters.depth}
+              externalHidden={!filters.showExternal || !filters.nodeTypes.has('ExternalCrate')}
+              testsHidden={!filters.showTests}
+              canFocus={!!selectedNodeId}
+              onDismiss={() => setClarityOpen(false)}
+              onLensChange={setGraphLens}
               onHideExternal={() => {
                 setFilters(f => {
                   const next = new Set(f.nodeTypes)
-                  next.delete('ExternalCrate')
-                  return { ...f, nodeTypes: next, showExternal: false }
+                  if (next.has('ExternalCrate')) {
+                    next.delete('ExternalCrate')
+                    return { ...f, nodeTypes: next, showExternal: false }
+                  }
+                  next.add('ExternalCrate')
+                  return { ...f, nodeTypes: next, showExternal: true }
                 })
-                setShowDenseSuggestion(false)
               }}
-              onHideTests={() => { setFilters(f => ({ ...f, showTests: false })); setShowDenseSuggestion(false) }}
-              onDepth2={() => { setFilters(f => ({ ...f, depth: 2 })); setShowDenseSuggestion(false) }}
+              onHideTests={() => setFilters(f => ({ ...f, showTests: !f.showTests }))}
+              onDepth2={() => setFilters(f => ({ ...f, depth: f.depth === 2 ? 'full' : 2 }))}
               onFocusBubble={() => {
                 if (selectedNodeId) handleFocusBubble(selectedNodeId)
-                setShowDenseSuggestion(false)
               }}
             />
-          )}
+          </div>
 
           {/* graph metadata overlay */}
           <div
