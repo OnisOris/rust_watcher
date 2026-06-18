@@ -1,0 +1,1133 @@
+use graph_core::{
+    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, EdgeType, GraphEdge,
+    GraphMode, GraphNode, GraphSnapshot, NodeType, ProjectFile, Visibility,
+};
+use project_indexer::{IndexedFile, ProjectIndex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::path::Path;
+use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredSymbol {
+    pub name: String,
+    pub detail: Option<String>,
+    pub kind: SymbolKindName,
+    pub line: u32,
+    pub children: Vec<DiscoveredSymbol>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKindName {
+    File,
+    Module,
+    Struct,
+    Enum,
+    Trait,
+    Function,
+    Method,
+    Constructor,
+    Object,
+    Package,
+    Namespace,
+    Class,
+    Macro,
+    Other,
+}
+
+pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> GraphSnapshot {
+    status.project_name = Some(index.name.clone());
+    status.project_path = Some(index.root.display().to_string());
+
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    let include_workspace_node = index.packages.len() != 1;
+    let workspace_id = format!("workspace:{}", index.name);
+    if include_workspace_node {
+        nodes.push(node(
+            workspace_id.clone(),
+            NodeType::Module,
+            index.name.clone(),
+            None,
+            Some("workspace".into()),
+            None,
+            None,
+            0.0,
+            0.0,
+        ));
+    }
+
+    for (idx, package) in index.packages.iter().enumerate() {
+        let angle = spread_angle(idx, index.packages.len());
+        let package_node_id = crate_id(&package.name);
+        let (x, y) = if include_workspace_node {
+            (angle.cos() * 190.0, angle.sin() * 190.0)
+        } else {
+            (0.0, 0.0)
+        };
+        nodes.push(node(
+            package_node_id.clone(),
+            NodeType::Module,
+            package.name.clone(),
+            None,
+            Some("crate root".into()),
+            Some(package.name.clone()),
+            None,
+            x,
+            y,
+        ));
+        if include_workspace_node {
+            edges.push(edge(EdgeType::Contains, &workspace_id, &package_node_id));
+        }
+
+        for dep in &package.dependencies {
+            if index.packages.iter().any(|pkg| pkg.name == *dep) {
+                edges.push(edge(EdgeType::Uses, &package_node_id, &crate_id(dep)));
+            } else {
+                let external_id = external_id(dep);
+                if !nodes.iter().any(|n| n.id == external_id) {
+                    let dep_count = package.dependencies.len().max(1);
+                    let dep_idx = nodes.len();
+                    let dep_angle = spread_angle(dep_idx, dep_count + index.packages.len());
+                    nodes.push(node(
+                        external_id.clone(),
+                        NodeType::ExternalCrate,
+                        dep.clone(),
+                        None,
+                        None,
+                        Some("external".into()),
+                        None,
+                        dep_angle.cos() * 390.0,
+                        dep_angle.sin() * 390.0,
+                    ));
+                }
+                edges.push(edge(
+                    EdgeType::ExternalDependency,
+                    &package_node_id,
+                    &external_id,
+                ));
+            }
+        }
+    }
+
+    for (idx, file) in index.files.iter().enumerate() {
+        let file_id = file_id(&file.relative_path);
+        let crate_id = crate_id(&file.package_name);
+        let angle = spread_angle(idx, index.files.len().max(1));
+        nodes.push(node(
+            file_id.clone(),
+            NodeType::File,
+            Path::new(&file.relative_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file.relative_path)
+                .to_string(),
+            Some(file.relative_path.clone()),
+            Some(file.module_path.clone()),
+            Some(file.package_name.clone()),
+            None,
+            angle.cos() * 280.0,
+            angle.sin() * 280.0,
+        ));
+        edges.push(edge(EdgeType::Contains, &crate_id, &file_id));
+    }
+
+    let mut snapshot = GraphSnapshot {
+        nodes,
+        edges,
+        files: Vec::new(),
+        events: Vec::new(),
+        status,
+    };
+
+    let mut syntax_symbols_count = 0usize;
+    for file in &index.files {
+        let symbols = discover_syntax_symbols(file);
+        syntax_symbols_count += symbols.len();
+        enrich_file_symbols(&mut snapshot, file, &symbols);
+    }
+    enrich_syntax_relationships(&mut snapshot, &index.files);
+
+    update_connections(&mut snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files(&index.files, &snapshot.nodes, &snapshot.edges);
+    snapshot.events = vec![event(
+        AnalysisEventType::Graph,
+        format!(
+            "Fallback graph built: {} files, {} syntax symbols, {} nodes, {} edges",
+            snapshot.files.len(),
+            syntax_symbols_count,
+            snapshot.nodes.len(),
+            snapshot.edges.len()
+        ),
+        None,
+    )];
+    snapshot
+}
+
+pub fn enrich_file_symbols(
+    snapshot: &mut GraphSnapshot,
+    file: &IndexedFile,
+    symbols: &[DiscoveredSymbol],
+) {
+    let file_node_id = file_id(&file.relative_path);
+    let mut new_nodes = Vec::new();
+    let mut new_edges = Vec::new();
+    for symbol in symbols {
+        push_symbol(
+            &mut new_nodes,
+            &mut new_edges,
+            &file_node_id,
+            file,
+            symbol,
+            0,
+        );
+    }
+    snapshot.nodes.extend(new_nodes);
+    snapshot.edges.extend(new_edges);
+    dedupe_graph(snapshot);
+    update_connections(&mut snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
+}
+
+pub fn discover_syntax_symbols(file: &IndexedFile) -> Vec<DiscoveredSymbol> {
+    let Ok(source) = fs::read_to_string(&file.absolute_path) else {
+        return Vec::new();
+    };
+    let mut symbols = Vec::new();
+    let mut container: Option<DiscoveredSymbol> = None;
+    let mut container_depth = 0i32;
+
+    for (line_idx, raw_line) in source.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        let line = strip_visibility(line);
+        let line = line.strip_prefix("async ").unwrap_or(line);
+        let line = line.strip_prefix("unsafe ").unwrap_or(line);
+
+        if let Some(active) = container.as_mut() {
+            if let Some(name) = item_name(line, "fn ") {
+                active.children.push(syntax_symbol(
+                    scoped_method_label(&active.name, name),
+                    raw_line,
+                    SymbolKindName::Method,
+                    line_idx,
+                ));
+            }
+            container_depth += brace_delta(line);
+            if container_depth <= 0 {
+                if let Some(done) = container.take() {
+                    symbols.push(done);
+                }
+            }
+            continue;
+        }
+
+        if let Some(name) = item_name(line, "struct ") {
+            symbols.push(syntax_symbol(
+                name,
+                raw_line,
+                SymbolKindName::Struct,
+                line_idx,
+            ));
+        } else if let Some(name) = item_name(line, "enum ") {
+            symbols.push(syntax_symbol(
+                name,
+                raw_line,
+                SymbolKindName::Enum,
+                line_idx,
+            ));
+        } else if let Some(name) = item_name(line, "trait ") {
+            symbols.push(syntax_symbol(
+                name,
+                raw_line,
+                SymbolKindName::Trait,
+                line_idx,
+            ));
+        } else if let Some(name) = item_name(line, "fn ") {
+            symbols.push(syntax_symbol(
+                name,
+                raw_line,
+                SymbolKindName::Function,
+                line_idx,
+            ));
+        } else if let Some(name) = item_name(line, "macro_rules! ") {
+            symbols.push(syntax_symbol(
+                name,
+                raw_line,
+                SymbolKindName::Macro,
+                line_idx,
+            ));
+        } else if line.starts_with("impl") {
+            let symbol = syntax_symbol(impl_label(line), raw_line, SymbolKindName::Other, line_idx);
+            container_depth = brace_delta(line);
+            if container_depth > 0 {
+                container = Some(symbol);
+            } else {
+                symbols.push(symbol);
+            }
+            continue;
+        } else {
+            continue;
+        }
+
+        if let Some(last) = symbols.last() {
+            if matches!(last.kind, SymbolKindName::Trait) {
+                let symbol = symbols.pop().expect("last symbol exists");
+                container_depth = brace_delta(line);
+                if container_depth > 0 {
+                    container = Some(symbol);
+                } else {
+                    symbols.push(symbol);
+                }
+            }
+        }
+    }
+    if let Some(done) = container {
+        symbols.push(done);
+    }
+    symbols
+}
+
+fn enrich_syntax_relationships(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) {
+    let existing_edges: HashSet<_> = snapshot.edges.iter().map(|edge| edge.id.clone()).collect();
+    let mut new_edges = Vec::new();
+    let node_index = SyntaxNodeIndex::new(&snapshot.nodes);
+
+    for file in files {
+        let Ok(source) = fs::read_to_string(&file.absolute_path) else {
+            continue;
+        };
+        let mut current_fn: Option<String> = None;
+        let mut function_depth = 0i32;
+
+        for (line_idx, raw_line) in source.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.starts_with("//") {
+                continue;
+            }
+            let normalized = strip_visibility(line);
+            let normalized = normalized.strip_prefix("async ").unwrap_or(normalized);
+            let normalized = normalized.strip_prefix("unsafe ").unwrap_or(normalized);
+
+            if let Some(impl_text) = normalized.strip_prefix("impl ") {
+                add_impl_edges(
+                    &node_index,
+                    &mut new_edges,
+                    &existing_edges,
+                    file,
+                    line,
+                    impl_text,
+                );
+            }
+
+            let is_function_declaration = item_name(normalized, "fn ").is_some();
+            if item_name(normalized, "fn ").is_some() {
+                current_fn = node_index
+                    .by_file_and_line
+                    .get(&(file.relative_path.clone(), line_idx as u32 + 1))
+                    .cloned();
+                function_depth = 0;
+            }
+
+            if !is_function_declaration {
+                if let Some(source_id) = &current_fn {
+                    add_function_relationships(&node_index, &mut new_edges, source_id, line);
+                }
+            }
+
+            if current_fn.is_some() {
+                function_depth += line.matches('{').count() as i32;
+                function_depth -= line.matches('}').count() as i32;
+                if function_depth <= 0 && line.contains('}') {
+                    current_fn = None;
+                }
+            }
+        }
+    }
+
+    for edge in new_edges {
+        if !snapshot.edges.iter().any(|existing| existing.id == edge.id) {
+            snapshot.edges.push(edge);
+        }
+    }
+}
+
+struct SyntaxNodeIndex {
+    by_label: HashMap<String, Vec<GraphNode>>,
+    by_label_and_file: HashMap<(String, String), String>,
+    by_file_and_line: HashMap<(String, u32), String>,
+}
+
+impl SyntaxNodeIndex {
+    fn new(nodes: &[GraphNode]) -> Self {
+        let mut by_label: HashMap<String, Vec<GraphNode>> = HashMap::new();
+        let mut by_label_and_file = HashMap::new();
+        let mut by_file_and_line = HashMap::new();
+        for node in nodes {
+            by_label
+                .entry(node.label.clone())
+                .or_default()
+                .push(node.clone());
+            if let Some(file) = &node.file {
+                by_label_and_file.insert((node.label.clone(), file.clone()), node.id.clone());
+                if let Some(line) = node.line {
+                    by_file_and_line.insert((file.clone(), line), node.id.clone());
+                }
+            }
+        }
+        Self {
+            by_label,
+            by_label_and_file,
+            by_file_and_line,
+        }
+    }
+
+    fn first_of_type(&self, label: &str, node_type: NodeType) -> Option<&GraphNode> {
+        self.by_label
+            .get(label)?
+            .iter()
+            .find(|node| node.node_type == node_type)
+    }
+
+    fn symbols_of_type(&self, node_type: NodeType) -> impl Iterator<Item = &GraphNode> {
+        self.by_label
+            .values()
+            .flat_map(|nodes| nodes.iter())
+            .filter(move |node| node.node_type == node_type)
+    }
+}
+
+fn add_impl_edges(
+    index: &SyntaxNodeIndex,
+    edges: &mut Vec<GraphEdge>,
+    existing_edges: &HashSet<String>,
+    file: &IndexedFile,
+    line: &str,
+    impl_text: &str,
+) {
+    let Some(impl_id) = index
+        .by_label_and_file
+        .get(&(impl_label(line).to_string(), file.relative_path.clone()))
+        .cloned()
+    else {
+        return;
+    };
+    let impl_head = impl_text.split('{').next().unwrap_or(impl_text).trim();
+    if let Some((trait_name, type_name)) = impl_head.split_once(" for ") {
+        let trait_name = clean_type_name(trait_name);
+        let type_name = clean_type_name(type_name);
+        if let Some(trait_node) = index.first_of_type(&trait_name, NodeType::Trait) {
+            push_unique_edge(
+                edges,
+                existing_edges,
+                EdgeType::Implements,
+                &impl_id,
+                &trait_node.id,
+            );
+        }
+        if let Some(type_node) = index
+            .first_of_type(&type_name, NodeType::Struct)
+            .or_else(|| index.first_of_type(&type_name, NodeType::Enum))
+        {
+            push_unique_edge(
+                edges,
+                existing_edges,
+                EdgeType::TypeReference,
+                &impl_id,
+                &type_node.id,
+            );
+        }
+    } else {
+        let type_name = clean_type_name(impl_head);
+        if let Some(type_node) = index
+            .first_of_type(&type_name, NodeType::Struct)
+            .or_else(|| index.first_of_type(&type_name, NodeType::Enum))
+        {
+            push_unique_edge(
+                edges,
+                existing_edges,
+                EdgeType::TypeReference,
+                &impl_id,
+                &type_node.id,
+            );
+        }
+    }
+}
+
+fn add_function_relationships(
+    index: &SyntaxNodeIndex,
+    edges: &mut Vec<GraphEdge>,
+    source_id: &str,
+    line: &str,
+) {
+    for target in index.symbols_of_type(NodeType::Function) {
+        if target.id == source_id {
+            continue;
+        }
+        if contains_call(line, &target.label) {
+            push_unique_edge(
+                edges,
+                &HashSet::new(),
+                EdgeType::Calls,
+                source_id,
+                &target.id,
+            );
+        }
+    }
+
+    for target in index.symbols_of_type(NodeType::Method) {
+        let method_name = target.label.rsplit("::").next().unwrap_or(&target.label);
+        if method_call_matches(index, target, method_name, line) {
+            push_unique_edge(
+                edges,
+                &HashSet::new(),
+                EdgeType::Calls,
+                source_id,
+                &target.id,
+            );
+        }
+    }
+
+    for target in index
+        .symbols_of_type(NodeType::Struct)
+        .chain(index.symbols_of_type(NodeType::Enum))
+        .chain(index.symbols_of_type(NodeType::Trait))
+    {
+        let construct = format!("{} {{", target.label);
+        let associated = format!("{}::", target.label);
+        let type_annotation = format!(": {}", target.label);
+        let ref_type_annotation = format!(": &{}", target.label);
+        let return_type = format!("-> {}", target.label);
+        if line.contains(&construct)
+            || line.contains(&associated)
+            || line.contains(&type_annotation)
+            || line.contains(&ref_type_annotation)
+            || line.contains(&return_type)
+        {
+            push_unique_edge(
+                edges,
+                &HashSet::new(),
+                EdgeType::TypeReference,
+                source_id,
+                &target.id,
+            );
+        }
+        if line.contains(&construct) || line.contains(&associated) {
+            push_unique_edge(
+                edges,
+                &HashSet::new(),
+                EdgeType::DataFlow,
+                &target.id,
+                source_id,
+            );
+        }
+    }
+}
+
+fn push_unique_edge(
+    edges: &mut Vec<GraphEdge>,
+    existing_edges: &HashSet<String>,
+    edge_type: EdgeType,
+    source: &str,
+    target: &str,
+) {
+    let id = edge_id(edge_type, source, target);
+    if existing_edges.contains(&id) || edges.iter().any(|edge| edge.id == id) {
+        return;
+    }
+    edges.push(GraphEdge {
+        id,
+        source: source.to_string(),
+        target: target.to_string(),
+        edge_type,
+    });
+}
+
+fn contains_call(line: &str, name: &str) -> bool {
+    let pattern = format!("{name}(");
+    let mut search_from = 0;
+    while let Some(offset) = line[search_from..].find(&pattern) {
+        let start = search_from + offset;
+        let prev = line[..start].chars().next_back();
+        let valid_prefix = prev
+            .map(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(true);
+        if valid_prefix {
+            return true;
+        }
+        search_from = start + pattern.len();
+    }
+    false
+}
+
+fn method_call_matches(
+    index: &SyntaxNodeIndex,
+    target: &GraphNode,
+    method_name: &str,
+    line: &str,
+) -> bool {
+    if line.contains(&format!("{}(", target.label)) {
+        return true;
+    }
+    if !line.contains(&format!(".{method_name}(")) {
+        return false;
+    }
+    target
+        .label
+        .rsplit_once("::")
+        .map(|(owner, _)| index.first_of_type(owner, NodeType::Trait).is_none())
+        .unwrap_or(true)
+}
+
+pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapshot {
+    let (node_types, edge_types): (HashSet<NodeType>, HashSet<EdgeType>) = match mode {
+        GraphMode::Macro => (
+            [NodeType::Module, NodeType::File, NodeType::ExternalCrate]
+                .into_iter()
+                .collect(),
+            [
+                EdgeType::Contains,
+                EdgeType::Uses,
+                EdgeType::ModDeclaration,
+                EdgeType::ExternalDependency,
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        GraphMode::Meso | GraphMode::Micro => (
+            [
+                NodeType::File,
+                NodeType::Module,
+                NodeType::Struct,
+                NodeType::Enum,
+                NodeType::Trait,
+                NodeType::Impl,
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::Macro,
+            ]
+            .into_iter()
+            .collect(),
+            [
+                EdgeType::Contains,
+                EdgeType::TypeReference,
+                EdgeType::Implements,
+                EdgeType::Uses,
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        GraphMode::CallFlow => (
+            [NodeType::Function, NodeType::Method].into_iter().collect(),
+            [EdgeType::Calls].into_iter().collect(),
+        ),
+        GraphMode::DataFlow => (
+            [
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::Struct,
+                NodeType::Enum,
+                NodeType::Trait,
+            ]
+            .into_iter()
+            .collect(),
+            [EdgeType::DataFlow, EdgeType::Contains]
+                .into_iter()
+                .collect(),
+        ),
+        GraphMode::Traits => (
+            [
+                NodeType::Trait,
+                NodeType::Impl,
+                NodeType::Struct,
+                NodeType::Enum,
+                NodeType::Method,
+            ]
+            .into_iter()
+            .collect(),
+            [
+                EdgeType::Implements,
+                EdgeType::Contains,
+                EdgeType::TypeReference,
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    };
+
+    let mut nodes: Vec<_> = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node_types.contains(&node.node_type))
+        .cloned()
+        .collect();
+    let node_ids: HashSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
+    let mut edges: Vec<_> = snapshot
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge_types.contains(&edge.edge_type)
+                && node_ids.contains(edge.source.as_str())
+                && node_ids.contains(edge.target.as_str())
+        })
+        .cloned()
+        .collect();
+
+    if matches!(mode, GraphMode::CallFlow) && edges.is_empty() {
+        edges = snapshot
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.edge_type == EdgeType::Contains
+                    && node_ids.contains(edge.source.as_str())
+                    && node_ids.contains(edge.target.as_str())
+            })
+            .cloned()
+            .collect();
+    }
+
+    if matches!(
+        mode,
+        GraphMode::CallFlow | GraphMode::DataFlow | GraphMode::Traits
+    ) {
+        let semantic_edge_type = match mode {
+            GraphMode::CallFlow => Some(EdgeType::Calls),
+            GraphMode::DataFlow => Some(EdgeType::DataFlow),
+            GraphMode::Traits => None,
+            _ => None,
+        };
+        let semantic_node_ids: HashSet<_> = edges
+            .iter()
+            .filter(|edge| {
+                semantic_edge_type
+                    .map(|edge_type| edge.edge_type == edge_type)
+                    .unwrap_or(true)
+            })
+            .flat_map(|edge| [edge.source.clone(), edge.target.clone()])
+            .collect();
+        if !semantic_node_ids.is_empty() {
+            nodes.retain(|node| semantic_node_ids.contains(&node.id));
+            edges.retain(|edge| {
+                semantic_node_ids.contains(&edge.source) && semantic_node_ids.contains(&edge.target)
+            });
+        }
+    }
+
+    let mut filtered = snapshot.clone();
+    filtered.nodes = nodes;
+    filtered.edges = edges;
+    filtered
+}
+
+pub fn focus_subgraph(
+    snapshot: &GraphSnapshot,
+    node_id: &str,
+    depth: Option<u8>,
+) -> Option<(Vec<GraphNode>, Vec<GraphEdge>)> {
+    if !snapshot.nodes.iter().any(|node| node.id == node_id) {
+        return None;
+    }
+    let max_depth = depth.unwrap_or(u8::MAX);
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([(node_id.to_string(), 0u8)]);
+    seen.insert(node_id.to_string());
+
+    while let Some((current, current_depth)) = queue.pop_front() {
+        if current_depth >= max_depth {
+            continue;
+        }
+        for edge in &snapshot.edges {
+            let next = if edge.source == current {
+                Some(edge.target.clone())
+            } else if edge.target == current {
+                Some(edge.source.clone())
+            } else {
+                None
+            };
+            if let Some(next) = next {
+                if seen.insert(next.clone()) {
+                    queue.push_back((next, current_depth.saturating_add(1)));
+                }
+            }
+        }
+    }
+
+    let nodes = snapshot
+        .nodes
+        .iter()
+        .filter(|node| seen.contains(&node.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let edges = snapshot
+        .edges
+        .iter()
+        .filter(|edge| seen.contains(&edge.source) && seen.contains(&edge.target))
+        .cloned()
+        .collect::<Vec<_>>();
+    Some((nodes, edges))
+}
+
+fn push_symbol(
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+    parent_id: &str,
+    file: &IndexedFile,
+    symbol: &DiscoveredSymbol,
+    depth: usize,
+) {
+    let node_type = map_kind(symbol);
+    if node_type.is_none() {
+        for child in &symbol.children {
+            push_symbol(nodes, edges, parent_id, file, child, depth + 1);
+        }
+        return;
+    }
+    let node_type = node_type.unwrap();
+    let id = symbol_id(node_type, file, &symbol.name, symbol.line);
+    let signature = symbol.detail.clone().filter(|detail| !detail.is_empty());
+    let text = signature.as_deref().unwrap_or(&symbol.name);
+    nodes.push(GraphNode {
+        id: id.clone(),
+        node_type,
+        label: symbol.name.clone(),
+        file: Some(file.relative_path.clone()),
+        module: Some(file.module_path.clone()),
+        crate_name: Some(file.package_name.clone()),
+        line: Some(symbol.line),
+        visibility: Some(infer_visibility(text)),
+        is_async: Some(text.contains("async fn")),
+        is_unsafe: Some(text.contains("unsafe fn") || text.contains("unsafe ")),
+        is_generic: Some(text.contains('<') && text.contains('>')),
+        signature,
+        description: None,
+        pinned: None,
+        bookmarked: None,
+        connections: None,
+        x: 120.0 + (depth as f64 * 60.0) + (symbol.line as f64 % 17.0) * 6.0,
+        y: (symbol.line as f64 * 13.0) % 420.0 - 210.0,
+        vx: 0.0,
+        vy: 0.0,
+    });
+    edges.push(edge(EdgeType::Contains, parent_id, &id));
+    for child in &symbol.children {
+        push_symbol(nodes, edges, &id, file, child, depth + 1);
+    }
+}
+
+fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
+    if symbol.name.starts_with("impl ") || symbol.name.contains(" impl ") {
+        return Some(NodeType::Impl);
+    }
+    match symbol.kind {
+        SymbolKindName::File => Some(NodeType::File),
+        SymbolKindName::Module | SymbolKindName::Package | SymbolKindName::Namespace => {
+            Some(NodeType::Module)
+        }
+        SymbolKindName::Struct | SymbolKindName::Object | SymbolKindName::Class => {
+            Some(NodeType::Struct)
+        }
+        SymbolKindName::Enum => Some(NodeType::Enum),
+        SymbolKindName::Trait => Some(NodeType::Trait),
+        SymbolKindName::Function => Some(NodeType::Function),
+        SymbolKindName::Method | SymbolKindName::Constructor => Some(NodeType::Method),
+        SymbolKindName::Macro => Some(NodeType::Macro),
+        SymbolKindName::Other => None,
+    }
+}
+
+fn strip_visibility(line: &str) -> &str {
+    line.strip_prefix("pub(crate) ")
+        .or_else(|| line.strip_prefix("pub(super) "))
+        .or_else(|| line.strip_prefix("pub "))
+        .unwrap_or(line)
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.matches('{').count() as i32 - line.matches('}').count() as i32
+}
+
+fn scoped_method_label(container_name: &str, method_name: &str) -> String {
+    let owner = if let Some(rest) = container_name.strip_prefix("impl ") {
+        if let Some((_, type_name)) = rest.split_once(" for ") {
+            clean_type_name(type_name)
+        } else {
+            clean_type_name(rest)
+        }
+    } else {
+        container_name.to_string()
+    };
+    format!("{owner}::{method_name}")
+}
+
+fn item_name<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(prefix)?.trim_start();
+    let name = rest
+        .split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '{' | '(' | '<' | ':' | ';' | '=' | ',' | '!')
+        })
+        .next()
+        .unwrap_or_default();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn impl_label(line: &str) -> &str {
+    line.split('{').next().unwrap_or(line).trim()
+}
+
+fn clean_type_name(text: &str) -> String {
+    text.trim()
+        .trim_start_matches('&')
+        .trim_start_matches("mut ")
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '{' | '(' | ':' | ';'))
+        .next()
+        .unwrap_or_default()
+        .trim_matches(',')
+        .to_string()
+}
+
+fn syntax_symbol(
+    name: impl Into<String>,
+    raw_line: &str,
+    kind: SymbolKindName,
+    line_idx: usize,
+) -> DiscoveredSymbol {
+    DiscoveredSymbol {
+        name: name.into(),
+        detail: Some(raw_line.trim().to_string()),
+        kind,
+        line: line_idx as u32 + 1,
+        children: Vec::new(),
+    }
+}
+
+fn build_project_files(
+    files: &[IndexedFile],
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+) -> Vec<ProjectFile> {
+    files
+        .iter()
+        .map(|file| {
+            let file_node_id = file_id(&file.relative_path);
+            let functions_count = nodes
+                .iter()
+                .filter(|node| {
+                    node.file.as_deref() == Some(&file.relative_path)
+                        && matches!(node.node_type, NodeType::Function | NodeType::Method)
+                })
+                .count() as u32;
+            let links_count = edges
+                .iter()
+                .filter(|edge| edge.source == file_node_id || edge.target == file_node_id)
+                .count() as u32;
+            project_file(file, functions_count, links_count)
+        })
+        .collect()
+}
+
+fn build_project_files_from_snapshot(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<ProjectFile> {
+    let mut by_path: HashMap<String, (&GraphNode, u32)> = HashMap::new();
+    for node in nodes.iter().filter(|node| node.node_type == NodeType::File) {
+        if let Some(file) = &node.file {
+            let functions_count = nodes
+                .iter()
+                .filter(|symbol| {
+                    symbol.file.as_deref() == Some(file)
+                        && matches!(symbol.node_type, NodeType::Function | NodeType::Method)
+                })
+                .count() as u32;
+            by_path.insert(file.clone(), (node, functions_count));
+        }
+    }
+    let mut files = by_path
+        .into_iter()
+        .map(|(path, (node, functions_count))| {
+            let links_count = edges
+                .iter()
+                .filter(|edge| edge.source == node.id || edge.target == node.id)
+                .count() as u32;
+            ProjectFile {
+                id: node.id.clone(),
+                name: Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&path)
+                    .to_string(),
+                path,
+                module: node.module.clone().unwrap_or_default(),
+                crate_name: node.crate_name.clone().unwrap_or_default(),
+                functions_count,
+                links_count,
+                diagnostics_count: 0,
+                complexity: complexity(links_count),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+fn project_file(file: &IndexedFile, functions_count: u32, links_count: u32) -> ProjectFile {
+    ProjectFile {
+        id: file_id(&file.relative_path),
+        name: Path::new(&file.relative_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&file.relative_path)
+            .to_string(),
+        path: file.relative_path.clone(),
+        module: file.module_path.clone(),
+        crate_name: file.package_name.clone(),
+        functions_count,
+        links_count,
+        diagnostics_count: 0,
+        complexity: complexity(links_count),
+    }
+}
+
+fn node(
+    id: String,
+    node_type: NodeType,
+    label: String,
+    file: Option<String>,
+    module: Option<String>,
+    crate_name: Option<String>,
+    line: Option<u32>,
+    x: f64,
+    y: f64,
+) -> GraphNode {
+    GraphNode {
+        id,
+        node_type,
+        label,
+        file,
+        module,
+        crate_name,
+        line,
+        visibility: None,
+        is_async: None,
+        is_unsafe: None,
+        is_generic: None,
+        signature: None,
+        description: None,
+        pinned: None,
+        bookmarked: None,
+        connections: None,
+        x,
+        y,
+        vx: 0.0,
+        vy: 0.0,
+    }
+}
+
+fn edge(edge_type: EdgeType, source: &str, target: &str) -> GraphEdge {
+    GraphEdge {
+        id: edge_id(edge_type, source, target),
+        source: source.to_string(),
+        target: target.to_string(),
+        edge_type,
+    }
+}
+
+fn event(event_type: AnalysisEventType, message: String, file: Option<String>) -> AnalysisEvent {
+    AnalysisEvent {
+        id: Uuid::new_v4().to_string(),
+        event_type,
+        message,
+        timestamp: timestamp(),
+        file,
+    }
+}
+
+fn timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format!("{secs}")
+}
+
+fn complexity(links_count: u32) -> Complexity {
+    match links_count {
+        0..=5 => Complexity::Low,
+        6..=14 => Complexity::Medium,
+        _ => Complexity::High,
+    }
+}
+
+fn update_connections(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
+    for node in nodes {
+        let count = edges
+            .iter()
+            .filter(|edge| edge.source == node.id || edge.target == node.id)
+            .count() as u32;
+        node.connections = Some(count);
+    }
+}
+
+fn dedupe_graph(snapshot: &mut GraphSnapshot) {
+    let mut seen_nodes = HashSet::new();
+    snapshot
+        .nodes
+        .retain(|node| seen_nodes.insert(node.id.clone()));
+    let mut seen_edges = HashSet::new();
+    snapshot
+        .edges
+        .retain(|edge| seen_edges.insert(edge.id.clone()));
+}
+
+fn spread_angle(index: usize, total: usize) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    std::f64::consts::TAU * (index as f64 / total as f64)
+}
+
+fn infer_visibility(text: &str) -> Visibility {
+    if text.starts_with("pub(crate)") {
+        Visibility::PubCrate
+    } else if text.starts_with("pub ") {
+        Visibility::Pub
+    } else {
+        Visibility::Private
+    }
+}
+
+fn crate_id(name: &str) -> String {
+    format!("crate:{name}")
+}
+
+fn external_id(name: &str) -> String {
+    format!("external:{name}")
+}
+
+fn file_id(path: &str) -> String {
+    format!("file:{path}")
+}
+
+fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, line: u32) -> String {
+    let prefix = match node_type {
+        NodeType::Struct => "struct",
+        NodeType::Enum => "enum",
+        NodeType::Trait => "trait",
+        NodeType::Impl => "impl",
+        NodeType::Function => "fn",
+        NodeType::Method => "method",
+        NodeType::Macro => "macro",
+        NodeType::Module => "module",
+        NodeType::File => "file",
+        NodeType::ExternalCrate => "external",
+    };
+    format!(
+        "{prefix}:{}::{}::{}@{}",
+        file.package_name, file.module_path, name, line
+    )
+}

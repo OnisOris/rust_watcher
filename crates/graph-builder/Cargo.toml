@@ -1,0 +1,11 @@
+[package]
+name = "graph-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+graph-core = { path = "../graph-core" }
+project-indexer = { path = "../project-indexer" }
+uuid.workspace = true
