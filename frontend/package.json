@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "test": "pnpm test:patch-helpers",
+    "test:patch-helpers": "vite build --ssr src/app/api/patchHelpers.test.ts --outDir dist-patch-helper-test && node -e \"import('./dist-patch-helper-test/patchHelpers.test.js').then(m => m.runPatchHelperTests())\" && rm -rf dist-patch-helper-test"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

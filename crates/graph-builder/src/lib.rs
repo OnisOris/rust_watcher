@@ -7,7 +7,9 @@ use graph_core::{
 use project_indexer::{relative_to, IndexedFile, ProjectIndex};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use uuid::Uuid;
 
 pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> GraphSnapshot {
@@ -191,38 +193,54 @@ impl LanguageAnalyzer for RustLanguageAdapter {
         &["rs"]
     }
 
-    fn discover_files(&self, root: &Path) -> Vec<SourceFile> {
-        let mut paths = Vec::new();
-        collect_language_files(root, self.supported_extensions(), &mut paths);
-        paths
-            .into_iter()
-            .map(|path| SourceFile {
-                language: LanguageId::Rust,
-                absolute_path: path.display().to_string(),
-                relative_path: relative_to(root, &path),
-                text: fs::read_to_string(&path).ok(),
-            })
-            .collect()
+    fn discover_files<'a>(
+        &'a self,
+        root: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Vec<SourceFile>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut paths = Vec::new();
+            collect_language_files(root, self.supported_extensions(), &mut paths);
+            paths
+                .into_iter()
+                .map(|path| SourceFile {
+                    language: LanguageId::Rust,
+                    absolute_path: path.display().to_string(),
+                    relative_path: relative_to(root, &path),
+                    text: fs::read_to_string(&path).ok(),
+                })
+                .collect()
+        })
     }
 
-    fn symbols(&self, file: &SourceFile) -> Vec<SymbolRecord> {
-        let Some(source) = file.text.as_deref() else {
-            return Vec::new();
-        };
-        discover_syntax_symbols_from_source(source)
-            .into_iter()
-            .filter_map(|symbol| {
-                symbol_record_from_discovered(LanguageId::Rust, &file.relative_path, symbol)
-            })
-            .collect()
+    fn symbols<'a>(
+        &'a self,
+        file: &'a SourceFile,
+    ) -> Pin<Box<dyn Future<Output = Vec<SymbolRecord>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(source) = file.text.as_deref() else {
+                return Vec::new();
+            };
+            discover_syntax_symbols_from_source(source)
+                .into_iter()
+                .filter_map(|symbol| {
+                    symbol_record_from_discovered(LanguageId::Rust, &file.relative_path, symbol)
+                })
+                .collect()
+        })
     }
 
-    fn edges(&self, _symbols: &[SymbolRecord]) -> Vec<GraphEdge> {
-        Vec::new()
+    fn edges<'a>(
+        &'a self,
+        _symbols: &'a [SymbolRecord],
+    ) -> Pin<Box<dyn Future<Output = Vec<GraphEdge>> + Send + 'a>> {
+        Box::pin(async { Vec::new() })
     }
 
-    fn diagnostics(&self, _file: &SourceFile) -> Vec<DiagnosticRecord> {
-        Vec::new()
+    fn diagnostics<'a>(
+        &'a self,
+        _file: &'a SourceFile,
+    ) -> Pin<Box<dyn Future<Output = Vec<DiagnosticRecord>> + Send + 'a>> {
+        Box::pin(async { Vec::new() })
     }
 }
 
@@ -243,72 +261,88 @@ impl LanguageAnalyzer for TypeScriptLanguageAdapter {
         &["ts", "tsx", "js", "jsx"]
     }
 
-    fn discover_files(&self, root: &Path) -> Vec<SourceFile> {
-        let mut files = Vec::new();
-        collect_ts_files(root, root, &mut files);
-        files
-            .into_iter()
-            .map(|file| SourceFile {
-                language: language_for_ts_path(&file.relative_path),
-                absolute_path: root.join(&file.relative_path).display().to_string(),
-                relative_path: file.relative_path,
-                text: Some(file.source),
-            })
-            .collect()
+    fn discover_files<'a>(
+        &'a self,
+        root: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Vec<SourceFile>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut files = Vec::new();
+            collect_ts_files(root, root, &mut files);
+            files
+                .into_iter()
+                .map(|file| SourceFile {
+                    language: language_for_ts_path(&file.relative_path),
+                    absolute_path: root.join(&file.relative_path).display().to_string(),
+                    relative_path: file.relative_path,
+                    text: Some(file.source),
+                })
+                .collect()
+        })
     }
 
-    fn symbols(&self, file: &SourceFile) -> Vec<SymbolRecord> {
-        let Some(source) = file.text.clone() else {
-            return Vec::new();
-        };
-        let ts_file = TsFile {
-            relative_path: file.relative_path.clone(),
-            module_path: ts_module_path(&file.relative_path),
-            source,
-        };
-        discover_ts_symbols(&ts_file)
-            .into_iter()
-            .map(|symbol| {
-                let line = symbol.line.saturating_sub(1);
-                let label_len = symbol.label.len() as u32;
-                SymbolRecord {
-                    id: symbol.id.clone(),
-                    node_id: symbol.id,
-                    language: file.language.clone(),
-                    node_type: symbol.node_type,
-                    label: symbol.label.clone(),
-                    name: symbol.label,
-                    kind: SymbolKindName::from_node_type(symbol.node_type),
-                    file: file.relative_path.clone(),
-                    module: Some(ts_file.module_path.clone()),
-                    crate_name: Some("frontend".to_string()),
-                    line: symbol.line,
-                    character: 0,
-                    range: graph_core::TextRange {
-                        start: graph_core::TextPosition { line, character: 0 },
-                        end: graph_core::TextPosition {
-                            line,
-                            character: symbol.signature.len() as u32,
+    fn symbols<'a>(
+        &'a self,
+        file: &'a SourceFile,
+    ) -> Pin<Box<dyn Future<Output = Vec<SymbolRecord>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(source) = file.text.clone() else {
+                return Vec::new();
+            };
+            let ts_file = TsFile {
+                relative_path: file.relative_path.clone(),
+                module_path: ts_module_path(&file.relative_path),
+                source,
+            };
+            discover_ts_symbols(&ts_file)
+                .into_iter()
+                .map(|symbol| {
+                    let line = symbol.line.saturating_sub(1);
+                    let label_len = symbol.label.len() as u32;
+                    SymbolRecord {
+                        id: symbol.id.clone(),
+                        node_id: symbol.id,
+                        language: file.language.clone(),
+                        node_type: symbol.node_type,
+                        label: symbol.label.clone(),
+                        name: symbol.label,
+                        kind: SymbolKindName::from_node_type(symbol.node_type),
+                        file: file.relative_path.clone(),
+                        module: Some(ts_file.module_path.clone()),
+                        crate_name: Some("frontend".to_string()),
+                        line: symbol.line,
+                        character: 0,
+                        range: graph_core::TextRange {
+                            start: graph_core::TextPosition { line, character: 0 },
+                            end: graph_core::TextPosition {
+                                line,
+                                character: symbol.signature.len() as u32,
+                            },
                         },
-                    },
-                    selection_range: graph_core::TextRange {
-                        start: graph_core::TextPosition { line, character: 0 },
-                        end: graph_core::TextPosition {
-                            line,
-                            character: label_len,
+                        selection_range: graph_core::TextRange {
+                            start: graph_core::TextPosition { line, character: 0 },
+                            end: graph_core::TextPosition {
+                                line,
+                                character: label_len,
+                            },
                         },
-                    },
-                }
-            })
-            .collect()
+                    }
+                })
+                .collect()
+        })
     }
 
-    fn edges(&self, _symbols: &[SymbolRecord]) -> Vec<GraphEdge> {
-        Vec::new()
+    fn edges<'a>(
+        &'a self,
+        _symbols: &'a [SymbolRecord],
+    ) -> Pin<Box<dyn Future<Output = Vec<GraphEdge>> + Send + 'a>> {
+        Box::pin(async { Vec::new() })
     }
 
-    fn diagnostics(&self, _file: &SourceFile) -> Vec<DiagnosticRecord> {
-        Vec::new()
+    fn diagnostics<'a>(
+        &'a self,
+        _file: &'a SourceFile,
+    ) -> Pin<Box<dyn Future<Output = Vec<DiagnosticRecord>> + Send + 'a>> {
+        Box::pin(async { Vec::new() })
     }
 }
 
@@ -1923,7 +1957,7 @@ fn update_connections(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
 mod tests {
     use super::*;
     use graph_core::{AnalyzerStatus, AppState};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn test_status() -> AppStatus {
         AppStatus {
@@ -2147,6 +2181,16 @@ export function App() {
         let second = symbol_id(NodeType::Function, &file, "main", 10);
         assert_eq!(first, second);
         assert_eq!(first, "fn:project::main::main@10");
+    }
+
+    #[test]
+    fn language_adapters_expose_async_trait_methods() {
+        fn assert_async_analyzer<A: LanguageAnalyzer + Send + Sync>(analyzer: &A) {
+            let _future = analyzer.discover_files(Path::new("."));
+        }
+
+        assert_async_analyzer(&RustLanguageAdapter);
+        assert_async_analyzer(&TypeScriptLanguageAdapter);
     }
 }
 

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LanguageId {
@@ -107,10 +109,22 @@ pub enum DiagnosticSeverity {
 pub trait LanguageAnalyzer {
     fn language_id(&self) -> LanguageId;
     fn supported_extensions(&self) -> &'static [&'static str];
-    fn discover_files(&self, root: &Path) -> Vec<SourceFile>;
-    fn symbols(&self, file: &SourceFile) -> Vec<SymbolRecord>;
-    fn edges(&self, symbols: &[SymbolRecord]) -> Vec<GraphEdge>;
-    fn diagnostics(&self, file: &SourceFile) -> Vec<DiagnosticRecord>;
+    fn discover_files<'a>(
+        &'a self,
+        root: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Vec<SourceFile>> + Send + 'a>>;
+    fn symbols<'a>(
+        &'a self,
+        file: &'a SourceFile,
+    ) -> Pin<Box<dyn Future<Output = Vec<SymbolRecord>> + Send + 'a>>;
+    fn edges<'a>(
+        &'a self,
+        symbols: &'a [SymbolRecord],
+    ) -> Pin<Box<dyn Future<Output = Vec<GraphEdge>> + Send + 'a>>;
+    fn diagnostics<'a>(
+        &'a self,
+        file: &'a SourceFile,
+    ) -> Pin<Box<dyn Future<Output = Vec<DiagnosticRecord>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

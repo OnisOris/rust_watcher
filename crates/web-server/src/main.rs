@@ -337,6 +337,14 @@ struct SearchResponse {
     results: Vec<SearchResult>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsResponse {
+    diagnostics_by_file: HashMap<String, Vec<DiagnosticRecord>>,
+    diagnostics_by_node: HashMap<String, Vec<DiagnosticRecord>>,
+    all_diagnostics: Vec<DiagnosticRecord>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -416,6 +424,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/health", get(health))
         .route("/api/status", get(status))
         .route("/api/graph/snapshot", get(snapshot))
+        .route("/api/diagnostics", get(diagnostics))
         .route("/api/node/{id}", get(node))
         .route("/api/node/{id}/details", get(node_details))
         .route("/api/search", get(search))
@@ -469,6 +478,21 @@ async fn snapshot(
             .mode
             .map_or(snapshot.clone(), |mode| filter_snapshot(&snapshot, mode)),
     )
+}
+
+async fn diagnostics(State(state): State<AppStateHandle>) -> Json<DiagnosticsResponse> {
+    let diagnostics_by_file = state.diagnostics_by_file.read().clone();
+    let diagnostics_by_node = state.diagnostics_by_node.read().clone();
+    let all_diagnostics = diagnostics_by_file
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    Json(DiagnosticsResponse {
+        diagnostics_by_file,
+        diagnostics_by_node,
+        all_diagnostics,
+    })
 }
 
 async fn node(

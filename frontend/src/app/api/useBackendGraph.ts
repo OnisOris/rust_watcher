@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { INITIAL_EDGES, INITIAL_NODES, PROJECT_FILES, ANALYSIS_EVENTS } from '../mockData'
+import {
+  applyDiagnosticsCountsToFiles,
+  applyDiagnosticsPatch,
+  applyGraphPatchToEdges,
+  applyGraphPatchToNodes,
+} from './patchHelpers'
 import type {
   AnalysisEvent,
   AnalyzerStatus,
@@ -65,10 +71,21 @@ export function useBackendGraph(mode: GraphMode) {
     setEdges(snapshot.edges)
     setFiles(snapshot.files)
     setEvents(snapshot.events)
-    setDiagnosticsByFile(new Map())
-    setDiagnosticsByNode(new Map())
     applyStatus(snapshot.status)
   }, [applyStatus])
+
+  const applyPatch = useCallback((patch: GraphPatch) => {
+    setNodes(prev => applyGraphPatchToNodes(prev, patch))
+    setEdges(prev => applyGraphPatchToEdges(prev, patch))
+    if (patch.diagnostics?.length || patch.changedFiles?.length) {
+      setDiagnosticsByFile(prev => {
+        const next = applyDiagnosticsPatch(prev, patch)
+        setDiagnosticsByNode(next.diagnosticsByNode)
+        setFiles(files => applyDiagnosticsCountsToFiles(files, next.diagnosticsByFile, patch.changedFiles ?? []))
+        return next.diagnosticsByFile
+      })
+    }
+  }, [])
 
   const applyDevFallback = useCallback(() => {
     setBackendAvailable(false)
@@ -147,55 +164,7 @@ export function useBackendGraph(mode: GraphMode) {
       if (DEV_FALLBACK) applyDevFallback()
     }
     return () => socket.close()
-  }, [applyDevFallback, applySnapshot, applyStatus, backendAvailable])
-
-  const applyPatch = useCallback((patch: GraphPatch) => {
-    setNodes(prev => {
-      const removed = new Set(patch.removedNodeIds)
-      const updated = new Map(patch.updatedNodes.map(node => [node.id, node]))
-      const next = prev
-        .filter(node => !removed.has(node.id))
-        .map(node => updated.get(node.id) ?? node)
-      const existing = new Set(next.map(node => node.id))
-      return [...next, ...patch.addedNodes.filter(node => !existing.has(node.id))]
-    })
-    setEdges(prev => {
-      const removed = new Set(patch.removedEdgeIds)
-      const updated = new Map(patch.updatedEdges.map(edge => [edge.id, edge]))
-      const next = prev
-        .filter(edge => !removed.has(edge.id))
-        .map(edge => updated.get(edge.id) ?? edge)
-      const existing = new Set(next.map(edge => edge.id))
-      return [...next, ...patch.addedEdges.filter(edge => !existing.has(edge.id))]
-    })
-    if (patch.diagnostics?.length || patch.changedFiles?.length) {
-      const nextByFile = new Map(diagnosticsByFile)
-      for (const file of patch.changedFiles ?? []) nextByFile.set(file, [])
-      patch.diagnostics.forEach(diagnostic => {
-        const list = nextByFile.get(diagnostic.file) ?? []
-        list.push(diagnostic)
-        nextByFile.set(diagnostic.file, list)
-      })
-      const nextByNode = new Map<string, DiagnosticRecord[]>()
-      nextByFile.forEach(diagnostics => {
-        diagnostics.forEach(diagnostic => {
-          diagnostic.relatedNodeIds.forEach(nodeId => {
-            const list = nextByNode.get(nodeId) ?? []
-            list.push(diagnostic)
-            nextByNode.set(nodeId, list)
-          })
-        })
-      })
-      setDiagnosticsByFile(nextByFile)
-      setDiagnosticsByNode(nextByNode)
-      const counts = new Map([...nextByFile.entries()].map(([file, diagnostics]) => [file, diagnostics.length]))
-      const changed = new Set(patch.changedFiles ?? [])
-      setFiles(prev => prev.map(file => {
-        if (!changed.has(file.path) && !counts.has(file.path)) return file
-        return { ...file, diagnosticsCount: counts.get(file.path) ?? 0 }
-      }))
-    }
-  }, [diagnosticsByFile])
+  }, [applyDevFallback, applyPatch, applySnapshot, applyStatus, backendAvailable])
 
   const openProject = useCallback(async (path?: string) => {
     try {
