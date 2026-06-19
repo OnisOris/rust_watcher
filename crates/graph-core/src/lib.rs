@@ -106,25 +106,44 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
+pub type AnalysisResult<T> = Result<T, String>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnalysisContext<'a> {
+    pub project_root: &'a Path,
+    pub files: &'a [SourceFile],
+    pub symbols: &'a [SymbolRecord],
+    pub graph_nodes: &'a [GraphNode],
+    pub graph_edges: &'a [GraphEdge],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AdapterAnalysisResult {
+    pub files: Vec<SourceFile>,
+    pub symbols: Vec<SymbolRecord>,
+    pub edges: Vec<GraphEdge>,
+    pub diagnostics: Vec<DiagnosticRecord>,
+}
+
 pub trait LanguageAnalyzer {
     fn language_id(&self) -> LanguageId;
     fn supported_extensions(&self) -> &'static [&'static str];
     fn discover_files<'a>(
         &'a self,
         root: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Vec<SourceFile>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<SourceFile>>> + Send + 'a>>;
     fn symbols<'a>(
         &'a self,
         file: &'a SourceFile,
-    ) -> Pin<Box<dyn Future<Output = Vec<SymbolRecord>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<SymbolRecord>>> + Send + 'a>>;
     fn edges<'a>(
         &'a self,
-        symbols: &'a [SymbolRecord],
-    ) -> Pin<Box<dyn Future<Output = Vec<GraphEdge>> + Send + 'a>>;
+        context: &'a AnalysisContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<GraphEdge>>> + Send + 'a>>;
     fn diagnostics<'a>(
         &'a self,
         file: &'a SourceFile,
-    ) -> Pin<Box<dyn Future<Output = Vec<DiagnosticRecord>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<DiagnosticRecord>>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

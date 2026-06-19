@@ -1,6 +1,6 @@
 use graph_core::{
-    DiagnosticRecord, DiscoveredSymbol, GraphEdge, GraphSnapshot, LanguageAnalyzer, LanguageId,
-    SourceFile, SymbolRecord,
+    AnalysisContext, AnalysisResult, DiagnosticRecord, DiscoveredSymbol, GraphEdge, GraphSnapshot,
+    LanguageAnalyzer, LanguageId, SourceFile, SymbolRecord,
 };
 use project_indexer::{relative_to, IndexedFile};
 use std::fs;
@@ -56,11 +56,11 @@ impl LanguageAnalyzer for RustLanguageAdapter {
     fn discover_files<'a>(
         &'a self,
         root: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Vec<SourceFile>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<SourceFile>>> + Send + 'a>> {
         Box::pin(async move {
             let mut paths = Vec::new();
             collect_language_files(root, self.supported_extensions(), &mut paths);
-            paths
+            Ok(paths
                 .into_iter()
                 .map(|path| SourceFile {
                     language: LanguageId::Rust,
@@ -68,38 +68,38 @@ impl LanguageAnalyzer for RustLanguageAdapter {
                     relative_path: relative_to(root, &path),
                     text: fs::read_to_string(&path).ok(),
                 })
-                .collect()
+                .collect())
         })
     }
 
     fn symbols<'a>(
         &'a self,
         file: &'a SourceFile,
-    ) -> Pin<Box<dyn Future<Output = Vec<SymbolRecord>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<SymbolRecord>>> + Send + 'a>> {
         Box::pin(async move {
             let Some(source) = file.text.as_deref() else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
-            discover_syntax_symbols_from_source(source)
+            Ok(discover_syntax_symbols_from_source(source)
                 .into_iter()
                 .filter_map(|symbol| {
                     symbol_record_from_discovered(LanguageId::Rust, &file.relative_path, symbol)
                 })
-                .collect()
+                .collect())
         })
     }
 
     fn edges<'a>(
         &'a self,
-        _symbols: &'a [SymbolRecord],
-    ) -> Pin<Box<dyn Future<Output = Vec<GraphEdge>> + Send + 'a>> {
-        Box::pin(async { Vec::new() })
+        _context: &'a AnalysisContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<GraphEdge>>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 
     fn diagnostics<'a>(
         &'a self,
         _file: &'a SourceFile,
-    ) -> Pin<Box<dyn Future<Output = Vec<DiagnosticRecord>> + Send + 'a>> {
-        Box::pin(async { Vec::new() })
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<DiagnosticRecord>>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }

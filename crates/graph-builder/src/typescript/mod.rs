@@ -1,7 +1,7 @@
 use graph_core::{
-    AnalyzerStatus, AppState, AppStatus, DiagnosticRecord, EdgeType, GraphEdge, GraphNode,
-    GraphSnapshot, LanguageAnalyzer, LanguageId, NodeType, SourceFile, SymbolKindName,
-    SymbolRecord, Visibility,
+    AnalysisContext, AnalysisResult, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
+    EdgeType, GraphEdge, GraphNode, GraphSnapshot, LanguageAnalyzer, LanguageId, NodeType,
+    SourceFile, SymbolKindName, SymbolRecord, Visibility,
 };
 use project_indexer::relative_to;
 use std::collections::{HashMap, HashSet};
@@ -9,7 +9,6 @@ use std::fs;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock};
 
 pub(crate) mod api_calls;
 pub(crate) mod imports;
@@ -21,8 +20,6 @@ use crate::{dedupe_graph, edge, file_id, language_for_ts_path, node, spread_angl
 
 use relationships::enrich_ts_relationships;
 use symbols::{discover_ts_symbols, ts_module_path};
-
-static ADAPTER_FILE_CACHE: OnceLock<Mutex<HashMap<String, TsFile>>> = OnceLock::new();
 
 pub struct TypeScriptLanguageAdapter;
 
@@ -44,11 +41,11 @@ impl LanguageAnalyzer for TypeScriptLanguageAdapter {
     fn discover_files<'a>(
         &'a self,
         root: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Vec<SourceFile>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<SourceFile>>> + Send + 'a>> {
         Box::pin(async move {
             let mut files = Vec::new();
             collect_ts_files(root, root, &mut files);
-            files
+            Ok(files
                 .into_iter()
                 .map(|file| SourceFile {
                     language: language_for_ts_path(&file.relative_path),
@@ -56,25 +53,24 @@ impl LanguageAnalyzer for TypeScriptLanguageAdapter {
                     relative_path: file.relative_path,
                     text: Some(file.source),
                 })
-                .collect()
+                .collect())
         })
     }
 
     fn symbols<'a>(
         &'a self,
         file: &'a SourceFile,
-    ) -> Pin<Box<dyn Future<Output = Vec<SymbolRecord>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<SymbolRecord>>> + Send + 'a>> {
         Box::pin(async move {
             let Some(source) = file.text.clone() else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             let ts_file = TsFile {
                 relative_path: file.relative_path.clone(),
                 module_path: ts_module_path(&file.relative_path),
                 source,
             };
-            cache_adapter_file(ts_file.clone());
-            discover_ts_symbols(&ts_file)
+            Ok(discover_ts_symbols(&ts_file)
                 .into_iter()
                 .map(|symbol| SymbolRecord {
                     id: symbol.id.clone(),
@@ -92,49 +88,39 @@ impl LanguageAnalyzer for TypeScriptLanguageAdapter {
                     range: symbol.range,
                     selection_range: symbol.selection_range,
                 })
-                .collect()
+                .collect())
         })
     }
 
     fn edges<'a>(
         &'a self,
-        symbols: &'a [SymbolRecord],
-    ) -> Pin<Box<dyn Future<Output = Vec<GraphEdge>> + Send + 'a>> {
-        Box::pin(async move { adapter_edges(symbols) })
+        context: &'a AnalysisContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<GraphEdge>>> + Send + 'a>> {
+        Box::pin(async move { Ok(adapter_edges(context)) })
     }
 
     fn diagnostics<'a>(
         &'a self,
         _file: &'a SourceFile,
-    ) -> Pin<Box<dyn Future<Output = Vec<DiagnosticRecord>> + Send + 'a>> {
-        Box::pin(async { Vec::new() })
+    ) -> Pin<Box<dyn Future<Output = AnalysisResult<Vec<DiagnosticRecord>>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }
 
-fn cache_adapter_file(file: TsFile) {
-    ADAPTER_FILE_CACHE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("typescript adapter cache poisoned")
-        .insert(file.relative_path.clone(), file);
-}
-
-fn adapter_edges(symbols: &[SymbolRecord]) -> Vec<GraphEdge> {
-    let files = symbols
+fn adapter_edges(context: &AnalysisContext<'_>) -> Vec<GraphEdge> {
+    let files = context
+        .symbols
         .iter()
         .map(|symbol| symbol.file.clone())
         .collect::<HashSet<_>>();
     if files.is_empty() {
         return Vec::new();
     }
-    let cached = ADAPTER_FILE_CACHE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("typescript adapter cache poisoned");
-    let ts_files = cached
-        .values()
+    let ts_files = context
+        .files
+        .iter()
         .filter(|file| files.contains(&file.relative_path))
-        .cloned()
+        .filter_map(ts_file_from_source)
         .collect::<Vec<_>>();
     if ts_files.is_empty() {
         return Vec::new();
@@ -144,8 +130,21 @@ fn adapter_edges(symbols: &[SymbolRecord]) -> Vec<GraphEdge> {
         .map(|file| (file.relative_path.clone(), discover_ts_symbols(file)))
         .collect::<HashMap<_, _>>();
     let mut snapshot = empty_ts_snapshot();
+    snapshot.nodes.extend(context.graph_nodes.iter().cloned());
+    snapshot.edges.extend(context.graph_edges.iter().cloned());
     enrich_ts_relationships(&mut snapshot, &ts_files, &symbols_by_file);
     snapshot.edges
+}
+
+fn ts_file_from_source(file: &SourceFile) -> Option<TsFile> {
+    if !is_typescript_path(&file.relative_path) {
+        return None;
+    }
+    Some(TsFile {
+        relative_path: file.relative_path.clone(),
+        module_path: ts_module_path(&file.relative_path),
+        source: file.text.clone()?,
+    })
 }
 
 #[derive(Debug, Clone)]

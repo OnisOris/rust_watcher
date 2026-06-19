@@ -1100,7 +1100,9 @@ fn update_connections(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
-    use graph_core::{AnalyzerStatus, AppState, GraphMode, LanguageAnalyzer, SourceFile};
+    use graph_core::{
+        AnalysisContext, AnalyzerStatus, AppState, GraphMode, LanguageAnalyzer, SourceFile,
+    };
     use std::path::{Path, PathBuf};
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
@@ -1543,9 +1545,9 @@ export type UserId = User['id']
         };
 
         let mut symbols = Vec::new();
-        symbols.extend(block_on_ready(adapter.symbols(&app)));
-        symbols.extend(block_on_ready(adapter.symbols(&list)));
-        symbols.extend(block_on_ready(adapter.symbols(&hook)));
+        symbols.extend(block_on_ready(adapter.symbols(&app)).unwrap());
+        symbols.extend(block_on_ready(adapter.symbols(&list)).unwrap());
+        symbols.extend(block_on_ready(adapter.symbols(&hook)).unwrap());
         assert!(symbols.iter().any(|symbol| {
             symbol.label == "App"
                 && symbol.node_type == NodeType::Component
@@ -1555,7 +1557,15 @@ export type UserId = User['id']
             .iter()
             .any(|symbol| { symbol.label == "useUsers" && symbol.node_type == NodeType::Hook }));
 
-        let edges = block_on_ready(adapter.edges(&symbols));
+        let files = vec![app, list, hook];
+        let context = AnalysisContext {
+            project_root: Path::new("/tmp"),
+            files: &files,
+            symbols: &symbols,
+            graph_nodes: &[],
+            graph_edges: &[],
+        };
+        let edges = block_on_ready(adapter.edges(&context)).unwrap();
         assert!(edges.iter().any(|edge| edge.edge_type == EdgeType::Renders
             && edge.confidence == EdgeConfidence::Semantic));
         assert!(edges
@@ -1563,6 +1573,67 @@ export type UserId = User['id']
             .any(|edge| edge.edge_type == EdgeType::Calls
                 && edge.confidence == EdgeConfidence::Semantic));
         assert!(edges.iter().any(|edge| edge.edge_type == EdgeType::Imports));
+    }
+
+    #[test]
+    fn typescript_language_adapter_does_not_leak_between_projects() {
+        let adapter = TypeScriptLanguageAdapter;
+        let project_a_file = SourceFile {
+            language: LanguageId::TypeScript,
+            absolute_path: "/tmp/a/frontend/src/App.tsx".into(),
+            relative_path: "frontend/src/App.tsx".into(),
+            text: Some(
+                "import { AOnly } from './AOnly'\nexport function App() { return <AOnly /> }\n"
+                    .into(),
+            ),
+        };
+        let project_a_component = SourceFile {
+            language: LanguageId::TypeScript,
+            absolute_path: "/tmp/a/frontend/src/AOnly.tsx".into(),
+            relative_path: "frontend/src/AOnly.tsx".into(),
+            text: Some("export function AOnly() { return <div /> }\n".into()),
+        };
+        let project_b_file = SourceFile {
+            language: LanguageId::TypeScript,
+            absolute_path: "/tmp/b/frontend/src/App.tsx".into(),
+            relative_path: "frontend/src/App.tsx".into(),
+            text: Some("export function App() { return <div /> }\n".into()),
+        };
+
+        let files_a = vec![project_a_file, project_a_component];
+        let mut symbols_a = Vec::new();
+        for file in &files_a {
+            symbols_a.extend(block_on_ready(adapter.symbols(file)).unwrap());
+        }
+        let context_a = AnalysisContext {
+            project_root: Path::new("/tmp/a"),
+            files: &files_a,
+            symbols: &symbols_a,
+            graph_nodes: &[],
+            graph_edges: &[],
+        };
+        let edges_a = block_on_ready(adapter.edges(&context_a)).unwrap();
+        assert!(edges_a
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Renders));
+
+        let files_b = vec![project_b_file];
+        let mut symbols_b = Vec::new();
+        for file in &files_b {
+            symbols_b.extend(block_on_ready(adapter.symbols(file)).unwrap());
+        }
+        let context_b = AnalysisContext {
+            project_root: Path::new("/tmp/b"),
+            files: &files_b,
+            symbols: &symbols_b,
+            graph_nodes: &[],
+            graph_edges: &[],
+        };
+        let edges_b = block_on_ready(adapter.edges(&context_b)).unwrap();
+        assert!(!edges_b
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Renders));
+        assert!(!edges_b.iter().any(|edge| edge.target.contains("AOnly")));
     }
 
     #[test]
