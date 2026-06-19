@@ -4,7 +4,7 @@ use graph_core::{
     SymbolKindName, SymbolRecord, Visibility,
 };
 use project_indexer::relative_to;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::path::Path;
@@ -283,6 +283,110 @@ fn enrich_python_graph_impl(snapshot: &mut GraphSnapshot, project_root: &Path) -
     enrich_py_relationships(snapshot, &files, &py_symbols_by_file);
     dedupe_graph(snapshot);
     symbol_count
+}
+
+pub fn enrich_python_graph_for_files(
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+    changed_files: &HashSet<String>,
+) -> usize {
+    let mut files = Vec::new();
+    collect_py_files(project_root, project_root, &mut files);
+    ensure_python_module(snapshot);
+    let changed_py_files = files
+        .iter()
+        .filter(|file| changed_files.contains(&file.relative_path))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for file in &changed_py_files {
+        ensure_py_file_node(snapshot, file, files.len());
+    }
+    remove_changed_py_relationship_edges(snapshot, changed_files);
+
+    let mut symbol_count = 0usize;
+    let mut py_symbols_by_file: HashMap<String, Vec<PySymbol>> = HashMap::new();
+    for file in &files {
+        let symbols = discover_py_symbols(file);
+        if changed_files.contains(&file.relative_path) {
+            let file_node_id = file_id(&file.relative_path);
+            symbol_count += symbols.len();
+            for symbol in &symbols {
+                snapshot.nodes.push(py_graph_node(file, symbol));
+                snapshot
+                    .edges
+                    .push(edge(EdgeType::Contains, &file_node_id, &symbol.id));
+            }
+        }
+        py_symbols_by_file.insert(file.relative_path.clone(), symbols);
+    }
+
+    enrich_py_relationships(snapshot, &files, &py_symbols_by_file);
+    crate::typescript::refresh_typescript_api_call_edges(snapshot, project_root);
+    dedupe_graph(snapshot);
+    symbol_count
+}
+
+fn ensure_py_file_node(snapshot: &mut GraphSnapshot, file: &PyFile, total: usize) {
+    let file_node_id = file_id(&file.relative_path);
+    if snapshot.nodes.iter().any(|node| node.id == file_node_id) {
+        return;
+    }
+    let idx = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == NodeType::File)
+        .count();
+    let angle = spread_angle(idx, total.max(1));
+    snapshot.nodes.push(node(
+        file_node_id.clone(),
+        NodeType::File,
+        Path::new(&file.relative_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&file.relative_path)
+            .to_string(),
+        Some(file.relative_path.clone()),
+        Some(file.module_path.clone()),
+        Some("python".to_string()),
+        None,
+        760.0 + angle.cos() * 300.0,
+        angle.sin() * 300.0,
+    ));
+    snapshot
+        .edges
+        .push(edge(EdgeType::Contains, "backend:python", &file_node_id));
+}
+
+fn remove_changed_py_relationship_edges(
+    snapshot: &mut GraphSnapshot,
+    changed_files: &HashSet<String>,
+) {
+    let changed_file_ids = changed_files
+        .iter()
+        .map(|file| file_id(file))
+        .collect::<HashSet<_>>();
+    let changed_node_ids = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.file
+                .as_ref()
+                .is_some_and(|file| changed_files.contains(file))
+                && node.node_type != NodeType::File
+        })
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    snapshot.edges.retain(|edge| {
+        if matches!(edge.edge_type, EdgeType::Contains) {
+            return true;
+        }
+        let touches_changed_file =
+            changed_file_ids.contains(&edge.source) || changed_file_ids.contains(&edge.target);
+        let touches_changed_node =
+            changed_node_ids.contains(&edge.source) || changed_node_ids.contains(&edge.target);
+        !(touches_changed_file || touches_changed_node)
+    });
 }
 
 fn collect_py_files(root: &Path, current: &Path, files: &mut Vec<PyFile>) {

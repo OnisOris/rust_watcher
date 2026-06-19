@@ -182,6 +182,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
   const usedBy = incoming.filter(e => e.type === 'Uses' || e.type === 'TypeReference').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const references = details?.references ?? referenceRecordsFromNodes(usedBy)
   const diagnostics = details?.diagnostics ?? []
+  const endpointDetails = details?.endpointDetails
   const callerConfidence = confidenceByNode(incoming, 'source')
   const calleeConfidence = confidenceByNode(outgoing, 'target')
 
@@ -233,6 +234,27 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
             {node.file && <InfoRow label="File" value={node.file} mono />}
             {node.module && <InfoRow label="Module" value={node.module} mono />}
             {node.line && <InfoRow label="Line" value={`L${node.line}`} mono />}
+          </Card>
+        )}
+
+        {endpointDetails && (
+          <Card>
+            <SectionLabel label="Endpoint" />
+            <InfoRow label="Route" value={`${endpointDetails.routeMethod} ${endpointDetails.routePath}`} mono />
+            {endpointDetails.endpointLanguage && <InfoRow label="Language" value={endpointDetails.endpointLanguage} mono />}
+            {endpointDetails.handlers.map(handler => (
+              <button
+                key={handler.nodeId}
+                onClick={() => onSelectNode(handler.nodeId)}
+                className="w-full text-left rounded px-2 py-1.5 mt-1"
+                style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
+              >
+                <div style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>{handler.label}</div>
+                <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>
+                  {[handler.handlerLanguage, handler.handlerFile].filter(Boolean).join(' · ')}
+                </div>
+              </button>
+            ))}
           </Card>
         )}
 

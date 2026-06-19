@@ -10,13 +10,14 @@ use futures_util::{SinkExt, StreamExt};
 use graph_builder::{
     build_fallback_graph, enrich_api_routes_for_files, enrich_file_symbols,
     enrich_syntax_relationships_for_files, filter_snapshot, focus_subgraph,
-    push_unique_edge_with_confidence, typescript,
+    push_unique_edge_with_confidence, python, typescript,
 };
 use graph_core::{
     AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
-    DiagnosticSeverity, EdgeConfidence, EdgeType, FocusDepth, FocusRequest, FocusResponse,
-    GraphMode, GraphNode, GraphPatch, GraphSnapshot, LanguageId, NodeDetailsResponse,
-    ReferenceRecord, SearchResult, ServerMessage, SourceLocation, SymbolIndex, SymbolKindName,
+    DiagnosticSeverity, EdgeConfidence, EdgeType, EndpointDetails, EndpointHandlerDetails,
+    FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphPatch, GraphSnapshot,
+    LanguageId, NodeDetailsResponse, ReferenceRecord, SearchResult, ServerMessage, SourceLocation,
+    SymbolIndex, SymbolKindName,
 };
 use parking_lot::RwLock;
 use project_indexer::{index_project, start_watcher};
@@ -551,6 +552,7 @@ async fn node_details(
         .get(&id)
         .cloned()
         .unwrap_or_default();
+    let endpoint_details = endpoint_details_for_node(&node, &outgoing_edges, &node_by_id);
 
     (
         StatusCode::OK,
@@ -563,9 +565,39 @@ async fn node_details(
             references,
             related_types,
             diagnostics,
+            endpoint_details,
         }),
     )
         .into_response()
+}
+
+fn endpoint_details_for_node(
+    node: &GraphNode,
+    outgoing_edges: &[graph_core::GraphEdge],
+    node_by_id: &HashMap<&str, &GraphNode>,
+) -> Option<EndpointDetails> {
+    if node.node_type != graph_core::NodeType::Endpoint {
+        return None;
+    }
+    let route = graph_core::route_key_from_label(&node.label)?;
+    let handlers = outgoing_edges
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::EndpointHandler)
+        .filter_map(|edge| node_by_id.get(edge.target.as_str()).copied())
+        .map(|handler| EndpointHandlerDetails {
+            node_id: handler.id.clone(),
+            label: handler.label.clone(),
+            handler_language: handler.language.clone(),
+            handler_file: handler.file.clone(),
+        })
+        .collect::<Vec<_>>();
+    Some(EndpointDetails {
+        route_method: route.method,
+        route_path: route.path,
+        route_key: route.key,
+        endpoint_language: node.language.clone(),
+        handlers,
+    })
 }
 
 async fn search(
@@ -1230,6 +1262,15 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         && changed_files
             .iter()
             .all(|file| typescript::is_typescript_path(file));
+    let python_files = changed_files
+        .iter()
+        .filter(|file| python::is_python_path(file))
+        .cloned()
+        .collect::<Vec<_>>();
+    let only_python = !python_files.is_empty()
+        && changed_files
+            .iter()
+            .all(|file| python::is_python_path(file));
 
     if only_rust {
         match index_changed_rust_files(&state, &project_root, rust_files, changed_files.clone())
@@ -1255,6 +1296,19 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
             Err(error) => warn!(
                 ?error,
                 "incremental TypeScript patch failed; falling back to rebuild patch"
+            ),
+        }
+    }
+    if only_python {
+        match index_changed_python_files(&state, &project_root, python_files, changed_files.clone())
+        {
+            Ok(()) => {
+                state.is_indexing.store(false, Ordering::SeqCst);
+                return;
+            }
+            Err(error) => warn!(
+                ?error,
+                "incremental Python patch failed; falling back to rebuild patch"
             ),
         }
     }
@@ -1396,6 +1450,39 @@ fn index_changed_typescript_files(
         project_root,
         &changed_set,
     );
+    restore_existing_positions(&mut snapshot, &old_positions);
+    snapshot.status = ready_status(state, "Ready");
+    let diagnostics = state
+        .diagnostics_by_file
+        .read()
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    apply_diagnostics_to_files(&mut snapshot, &diagnostics);
+    let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
+    *state.graph.write() = snapshot;
+    let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
+    Ok(())
+}
+
+fn index_changed_python_files(
+    state: &AppStateHandle,
+    project_root: &Path,
+    files: Vec<String>,
+    changed_files: Vec<String>,
+) -> Result<()> {
+    let old_snapshot = state.graph.read().clone();
+    let mut snapshot = old_snapshot.clone();
+    let changed_set = files.into_iter().collect::<HashSet<_>>();
+    let old_positions = old_snapshot
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .collect::<HashMap<_, _>>();
+
+    remove_file_symbols_and_edges(&mut snapshot, &changed_set);
+    graph_builder::python::enrich_python_graph_for_files(&mut snapshot, project_root, &changed_set);
     restore_existing_positions(&mut snapshot, &old_positions);
     snapshot.status = ready_status(state, "Ready");
     let diagnostics = state
@@ -2213,12 +2300,49 @@ mod tests {
             }],
             related_types: Vec::new(),
             diagnostics: Vec::new(),
+            endpoint_details: None,
         };
         assert_eq!(
             response.incoming_edges[0].confidence,
             EdgeConfidence::Semantic
         );
         assert_eq!(response.references[0].location.file, "src/main.rs");
+    }
+
+    #[test]
+    fn endpoint_details_include_route_and_handler_context() {
+        let mut endpoint = test_node("GET /api/users", Some("backend/main.py"), Some("backend"));
+        endpoint.id = "py-endpoint:backend/main.py::GET:/api/users".into();
+        endpoint.language = Some("python".into());
+        endpoint.node_type = graph_core::NodeType::Endpoint;
+        let mut handler = test_node("users", Some("backend/main.py"), Some("backend"));
+        handler.id = "py-fn:backend/main.py::users@8".into();
+        handler.language = Some("python".into());
+        let edge = graph_core::GraphEdge {
+            id: graph_core::edge_id(EdgeType::EndpointHandler, &endpoint.id, &handler.id),
+            source: endpoint.id.clone(),
+            target: handler.id.clone(),
+            edge_type: EdgeType::EndpointHandler,
+            confidence: EdgeConfidence::Exact,
+        };
+        let node_by_id = HashMap::from([
+            (endpoint.id.as_str(), &endpoint),
+            (handler.id.as_str(), &handler),
+        ]);
+
+        let details = endpoint_details_for_node(&endpoint, &[edge], &node_by_id).unwrap();
+        assert_eq!(details.route_method, "GET");
+        assert_eq!(details.route_path, "/api/users");
+        assert_eq!(details.route_key, "GET /api/users");
+        assert_eq!(details.endpoint_language.as_deref(), Some("python"));
+        assert_eq!(
+            details.handlers[0].handler_language.as_deref(),
+            Some("python")
+        );
+        assert_eq!(
+            details.handlers[0].handler_file.as_deref(),
+            Some("backend/main.py")
+        );
     }
 
     #[test]

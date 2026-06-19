@@ -1941,6 +1941,170 @@ export function useUsers() {
     }
 
     #[test]
+    fn changed_python_file_update_preserves_nodes_and_updates_api_bridge() {
+        let root = std::env::temp_dir().join(format!(
+            "rust-watcher-python-incremental-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("backend")).unwrap();
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"python_incremental_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+fn health() {}
+
+fn main() {
+    app.route("/api/health", get(health));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("backend/main.py"),
+            r#"
+class UserService:
+    def users(self):
+        return []
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/useUsers.ts"),
+            "export function useUsers() { return fetch('/api/users') }\n",
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let mut snapshot = build_fallback_graph(&index, test_status());
+        let rust_handler_id = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "health" && node.language.as_deref() == Some("rust"))
+            .unwrap()
+            .id
+            .clone();
+        let hook_id = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "useUsers")
+            .unwrap()
+            .id
+            .clone();
+        if let Some(node) = snapshot.nodes.iter_mut().find(|node| node.id == hook_id) {
+            node.x = 222.0;
+            node.y = -111.0;
+        }
+        assert!(!snapshot
+            .nodes
+            .iter()
+            .any(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users"));
+
+        std::fs::write(
+            root.join("backend/main.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+class UserService:
+    def users(self):
+        return []
+
+@app.get("/api/users")
+def users():
+    service = UserService()
+    return service.users()
+"#,
+        )
+        .unwrap();
+        let changed = HashSet::from(["backend/main.py".to_string()]);
+        remove_changed_file_nodes_for_test(&mut snapshot, &changed);
+        crate::python::enrich_python_graph_for_files(&mut snapshot, &root, &changed);
+
+        assert!(snapshot.nodes.iter().any(|node| node.id == rust_handler_id));
+        let hook = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == hook_id)
+            .unwrap();
+        assert_eq!((hook.x, hook.y), (222.0, -111.0));
+        let endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users")
+            .unwrap();
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_type == NodeType::Function
+                    && node.label == "users"
+                    && node.language.as_deref() == Some("python")
+            })
+            .unwrap();
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::EndpointHandler
+                && edge.source == endpoint.id
+                && edge.target == handler.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == hook_id
+                && edge.target == endpoint.id
+        }));
+
+        std::fs::write(
+            root.join("backend/main.py"),
+            r#"
+class UserService:
+    def users(self):
+        return []
+"#,
+        )
+        .unwrap();
+        remove_changed_file_nodes_for_test(&mut snapshot, &changed);
+        crate::python::enrich_python_graph_for_files(&mut snapshot, &root, &changed);
+        assert!(!snapshot
+            .nodes
+            .iter()
+            .any(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users"));
+        assert!(!snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::ApiCall && edge.source == hook_id));
+        assert!(snapshot.nodes.iter().any(|node| node.id == rust_handler_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn remove_changed_file_nodes_for_test(
+        snapshot: &mut GraphSnapshot,
+        changed_files: &HashSet<String>,
+    ) {
+        let removed = snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.file
+                    .as_ref()
+                    .is_some_and(|file| changed_files.contains(file))
+                    && node.node_type != NodeType::File
+            })
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
+        snapshot.nodes.retain(|node| !removed.contains(&node.id));
+        snapshot
+            .edges
+            .retain(|edge| !removed.contains(&edge.source) && !removed.contains(&edge.target));
+    }
+
+    #[test]
     fn symbol_ids_are_stable() {
         let file = IndexedFile {
             absolute_path: PathBuf::from("/tmp/project/src/main.rs"),

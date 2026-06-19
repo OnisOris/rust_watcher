@@ -370,6 +370,34 @@ pub fn enrich_typescript_graph_for_files(
     symbol_count
 }
 
+pub fn refresh_typescript_api_call_edges(snapshot: &mut GraphSnapshot, project_root: &Path) {
+    let mut files = Vec::new();
+    collect_ts_files(project_root, project_root, &mut files);
+    if files.is_empty() {
+        return;
+    }
+    let ts_node_ids = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.language.as_deref(),
+                Some("typescript") | Some("javascript")
+            ) || node.crate_name.as_deref() == Some("frontend")
+        })
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    snapshot.edges.retain(|edge| {
+        !(edge.edge_type == EdgeType::ApiCall && ts_node_ids.contains(&edge.source))
+    });
+    let ts_symbols_by_file = files
+        .iter()
+        .map(|file| (file.relative_path.clone(), discover_ts_symbols(file)))
+        .collect::<HashMap<_, _>>();
+    enrich_ts_relationships(snapshot, &files, &ts_symbols_by_file);
+    dedupe_graph(snapshot);
+}
+
 fn enrich_typescript_graph_impl(snapshot: &mut GraphSnapshot, project_root: &Path) -> usize {
     let mut files = Vec::new();
     collect_ts_files(project_root, project_root, &mut files);

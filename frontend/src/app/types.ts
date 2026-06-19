@@ -182,6 +182,22 @@ export interface NodeDetailsResponse {
   references: ReferenceRecord[]
   relatedTypes: GraphNode[]
   diagnostics: DiagnosticRecord[]
+  endpointDetails?: EndpointDetails
+}
+
+export interface EndpointDetails {
+  routeMethod: string
+  routePath: string
+  routeKey: string
+  endpointLanguage?: string
+  handlers: EndpointHandlerDetails[]
+}
+
+export interface EndpointHandlerDetails {
+  nodeId: string
+  label: string
+  handlerLanguage?: string
+  handlerFile?: string
 }
 
 export interface ReferenceRecord {

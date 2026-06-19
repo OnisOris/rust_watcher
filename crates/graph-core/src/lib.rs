@@ -194,6 +194,41 @@ pub enum EdgeConfidence {
     Heuristic,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteKey {
+    pub method: String,
+    pub path: String,
+    pub key: String,
+}
+
+pub fn route_key(method: &str, path: &str) -> RouteKey {
+    let method = method.trim().to_ascii_uppercase();
+    let normalized_path = normalize_route_path(path);
+    RouteKey {
+        key: format!("{method} {normalized_path}"),
+        method,
+        path: normalized_path,
+    }
+}
+
+pub fn route_key_from_label(label: &str) -> Option<RouteKey> {
+    let (method, path) = label.split_once(char::is_whitespace)?;
+    Some(route_key(method, path.trim()))
+}
+
+fn normalize_route_path(path: &str) -> String {
+    let path = path.trim();
+    if path == "/" {
+        return "/".to_string();
+    }
+    let mut path = path.trim_end_matches('/').to_string();
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    path
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GraphMode {
     Macro,
@@ -655,6 +690,27 @@ pub struct NodeDetailsResponse {
     pub references: Vec<ReferenceRecord>,
     pub related_types: Vec<GraphNode>,
     pub diagnostics: Vec<DiagnosticRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_details: Option<EndpointDetails>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointDetails {
+    pub route_method: String,
+    pub route_path: String,
+    pub route_key: String,
+    pub endpoint_language: Option<String>,
+    pub handlers: Vec<EndpointHandlerDetails>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointHandlerDetails {
+    pub node_id: String,
+    pub label: String,
+    pub handler_language: Option<String>,
+    pub handler_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -784,6 +840,18 @@ mod tests {
         assert_eq!(
             index.find_by_kind(SymbolKindName::Component)[0].language,
             LanguageId::TypeScript
+        );
+    }
+
+    #[test]
+    fn route_keys_normalize_method_and_path() {
+        let key = route_key("get", "api/users/");
+        assert_eq!(key.method, "GET");
+        assert_eq!(key.path, "/api/users");
+        assert_eq!(key.key, "GET /api/users");
+        assert_eq!(
+            route_key_from_label("POST /api/users").unwrap(),
+            route_key("post", "/api/users")
         );
     }
 }
