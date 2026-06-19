@@ -37,6 +37,7 @@ const NODE_COLORS: Record<NodeType, string> = {
 
 const EDGE_COLORS: Record<EdgeType, string> = {
   Contains: '#374151',
+  Imports: '#64748B',
   Uses: '#4B5870',
   Calls: '#06B6D4',
   Renders: '#14B8A6',

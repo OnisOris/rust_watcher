@@ -17,6 +17,7 @@ export type NodeType =
 
 export type EdgeType =
   | 'Contains'
+  | 'Imports'
   | 'Uses'
   | 'Calls'
   | 'Renders'

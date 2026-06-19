@@ -10,6 +10,7 @@ use std::fs;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use tree_sitter::{Node, Parser, Point};
 use uuid::Uuid;
 
 pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> GraphSnapshot {
@@ -295,37 +296,21 @@ impl LanguageAnalyzer for TypeScriptLanguageAdapter {
             };
             discover_ts_symbols(&ts_file)
                 .into_iter()
-                .map(|symbol| {
-                    let line = symbol.line.saturating_sub(1);
-                    let label_len = symbol.label.len() as u32;
-                    SymbolRecord {
-                        id: symbol.id.clone(),
-                        node_id: symbol.id,
-                        language: file.language.clone(),
-                        node_type: symbol.node_type,
-                        label: symbol.label.clone(),
-                        name: symbol.label,
-                        kind: SymbolKindName::from_node_type(symbol.node_type),
-                        file: file.relative_path.clone(),
-                        module: Some(ts_file.module_path.clone()),
-                        crate_name: Some("frontend".to_string()),
-                        line: symbol.line,
-                        character: 0,
-                        range: graph_core::TextRange {
-                            start: graph_core::TextPosition { line, character: 0 },
-                            end: graph_core::TextPosition {
-                                line,
-                                character: symbol.signature.len() as u32,
-                            },
-                        },
-                        selection_range: graph_core::TextRange {
-                            start: graph_core::TextPosition { line, character: 0 },
-                            end: graph_core::TextPosition {
-                                line,
-                                character: label_len,
-                            },
-                        },
-                    }
+                .map(|symbol| SymbolRecord {
+                    id: symbol.id.clone(),
+                    node_id: symbol.id,
+                    language: file.language.clone(),
+                    node_type: symbol.node_type,
+                    label: symbol.label.clone(),
+                    name: symbol.label,
+                    kind: SymbolKindName::from_node_type(symbol.node_type),
+                    file: file.relative_path.clone(),
+                    module: Some(ts_file.module_path.clone()),
+                    crate_name: Some("frontend".to_string()),
+                    line: symbol.line,
+                    character: symbol.character,
+                    range: symbol.range,
+                    selection_range: symbol.selection_range,
                 })
                 .collect()
         })
@@ -664,6 +649,11 @@ struct TsSymbol {
     label: String,
     node_type: NodeType,
     line: u32,
+    character: u32,
+    range: graph_core::TextRange,
+    selection_range: graph_core::TextRange,
+    byte_start: usize,
+    byte_end: usize,
     signature: String,
 }
 
@@ -736,8 +726,8 @@ fn enrich_typescript_graph_impl(snapshot: &mut GraphSnapshot, project_root: &Pat
                 pinned: None,
                 bookmarked: None,
                 connections: None,
-                range: Some(line_range(symbol.line, raw_text_len(&symbol.signature))),
-                selection_range: Some(line_range(symbol.line, symbol.label.len() as u32)),
+                range: Some(symbol.range),
+                selection_range: Some(symbol.selection_range),
                 x: 650.0 + (symbol.line as f64 % 19.0) * 18.0,
                 y: (symbol.line as f64 * 23.0) % 560.0 - 280.0,
                 vx: 0.0,
@@ -796,6 +786,23 @@ fn collect_ts_files(root: &Path, current: &Path, files: &mut Vec<TsFile>) {
 }
 
 fn discover_ts_symbols(file: &TsFile) -> Vec<TsSymbol> {
+    let fallback = discover_ts_symbols_line_fallback(file);
+    let Some(mut parser_symbols) = discover_ts_symbols_with_parser(file) else {
+        return fallback;
+    };
+    let mut seen = parser_symbols
+        .iter()
+        .map(|symbol| (symbol.label.clone(), symbol.line))
+        .collect::<HashSet<_>>();
+    parser_symbols.extend(
+        fallback
+            .into_iter()
+            .filter(|symbol| seen.insert((symbol.label.clone(), symbol.line))),
+    );
+    parser_symbols
+}
+
+fn discover_ts_symbols_line_fallback(file: &TsFile) -> Vec<TsSymbol> {
     let mut symbols = Vec::new();
     for (line_idx, raw_line) in file.source.lines().enumerate() {
         let line = normalize_ts_declaration(raw_line.trim());
@@ -820,16 +827,279 @@ fn discover_ts_symbols(file: &TsFile) -> Vec<TsSymbol> {
         };
 
         if let Some((name, node_type)) = discovered {
+            let range = line_range(line_no, raw_text_len(raw_line));
+            let selection_range = line_range(line_no, name.len() as u32);
             symbols.push(TsSymbol {
                 id: ts_symbol_id(node_type, &file.relative_path, name, line_no),
                 label: name.to_string(),
                 node_type,
                 line: line_no,
+                character: 0,
+                range,
+                selection_range,
+                byte_start: line_start_byte(&file.source, line_idx),
+                byte_end: line_start_byte(&file.source, line_idx) + raw_line.len(),
                 signature: raw_line.trim().to_string(),
             });
         }
     }
     symbols
+}
+
+fn discover_ts_symbols_with_parser(file: &TsFile) -> Option<Vec<TsSymbol>> {
+    let tree = parse_ts_tree(file)?;
+    let mut symbols = Vec::new();
+    let mut seen = HashSet::new();
+    collect_ts_ast_symbols(
+        tree.root_node(),
+        &file.source,
+        &file.relative_path,
+        &mut symbols,
+        &mut seen,
+    );
+    Some(symbols)
+}
+
+fn collect_ts_ast_symbols(
+    node: Node<'_>,
+    source: &str,
+    relative_path: &str,
+    symbols: &mut Vec<TsSymbol>,
+    seen: &mut HashSet<(String, usize, usize)>,
+) {
+    match node.kind() {
+        "function_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                add_ts_ast_symbol(
+                    node,
+                    name_node,
+                    classify_ts_callable(node_text(name_node, source).as_str()),
+                    source,
+                    relative_path,
+                    symbols,
+                    seen,
+                );
+            } else if is_default_export(node) {
+                add_anonymous_default_ts_symbol(
+                    node,
+                    classify_ts_callable(default_export_name(relative_path).as_str()),
+                    source,
+                    relative_path,
+                    symbols,
+                    seen,
+                );
+            }
+        }
+        "interface_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                add_ts_ast_symbol(
+                    node,
+                    name_node,
+                    NodeType::Interface,
+                    source,
+                    relative_path,
+                    symbols,
+                    seen,
+                );
+            }
+        }
+        "type_alias_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                add_ts_ast_symbol(
+                    node,
+                    name_node,
+                    NodeType::TypeAlias,
+                    source,
+                    relative_path,
+                    symbols,
+                    seen,
+                );
+            }
+        }
+        "class_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = node_text(name_node, source);
+                let node_type = if name.chars().next().map(char::is_uppercase).unwrap_or(false) {
+                    NodeType::Component
+                } else {
+                    NodeType::Struct
+                };
+                add_ts_ast_symbol(
+                    node,
+                    name_node,
+                    node_type,
+                    source,
+                    relative_path,
+                    symbols,
+                    seen,
+                );
+            }
+        }
+        "variable_declarator" => {
+            if let (Some(name_node), Some(value_node)) = (
+                node.child_by_field_name("name"),
+                node.child_by_field_name("value"),
+            ) {
+                let name = node_text(name_node, source);
+                if is_ts_callable_value(value_node, source) || is_component_or_hook_name(&name) {
+                    add_ts_ast_symbol(
+                        node,
+                        name_node,
+                        classify_ts_callable(&name),
+                        source,
+                        relative_path,
+                        symbols,
+                        seen,
+                    );
+                }
+            }
+        }
+        "method_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let method = node_text(name_node, source);
+                let label = parent_class_label(node, source)
+                    .map(|class_name| format!("{class_name}::{method}"))
+                    .unwrap_or(method);
+                add_ts_ast_symbol_with_label(
+                    node,
+                    name_node,
+                    label,
+                    NodeType::Method,
+                    source,
+                    relative_path,
+                    symbols,
+                    seen,
+                );
+            }
+        }
+        _ => {}
+    }
+
+    for idx in 0..node.child_count() {
+        if let Some(child) = node.child(idx) {
+            if child.is_named() {
+                collect_ts_ast_symbols(child, source, relative_path, symbols, seen);
+            }
+        }
+    }
+}
+
+fn add_anonymous_default_ts_symbol(
+    node: Node<'_>,
+    node_type: NodeType,
+    source: &str,
+    relative_path: &str,
+    symbols: &mut Vec<TsSymbol>,
+    seen: &mut HashSet<(String, usize, usize)>,
+) {
+    let label = default_export_name(relative_path);
+    add_ts_ast_symbol_with_label(
+        node,
+        node,
+        label,
+        node_type,
+        source,
+        relative_path,
+        symbols,
+        seen,
+    );
+}
+
+fn add_ts_ast_symbol(
+    declaration: Node<'_>,
+    name_node: Node<'_>,
+    node_type: NodeType,
+    source: &str,
+    relative_path: &str,
+    symbols: &mut Vec<TsSymbol>,
+    seen: &mut HashSet<(String, usize, usize)>,
+) {
+    add_ts_ast_symbol_with_label(
+        declaration,
+        name_node,
+        node_text(name_node, source),
+        node_type,
+        source,
+        relative_path,
+        symbols,
+        seen,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_ts_ast_symbol_with_label(
+    declaration: Node<'_>,
+    name_node: Node<'_>,
+    label: String,
+    node_type: NodeType,
+    source: &str,
+    relative_path: &str,
+    symbols: &mut Vec<TsSymbol>,
+    seen: &mut HashSet<(String, usize, usize)>,
+) {
+    if label.is_empty()
+        || !seen.insert((
+            label.clone(),
+            declaration.start_byte(),
+            declaration.end_byte(),
+        ))
+    {
+        return;
+    }
+    let line = declaration.start_position().row as u32 + 1;
+    symbols.push(TsSymbol {
+        id: ts_symbol_id(node_type, relative_path, &label, line),
+        label,
+        node_type,
+        line,
+        character: name_node.start_position().column as u32,
+        range: ts_range(declaration.start_position(), declaration.end_position()),
+        selection_range: ts_range(name_node.start_position(), name_node.end_position()),
+        byte_start: declaration.start_byte(),
+        byte_end: declaration.end_byte(),
+        signature: signature_for_node(declaration, source),
+    });
+}
+
+fn is_ts_callable_value(node: Node<'_>, source: &str) -> bool {
+    matches!(
+        node.kind(),
+        "arrow_function" | "function" | "function_declaration"
+    ) || (node.kind() == "call_expression"
+        && ["memo", "forwardRef", "React.memo"]
+            .iter()
+            .any(|callee| node_text(node, source).contains(&format!("{callee}("))))
+}
+
+fn is_component_or_hook_name(name: &str) -> bool {
+    classify_ts_callable(name) != NodeType::Function
+}
+
+fn parent_class_label(node: Node<'_>, source: &str) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "class_declaration" {
+            return parent
+                .child_by_field_name("name")
+                .map(|name| node_text(name, source));
+        }
+        current = parent.parent();
+    }
+    None
+}
+
+fn is_default_export(node: Node<'_>) -> bool {
+    node.parent()
+        .filter(|parent| parent.kind() == "export_statement")
+        .is_some_and(|parent| parent.to_sexp().contains("default"))
+}
+
+fn default_export_name(relative_path: &str) -> String {
+    Path::new(relative_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("default")
+        .to_string()
 }
 
 fn enrich_ts_relationships(
@@ -838,6 +1108,7 @@ fn enrich_ts_relationships(
     symbols_by_file: &HashMap<String, Vec<TsSymbol>>,
 ) {
     let endpoint_by_path = build_endpoint_path_index(&snapshot.nodes);
+    let existing_edges: HashSet<_> = snapshot.edges.iter().map(|edge| edge.id.clone()).collect();
     let all_symbols = symbols_by_file
         .values()
         .flatten()
@@ -853,8 +1124,40 @@ fn enrich_ts_relationships(
         .filter(|symbol| matches!(symbol.node_type, NodeType::Function | NodeType::Hook))
         .cloned()
         .collect::<Vec<_>>();
+    let files_by_path = files
+        .iter()
+        .map(|file| (file.relative_path.clone(), file))
+        .collect::<HashMap<_, _>>();
+    let symbols_by_label_and_file = all_symbols
+        .iter()
+        .map(|symbol| {
+            (
+                (symbol.label.clone(), symbol_file(symbol)),
+                symbol.id.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let symbols_by_label = all_symbols
+        .iter()
+        .map(|symbol| (symbol.label.clone(), symbol.id.clone()))
+        .collect::<HashMap<_, _>>();
 
     for file in files {
+        if enrich_ts_ast_relationships(
+            snapshot,
+            file,
+            symbols_by_file,
+            &files_by_path,
+            &symbols_by_label_and_file,
+            &symbols_by_label,
+            &components,
+            &callables,
+            &endpoint_by_path,
+            &existing_edges,
+        ) {
+            continue;
+        }
+
         let file_node_id = file_id(&file.relative_path);
         let symbols = symbols_by_file
             .get(&file.relative_path)
@@ -880,24 +1183,33 @@ fn enrich_ts_relationships(
 
             for component in &components {
                 if component.id != source_id && contains_jsx_tag(line, &component.label) {
-                    snapshot
-                        .edges
-                        .push(edge(EdgeType::Renders, source_id, &component.id));
+                    snapshot.edges.push(edge_with_confidence(
+                        EdgeType::Renders,
+                        source_id,
+                        &component.id,
+                        EdgeConfidence::SyntaxFallback,
+                    ));
                 }
             }
             for callable in &callables {
                 if callable.id != source_id && contains_call(line, &callable.label) {
-                    snapshot
-                        .edges
-                        .push(edge(EdgeType::Calls, source_id, &callable.id));
+                    snapshot.edges.push(edge_with_confidence(
+                        EdgeType::Calls,
+                        source_id,
+                        &callable.id,
+                        EdgeConfidence::SyntaxFallback,
+                    ));
                 }
             }
             for api_path in extract_api_paths(line) {
                 if let Some(endpoint_ids) = endpoint_by_path.get(&api_path) {
                     for endpoint_id in endpoint_ids {
-                        snapshot
-                            .edges
-                            .push(edge(EdgeType::ApiCall, source_id, endpoint_id));
+                        snapshot.edges.push(edge_with_confidence(
+                            EdgeType::ApiCall,
+                            source_id,
+                            endpoint_id,
+                            EdgeConfidence::SyntaxFallback,
+                        ));
                     }
                 }
             }
@@ -910,6 +1222,407 @@ fn enrich_ts_relationships(
             }
         }
     }
+
+    propagate_ts_api_call_edges(snapshot);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enrich_ts_ast_relationships(
+    snapshot: &mut GraphSnapshot,
+    file: &TsFile,
+    symbols_by_file: &HashMap<String, Vec<TsSymbol>>,
+    files_by_path: &HashMap<String, &TsFile>,
+    symbols_by_label_and_file: &HashMap<(String, String), String>,
+    symbols_by_label: &HashMap<String, String>,
+    components: &[TsSymbol],
+    callables: &[TsSymbol],
+    endpoint_by_path: &HashMap<String, Vec<String>>,
+    existing_edges: &HashSet<String>,
+) -> bool {
+    let Some(tree) = parse_ts_tree(file) else {
+        return false;
+    };
+    if tree.root_node().has_error() {
+        return false;
+    }
+    let file_node_id = file_id(&file.relative_path);
+    let file_symbols = symbols_by_file
+        .get(&file.relative_path)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut new_edges = Vec::new();
+    collect_ts_ast_relationship_edges(
+        tree.root_node(),
+        &file.source,
+        file,
+        file_symbols,
+        files_by_path,
+        symbols_by_label_and_file,
+        symbols_by_label,
+        components,
+        callables,
+        endpoint_by_path,
+        existing_edges,
+        &file_node_id,
+        &mut new_edges,
+    );
+    snapshot.edges.extend(new_edges);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_ts_ast_relationship_edges(
+    node: Node<'_>,
+    source: &str,
+    file: &TsFile,
+    file_symbols: &[TsSymbol],
+    files_by_path: &HashMap<String, &TsFile>,
+    symbols_by_label_and_file: &HashMap<(String, String), String>,
+    symbols_by_label: &HashMap<String, String>,
+    components: &[TsSymbol],
+    callables: &[TsSymbol],
+    endpoint_by_path: &HashMap<String, Vec<String>>,
+    existing_edges: &HashSet<String>,
+    file_node_id: &str,
+    edges: &mut Vec<GraphEdge>,
+) {
+    match node.kind() {
+        "import_statement" => add_ts_import_edges(
+            node,
+            source,
+            file,
+            files_by_path,
+            symbols_by_label_and_file,
+            existing_edges,
+            file_node_id,
+            edges,
+        ),
+        "jsx_opening_element" | "jsx_self_closing_element" => {
+            let source_id = owner_ts_symbol_id(file_symbols, node).unwrap_or(file_node_id);
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let tag = node_text(name_node, source);
+                for component in components {
+                    if component.id != source_id && component.label == tag {
+                        push_unique_edge_with_confidence(
+                            edges,
+                            existing_edges,
+                            EdgeType::Renders,
+                            source_id,
+                            &component.id,
+                            EdgeConfidence::Semantic,
+                        );
+                    }
+                }
+            }
+        }
+        "call_expression" => {
+            let source_id = owner_ts_symbol_id(file_symbols, node).unwrap_or(file_node_id);
+            let callee = node
+                .child_by_field_name("function")
+                .map(|function| node_text(function, source))
+                .unwrap_or_default();
+            let callee_name = last_ts_identifier(&callee);
+            for callable in callables {
+                if callable.id != source_id && callable.label == callee_name {
+                    push_unique_edge_with_confidence(
+                        edges,
+                        existing_edges,
+                        EdgeType::Calls,
+                        source_id,
+                        &callable.id,
+                        EdgeConfidence::Semantic,
+                    );
+                }
+            }
+            if let Some(target_id) = symbols_by_label.get(&callee_name) {
+                if target_id != source_id {
+                    push_unique_edge_with_confidence(
+                        edges,
+                        existing_edges,
+                        EdgeType::Uses,
+                        source_id,
+                        target_id,
+                        EdgeConfidence::Semantic,
+                    );
+                }
+            }
+            for api_path in extract_api_paths(&node_text(node, source)) {
+                if let Some(endpoint_ids) = endpoint_by_path.get(&api_path) {
+                    for endpoint_id in endpoint_ids {
+                        push_unique_edge_with_confidence(
+                            edges,
+                            existing_edges,
+                            EdgeType::ApiCall,
+                            source_id,
+                            endpoint_id,
+                            EdgeConfidence::Semantic,
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for idx in 0..node.child_count() {
+        if let Some(child) = node.child(idx) {
+            if child.is_named() {
+                collect_ts_ast_relationship_edges(
+                    child,
+                    source,
+                    file,
+                    file_symbols,
+                    files_by_path,
+                    symbols_by_label_and_file,
+                    symbols_by_label,
+                    components,
+                    callables,
+                    endpoint_by_path,
+                    existing_edges,
+                    file_node_id,
+                    edges,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_ts_import_edges(
+    node: Node<'_>,
+    source: &str,
+    file: &TsFile,
+    files_by_path: &HashMap<String, &TsFile>,
+    symbols_by_label_and_file: &HashMap<(String, String), String>,
+    existing_edges: &HashSet<String>,
+    file_node_id: &str,
+    edges: &mut Vec<GraphEdge>,
+) {
+    let import_text = node_text(node, source);
+    let Some(specifier) = extract_first_string(&import_text) else {
+        return;
+    };
+    let Some(resolved_file) = resolve_ts_import(&file.relative_path, &specifier, files_by_path)
+    else {
+        return;
+    };
+    let imported_file_id = file_id(&resolved_file);
+    push_unique_edge_with_confidence(
+        edges,
+        existing_edges,
+        EdgeType::Imports,
+        file_node_id,
+        &imported_file_id,
+        EdgeConfidence::Semantic,
+    );
+    for name in extract_imported_names(&import_text) {
+        if let Some(symbol_id) = symbols_by_label_and_file.get(&(name, resolved_file.clone())) {
+            push_unique_edge_with_confidence(
+                edges,
+                existing_edges,
+                EdgeType::Uses,
+                file_node_id,
+                symbol_id,
+                EdgeConfidence::Semantic,
+            );
+        }
+    }
+}
+
+fn propagate_ts_api_call_edges(snapshot: &mut GraphSnapshot) {
+    let existing_edges = snapshot
+        .edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<HashSet<_>>();
+    let api_by_source = snapshot
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::ApiCall)
+        .map(|edge| (edge.source.clone(), edge.target.clone()))
+        .collect::<Vec<_>>();
+    let call_edges = snapshot
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::Calls)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut new_edges = Vec::new();
+    for call in call_edges {
+        for (api_source, endpoint) in &api_by_source {
+            if call.target == *api_source {
+                push_unique_edge_with_confidence(
+                    &mut new_edges,
+                    &existing_edges,
+                    EdgeType::ApiCall,
+                    &call.source,
+                    endpoint,
+                    EdgeConfidence::Heuristic,
+                );
+            }
+        }
+    }
+    snapshot.edges.extend(new_edges);
+}
+
+fn owner_ts_symbol_id<'a>(symbols: &'a [TsSymbol], node: Node<'_>) -> Option<&'a str> {
+    let byte = node.start_byte();
+    symbols
+        .iter()
+        .filter(|symbol| symbol.byte_start <= byte && byte <= symbol.byte_end)
+        .min_by_key(|symbol| symbol.byte_end.saturating_sub(symbol.byte_start))
+        .map(|symbol| symbol.id.as_str())
+}
+
+fn symbol_file(symbol: &TsSymbol) -> String {
+    symbol
+        .id
+        .split_once(':')
+        .and_then(|(_, rest)| rest.split_once("::"))
+        .map(|(file, _)| file.to_string())
+        .unwrap_or_default()
+}
+
+fn parse_ts_tree(file: &TsFile) -> Option<tree_sitter::Tree> {
+    let mut parser = Parser::new();
+    let language: tree_sitter::Language =
+        if file.relative_path.ends_with(".tsx") || file.relative_path.ends_with(".jsx") {
+            tree_sitter_typescript::LANGUAGE_TSX.into()
+        } else {
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+        };
+    parser.set_language(&language).ok()?;
+    parser.parse(&file.source, None)
+}
+
+fn ts_range(start: Point, end: Point) -> graph_core::TextRange {
+    graph_core::TextRange {
+        start: graph_core::TextPosition {
+            line: start.row as u32,
+            character: start.column as u32,
+        },
+        end: graph_core::TextPosition {
+            line: end.row as u32,
+            character: end.column as u32,
+        },
+    }
+}
+
+fn node_text(node: Node<'_>, source: &str) -> String {
+    node.utf8_text(source.as_bytes())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn signature_for_node(node: Node<'_>, source: &str) -> String {
+    let end = source[node.start_byte()..node.end_byte()]
+        .find('\n')
+        .map(|offset| node.start_byte() + offset)
+        .unwrap_or_else(|| node.end_byte());
+    source[node.start_byte()..end].trim().to_string()
+}
+
+fn line_start_byte(source: &str, line_idx: usize) -> usize {
+    source
+        .lines()
+        .take(line_idx)
+        .map(|line| line.len() + 1)
+        .sum()
+}
+
+fn last_ts_identifier(callee: &str) -> String {
+    callee
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+        .rfind(|part| !part.is_empty())
+        .unwrap_or_default()
+        .trim_start_matches('$')
+        .to_string()
+}
+
+fn extract_imported_names(import_text: &str) -> Vec<String> {
+    let before_from = import_text
+        .split(" from ")
+        .next()
+        .unwrap_or(import_text)
+        .trim_start_matches("import")
+        .trim();
+    let mut names = Vec::new();
+    if let Some((default_name, rest)) = before_from.split_once('{') {
+        let default_name = default_name.trim().trim_end_matches(',');
+        if is_ts_identifier(default_name) {
+            names.push(default_name.to_string());
+        }
+        if let Some((named, _)) = rest.split_once('}') {
+            names.extend(named.split(',').filter_map(import_binding_name));
+        }
+    } else if is_ts_identifier(before_from) {
+        names.push(before_from.to_string());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn import_binding_name(binding: &str) -> Option<String> {
+    let name = binding.rsplit(" as ").next().unwrap_or(binding).trim();
+    is_ts_identifier(name).then(|| name.to_string())
+}
+
+fn is_ts_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+}
+
+fn resolve_ts_import(
+    from_file: &str,
+    specifier: &str,
+    files_by_path: &HashMap<String, &TsFile>,
+) -> Option<String> {
+    if !specifier.starts_with('.') {
+        return None;
+    }
+    let base = Path::new(from_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(specifier);
+    let normalized = normalize_relative_path(&base);
+    let candidates = [
+        normalized.clone(),
+        format!("{normalized}.ts"),
+        format!("{normalized}.tsx"),
+        format!("{normalized}.js"),
+        format!("{normalized}.jsx"),
+        format!("{normalized}/index.ts"),
+        format!("{normalized}/index.tsx"),
+        format!("{normalized}/index.js"),
+        format!("{normalized}/index.jsx"),
+    ];
+    candidates
+        .into_iter()
+        .find(|candidate| files_by_path.contains_key(candidate))
+}
+
+fn normalize_relative_path(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::Normal(part) => {
+                if let Some(part) = part.to_str() {
+                    parts.push(part.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    parts.join("/")
 }
 
 struct SyntaxNodeIndex {
@@ -1192,6 +1905,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
             .collect(),
             [
                 EdgeType::Contains,
+                EdgeType::Imports,
                 EdgeType::Uses,
                 EdgeType::ApiCall,
                 EdgeType::EndpointHandler,
@@ -1228,6 +1942,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 EdgeType::EndpointHandler,
                 EdgeType::TypeReference,
                 EdgeType::Implements,
+                EdgeType::Imports,
                 EdgeType::Uses,
             ]
             .into_iter()
@@ -1892,12 +2607,26 @@ fn node(
 }
 
 fn edge(edge_type: EdgeType, source: &str, target: &str) -> GraphEdge {
+    edge_with_confidence(
+        edge_type,
+        source,
+        target,
+        default_edge_confidence(edge_type),
+    )
+}
+
+fn edge_with_confidence(
+    edge_type: EdgeType,
+    source: &str,
+    target: &str,
+    confidence: EdgeConfidence,
+) -> GraphEdge {
     GraphEdge {
         id: edge_id(edge_type, source, target),
         source: source.to_string(),
         target: target.to_string(),
         edge_type,
-        confidence: default_edge_confidence(edge_type),
+        confidence,
     }
 }
 
@@ -1909,7 +2638,9 @@ fn default_edge_confidence(edge_type: EdgeType) -> EdgeConfidence {
         EdgeType::Calls | EdgeType::Renders | EdgeType::TypeReference | EdgeType::DataFlow => {
             EdgeConfidence::SyntaxFallback
         }
-        EdgeType::ApiCall | EdgeType::ModDeclaration => EdgeConfidence::Semantic,
+        EdgeType::ApiCall | EdgeType::Imports | EdgeType::ModDeclaration => {
+            EdgeConfidence::Semantic
+        }
         EdgeType::Uses => EdgeConfidence::Heuristic,
         EdgeType::Implements => EdgeConfidence::SyntaxFallback,
     }
@@ -2167,6 +2898,184 @@ export function App() {
             .any(|edge| edge.edge_type == EdgeType::EndpointHandler));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parser_typescript_adapter_detects_react_graph_and_api_bridge() {
+        let root = std::env::temp_dir().join(format!("rust-watcher-ts-parser-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"ts_parser_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+fn users() {}
+
+fn main() {
+    app.route("/api/users", get(users));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/App.tsx"),
+            r#"
+import { UserList } from './UserList'
+
+export default function App() {
+  return <UserList />
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/UserList.tsx"),
+            r#"
+import { useUsers } from './useUsers'
+
+export function UserList() {
+  const users = useUsers()
+  return <ul>{users.map(user => <li key={user.id}>{user.name}</li>)}</ul>
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/useUsers.ts"),
+            r#"
+import { getUsers } from './api'
+
+export function useUsers() {
+  return getUsers()
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/api.ts"),
+            r#"
+export function getUsers() {
+  return fetch('/api/users')
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/types.ts"),
+            r#"
+export interface User {
+  id: string
+  name: string
+}
+
+export type UserId = User['id']
+"#,
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let app = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Component && node.label == "App")
+            .unwrap();
+        let user_list = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Component && node.label == "UserList")
+            .unwrap();
+        let use_users = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Hook && node.label == "useUsers")
+            .unwrap();
+        let get_users = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "getUsers")
+            .unwrap();
+        let endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users")
+            .unwrap();
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "users")
+            .unwrap();
+
+        assert!(snapshot
+            .nodes
+            .iter()
+            .any(|node| node.node_type == NodeType::Interface && node.label == "User"));
+        assert!(snapshot
+            .nodes
+            .iter()
+            .any(|node| node.node_type == NodeType::TypeAlias && node.label == "UserId"));
+        assert_eq!(app.language.as_deref(), Some("typescript"));
+        assert!(app.range.is_some());
+        assert!(app.selection_range.is_some());
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Renders
+                && edge.source == app.id
+                && edge.target == user_list.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Calls
+                && edge.source == user_list.id
+                && edge.target == use_users.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Calls
+                && edge.source == use_users.id
+                && edge.target == get_users.id
+        }));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Imports));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == get_users.id
+                && edge.target == endpoint.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == use_users.id
+                && edge.target == endpoint.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::EndpointHandler
+                && edge.source == endpoint.id
+                && edge.target == handler.id
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typescript_symbol_detection_falls_back_when_parser_fails() {
+        let file = TsFile {
+            relative_path: "frontend/src/broken.ts".into(),
+            module_path: "broken".into(),
+            source: "export function broken(\nexport const StillFound = () => null\n".into(),
+        };
+        let symbols = discover_ts_symbols(&file);
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.node_type == NodeType::Function && symbol.label == "broken"));
+        assert!(symbols.iter().any(|symbol| symbol.label == "StillFound"
+            && symbol.node_type == NodeType::Component
+            && symbol.range.start.line == 1));
     }
 
     #[test]

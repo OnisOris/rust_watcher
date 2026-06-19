@@ -149,6 +149,7 @@ pub enum NodeType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeType {
     Contains,
+    Imports,
     Uses,
     Calls,
     Renders,

@@ -8,4 +8,6 @@ license.workspace = true
 anyhow.workspace = true
 graph-core = { path = "../graph-core" }
 project-indexer = { path = "../project-indexer" }
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23"
 uuid.workspace = true
