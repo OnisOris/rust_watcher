@@ -12,10 +12,10 @@ use graph_builder::{
     push_unique_edge_with_confidence,
 };
 use graph_core::{
-    AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, EdgeConfidence,
-    EdgeType, FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphSnapshot,
-    LanguageId, NodeDetailsResponse, ReferenceRecord, SearchResult, ServerMessage, SourceLocation,
-    SymbolIndex, SymbolKindName,
+    AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
+    DiagnosticSeverity, EdgeConfidence, EdgeType, FocusDepth, FocusRequest, FocusResponse,
+    GraphMode, GraphNode, GraphPatch, GraphSnapshot, LanguageId, NodeDetailsResponse,
+    ReferenceRecord, SearchResult, ServerMessage, SourceLocation, SymbolIndex, SymbolKindName,
 };
 use parking_lot::RwLock;
 use project_indexer::{index_project, start_watcher};
@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::time::{sleep, timeout, Duration};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -63,6 +63,8 @@ struct ServeArgs {
     frontend_dist: PathBuf,
     #[arg(long, default_value = "rust-analyzer")]
     rust_analyzer: PathBuf,
+    #[arg(long)]
+    enable_editor_open: bool,
 }
 
 #[derive(Clone)]
@@ -71,9 +73,165 @@ struct AppStateHandle {
     graph: Arc<RwLock<GraphSnapshot>>,
     status: Arc<RwLock<AppStatus>>,
     ws_tx: broadcast::Sender<ServerMessage>,
-    rust_analyzer: PathBuf,
+    analyzer: Arc<AnalyzerState>,
+    diagnostics_by_file: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
+    diagnostics_by_node: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     watcher: Arc<RwLock<Option<notify::RecommendedWatcher>>>,
     is_indexing: Arc<AtomicBool>,
+    enable_editor_open: bool,
+}
+
+struct AnalyzerState {
+    binary: PathBuf,
+    root: RwLock<PathBuf>,
+    client: AsyncMutex<Option<ra_client::RaClient>>,
+}
+
+#[allow(dead_code)]
+impl AnalyzerState {
+    async fn set_root(&self, root: PathBuf) {
+        *self.root.write() = root;
+        let mut client = self.client.lock().await;
+        if let Some(client) = client.as_mut() {
+            let _ = client.shutdown().await;
+        }
+        *client = None;
+    }
+
+    async fn ensure_started_locked(&self, client: &mut Option<ra_client::RaClient>) -> Result<()> {
+        if client.is_some() {
+            return Ok(());
+        }
+        let root = self.root.read().clone();
+        let started = timeout(
+            Duration::from_secs(8),
+            ra_client::RaClient::start(&self.binary, &root),
+        )
+        .await
+        .context("rust-analyzer initialize timed out")??;
+        *client = Some(started);
+        Ok(())
+    }
+
+    pub async fn document_symbols(&self, file: &Path) -> Result<Vec<graph_core::DiscoveredSymbol>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard.as_ref().unwrap().document_symbols(file).await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    pub async fn prepare_call_hierarchy(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<ra_client::LspCallHierarchyItem>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard
+            .as_ref()
+            .unwrap()
+            .prepare_call_hierarchy(file, line, character)
+            .await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    pub async fn outgoing_calls(
+        &self,
+        item: &ra_client::LspCallHierarchyItem,
+    ) -> Result<Vec<ra_client::LspCallHierarchyOutgoingCall>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard.as_ref().unwrap().outgoing_calls(item).await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    pub async fn incoming_calls(
+        &self,
+        item: &ra_client::LspCallHierarchyItem,
+    ) -> Result<Vec<ra_client::LspCallHierarchyIncomingCall>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard.as_ref().unwrap().incoming_calls(item).await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    pub async fn references(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<ra_client::LspLocation>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard
+            .as_ref()
+            .unwrap()
+            .references(file, line, character)
+            .await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    pub async fn definition(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard
+            .as_ref()
+            .unwrap()
+            .definition(file, line, character)
+            .await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    pub async fn type_definition(
+        &self,
+        file: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard
+            .as_ref()
+            .unwrap()
+            .type_definition(file, line, character)
+            .await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result
+    }
+
+    async fn subscribe_notifications(
+        &self,
+    ) -> Result<broadcast::Receiver<ra_client::LspNotification>> {
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        Ok(guard.as_ref().unwrap().subscribe_notifications())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,14 +323,22 @@ async fn serve(args: ServeArgs) -> Result<()> {
         status: initial_status.clone(),
     };
     let (ws_tx, _) = broadcast::channel(64);
+    let analyzer = Arc::new(AnalyzerState {
+        binary: args.rust_analyzer.clone(),
+        root: RwLock::new(project_root.clone()),
+        client: AsyncMutex::new(None),
+    });
     let state = AppStateHandle {
         project_root: Arc::new(RwLock::new(project_root.clone())),
         graph: Arc::new(RwLock::new(initial_snapshot)),
         status: Arc::new(RwLock::new(initial_status)),
         ws_tx,
-        rust_analyzer: args.rust_analyzer.clone(),
+        analyzer,
+        diagnostics_by_file: Arc::new(RwLock::new(HashMap::new())),
+        diagnostics_by_node: Arc::new(RwLock::new(HashMap::new())),
         watcher: Arc::new(RwLock::new(None)),
         is_indexing: Arc::new(AtomicBool::new(false)),
+        enable_editor_open: args.enable_editor_open,
     };
     install_watcher(&state, project_root.clone());
 
@@ -292,6 +458,12 @@ async fn node_details(
     references.extend(resolve_rust_references(&state, &graph, &node).await);
     dedupe_references(&mut references);
     let related_types = related_type_nodes(&incoming_edges, &outgoing_edges, &node_by_id);
+    let diagnostics = state
+        .diagnostics_by_node
+        .read()
+        .get(&id)
+        .cloned()
+        .unwrap_or_default();
 
     (
         StatusCode::OK,
@@ -303,6 +475,7 @@ async fn node_details(
             callees,
             references,
             related_types,
+            diagnostics,
         }),
     )
         .into_response()
@@ -363,6 +536,13 @@ async fn open_in_editor(
     State(state): State<AppStateHandle>,
     Json(request): Json<OpenEditorRequest>,
 ) -> impl IntoResponse {
+    if !state.enable_editor_open {
+        return (
+            StatusCode::FORBIDDEN,
+            "Opening files in an editor is disabled. Restart with --enable-editor-open to enable it.",
+        )
+            .into_response();
+    }
     let root = state.project_root.read().clone();
     let requested_path = if request.file.is_absolute() {
         request.file.clone()
@@ -423,6 +603,7 @@ async fn open_project(
         }
     };
     *state.project_root.write() = root.clone();
+    state.analyzer.set_root(root.clone()).await;
     install_watcher(&state, root.clone());
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -753,7 +934,13 @@ fn install_watcher(state: &AppStateHandle, root: PathBuf) {
             let _ = state
                 .ws_tx
                 .send(ServerMessage::AnalysisEvent(analysis_event));
-            index_and_publish(state, root).await;
+            sleep(Duration::from_millis(250)).await;
+            let changed_files = event
+                .paths
+                .iter()
+                .map(|path| project_indexer::relative_to(&root, path))
+                .collect::<Vec<_>>();
+            index_and_patch(state, root, changed_files).await;
         });
     }) {
         Ok(watcher) => {
@@ -854,78 +1041,54 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
         status.progress = Some(40);
     });
 
-    if let Err(error) = check_rust_analyzer(&state.rust_analyzer).await {
-        warn!(
-            ?error,
-            "rust-analyzer preflight failed, using fallback graph"
-        );
-        publish_analyzer_fallback(
-            &state,
-            snapshot,
-            "rust-analyzer is unavailable. Using syntax graph fallback.",
-        );
-        info!(
-            nodes = state.graph.read().nodes.len(),
-            edges = state.graph.read().edges.len(),
-            files = state.graph.read().files.len(),
-            "indexing finish"
-        );
-        state.is_indexing.store(false, Ordering::SeqCst);
-        return;
-    }
-
-    match timeout(
-        Duration::from_secs(8),
-        ra_client::RaClient::start(&state.rust_analyzer, &project_root),
-    )
-    .await
-    {
-        Ok(Ok(mut client)) => {
-            update_status(&state, |status| {
-                status.message = Some("Reading document symbols".into());
-                status.progress = Some(55);
-            });
-            for (idx, file) in index.files.iter().enumerate() {
-                match timeout(
-                    Duration::from_secs(3),
-                    client.document_symbols(&file.absolute_path),
-                )
-                .await
-                {
-                    Ok(Ok(symbols)) => enrich_file_symbols(&mut snapshot, file, &symbols),
-                    Ok(Err(error)) => {
-                        warn!(file = %file.relative_path, ?error, "documentSymbol failed")
-                    }
-                    Err(_) => warn!(file = %file.relative_path, "documentSymbol timed out"),
-                }
-                let progress = 55 + ((idx as f32 / index.files.len().max(1) as f32) * 35.0) as u8;
-                update_status(&state, |status| status.progress = Some(progress.min(90)));
-            }
-            update_status(&state, |status| {
-                status.message = Some("Resolving semantic call graph".into());
-                status.progress = Some(92);
-            });
-            enrich_semantic_call_edges(&mut snapshot, &project_root, &client).await;
-            let _ = client.shutdown().await;
-            snapshot.status = ready_status(&state, "Ready");
-            publish_snapshot(&state, snapshot);
-        }
-        Ok(Err(error)) => {
+    match state.analyzer.subscribe_notifications().await {
+        Ok(rx) => spawn_diagnostics_listener(state.clone(), rx),
+        Err(error) => {
             warn!(?error, "rust-analyzer unavailable, using fallback graph");
             publish_analyzer_fallback(
                 &state,
                 snapshot,
                 "rust-analyzer is unavailable. Using syntax graph fallback.",
             );
-        }
-        Err(_) => {
-            warn!("rust-analyzer initialize timed out, using fallback graph");
-            publish_analyzer_fallback(
-                &state,
-                snapshot,
-                "rust-analyzer is unavailable. Using syntax graph fallback.",
+            info!(
+                nodes = state.graph.read().nodes.len(),
+                edges = state.graph.read().edges.len(),
+                files = state.graph.read().files.len(),
+                "indexing finish"
             );
+            state.is_indexing.store(false, Ordering::SeqCst);
+            return;
         }
+    }
+
+    {
+        update_status(&state, |status| {
+            status.message = Some("Reading document symbols".into());
+            status.progress = Some(55);
+        });
+        for (idx, file) in index.files.iter().enumerate() {
+            match timeout(
+                Duration::from_secs(3),
+                state.analyzer.document_symbols(&file.absolute_path),
+            )
+            .await
+            {
+                Ok(Ok(symbols)) => enrich_file_symbols(&mut snapshot, file, &symbols),
+                Ok(Err(error)) => {
+                    warn!(file = %file.relative_path, ?error, "documentSymbol failed")
+                }
+                Err(_) => warn!(file = %file.relative_path, "documentSymbol timed out"),
+            }
+            let progress = 55 + ((idx as f32 / index.files.len().max(1) as f32) * 35.0) as u8;
+            update_status(&state, |status| status.progress = Some(progress.min(90)));
+        }
+        update_status(&state, |status| {
+            status.message = Some("Resolving semantic call graph".into());
+            status.progress = Some(92);
+        });
+        enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
+        snapshot.status = ready_status(&state, "Ready");
+        publish_snapshot(&state, snapshot);
     }
 
     info!(
@@ -935,6 +1098,148 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
         "indexing finish"
     );
     state.is_indexing.store(false, Ordering::SeqCst);
+}
+
+async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_files: Vec<String>) {
+    if state.is_indexing.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    update_status(&state, |status| {
+        status.analyzer_status = AnalyzerStatus::Indexing;
+        status.message = Some("Updating changed files".into());
+        status.progress = Some(20);
+    });
+
+    let old_snapshot = state.graph.read().clone();
+    let index = match index_project(&project_root) {
+        Ok(index) => index,
+        Err(error) => {
+            warn!(?error, "incremental index failed; keeping current graph");
+            state.is_indexing.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    let mut snapshot = build_fallback_graph(&index, state.status.read().clone());
+    if state.analyzer.subscribe_notifications().await.is_ok() {
+        for file in &index.files {
+            match timeout(
+                Duration::from_secs(3),
+                state.analyzer.document_symbols(&file.absolute_path),
+            )
+            .await
+            {
+                Ok(Ok(symbols)) => enrich_file_symbols(&mut snapshot, file, &symbols),
+                Ok(Err(error)) => {
+                    warn!(file = %file.relative_path, ?error, "documentSymbol failed during patch")
+                }
+                Err(_) => {
+                    warn!(file = %file.relative_path, "documentSymbol timed out during patch")
+                }
+            }
+        }
+        enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
+    }
+    snapshot.status = ready_status(&state, "Ready");
+    let diagnostics = state
+        .diagnostics_by_file
+        .read()
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    apply_diagnostics_to_files(&mut snapshot, &diagnostics);
+    let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
+    *state.graph.write() = snapshot;
+    let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
+    state.is_indexing.store(false, Ordering::SeqCst);
+}
+
+fn diff_snapshots(
+    old: &GraphSnapshot,
+    new: &GraphSnapshot,
+    changed_files: Vec<String>,
+    diagnostics: Vec<DiagnosticRecord>,
+) -> GraphPatch {
+    let old_nodes = old
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let new_nodes = new
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let old_edges = old
+        .edges
+        .iter()
+        .map(|edge| (edge.id.as_str(), edge))
+        .collect::<HashMap<_, _>>();
+    let new_edges = new
+        .edges
+        .iter()
+        .map(|edge| (edge.id.as_str(), edge))
+        .collect::<HashMap<_, _>>();
+
+    GraphPatch {
+        added_nodes: new
+            .nodes
+            .iter()
+            .filter(|node| !old_nodes.contains_key(node.id.as_str()))
+            .cloned()
+            .collect(),
+        updated_nodes: new
+            .nodes
+            .iter()
+            .filter(|node| {
+                old_nodes.get(node.id.as_str()).is_some_and(|old| {
+                    serde_json::to_value(old).ok() != serde_json::to_value(node).ok()
+                })
+            })
+            .cloned()
+            .collect(),
+        removed_node_ids: old
+            .nodes
+            .iter()
+            .filter(|node| !new_nodes.contains_key(node.id.as_str()))
+            .map(|node| node.id.clone())
+            .collect(),
+        added_edges: new
+            .edges
+            .iter()
+            .filter(|edge| !old_edges.contains_key(edge.id.as_str()))
+            .cloned()
+            .collect(),
+        updated_edges: new
+            .edges
+            .iter()
+            .filter(|edge| {
+                old_edges.get(edge.id.as_str()).is_some_and(|old| {
+                    serde_json::to_value(old).ok() != serde_json::to_value(edge).ok()
+                })
+            })
+            .cloned()
+            .collect(),
+        removed_edge_ids: old
+            .edges
+            .iter()
+            .filter(|edge| !new_edges.contains_key(edge.id.as_str()))
+            .map(|edge| edge.id.clone())
+            .collect(),
+        diagnostics,
+        changed_files,
+    }
+}
+
+fn apply_diagnostics_to_files(snapshot: &mut GraphSnapshot, diagnostics: &[DiagnosticRecord]) {
+    let mut by_file: HashMap<&str, u32> = HashMap::new();
+    for diagnostic in diagnostics {
+        *by_file.entry(diagnostic.file.as_str()).or_default() += 1;
+    }
+    for file in &mut snapshot.files {
+        file.diagnostics_count = by_file.get(file.path.as_str()).copied().unwrap_or_default();
+    }
 }
 
 fn publish_analyzer_fallback(
@@ -949,10 +1254,153 @@ fn publish_analyzer_fallback(
     publish_snapshot(state, snapshot);
 }
 
+fn spawn_diagnostics_listener(
+    state: AppStateHandle,
+    mut rx: broadcast::Receiver<ra_client::LspNotification>,
+) {
+    tokio::spawn(async move {
+        while let Ok(notification) = rx.recv().await {
+            if notification.method != "textDocument/publishDiagnostics" {
+                continue;
+            }
+            let Ok(params) = serde_json::from_value::<ra_client::LspPublishDiagnosticsParams>(
+                notification.params,
+            ) else {
+                continue;
+            };
+            apply_lsp_diagnostics(&state, params);
+        }
+    });
+}
+
+fn apply_lsp_diagnostics(state: &AppStateHandle, params: ra_client::LspPublishDiagnosticsParams) {
+    let Some(path) = Url::parse(params.uri.as_str())
+        .ok()
+        .and_then(|uri| uri.to_file_path().ok())
+    else {
+        return;
+    };
+    let root = state.project_root.read().clone();
+    let file = project_indexer::relative_to(&root, &path);
+    let graph = state.graph.read().clone();
+    let symbol_index = SymbolIndex::from_nodes(&graph.nodes);
+    let diagnostics = params
+        .diagnostics
+        .into_iter()
+        .enumerate()
+        .map(|(idx, diagnostic)| diagnostic_from_lsp(&file, idx, diagnostic, &symbol_index))
+        .collect::<Vec<_>>();
+
+    state
+        .diagnostics_by_file
+        .write()
+        .insert(file.clone(), diagnostics.clone());
+    rebuild_diagnostics_by_node(state);
+    update_project_file_diagnostics(state, &file, diagnostics.len() as u32);
+
+    let _ = state.ws_tx.send(ServerMessage::GraphPatch(GraphPatch {
+        diagnostics,
+        changed_files: vec![file],
+        ..GraphPatch::default()
+    }));
+}
+
+fn diagnostic_from_lsp(
+    file: &str,
+    index: usize,
+    diagnostic: ra_client::LspDiagnostic,
+    symbol_index: &SymbolIndex,
+) -> DiagnosticRecord {
+    let range = graph_core::TextRange {
+        start: graph_core::TextPosition {
+            line: diagnostic.range.start.line,
+            character: diagnostic.range.start.character,
+        },
+        end: graph_core::TextPosition {
+            line: diagnostic.range.end.line,
+            character: diagnostic.range.end.character,
+        },
+    };
+    let related_node_ids = related_nodes_for_range(symbol_index, file, range);
+    let code = diagnostic.code.map(|code| match code {
+        ra_client::LspNumberOrString::Number(value) => value.to_string(),
+        ra_client::LspNumberOrString::String(value) => value,
+    });
+    DiagnosticRecord {
+        id: format!(
+            "diagnostic:{file}:{}:{}:{index}",
+            range.start.line, range.start.character
+        ),
+        language: LanguageId::Rust,
+        file: file.to_string(),
+        range: Some(range),
+        severity: diagnostic_severity(diagnostic.severity),
+        source: diagnostic.source,
+        message: diagnostic.message,
+        code,
+        related_node_ids,
+    }
+}
+
+fn diagnostic_severity(severity: Option<ra_client::LspDiagnosticSeverity>) -> DiagnosticSeverity {
+    match severity {
+        Some(ra_client::LspDiagnosticSeverity::ERROR) => DiagnosticSeverity::Error,
+        Some(ra_client::LspDiagnosticSeverity::WARNING) => DiagnosticSeverity::Warning,
+        Some(ra_client::LspDiagnosticSeverity::INFORMATION) => DiagnosticSeverity::Information,
+        Some(ra_client::LspDiagnosticSeverity::HINT) => DiagnosticSeverity::Hint,
+        _ => DiagnosticSeverity::Information,
+    }
+}
+
+fn related_nodes_for_range(
+    symbol_index: &SymbolIndex,
+    file: &str,
+    range: graph_core::TextRange,
+) -> Vec<String> {
+    symbol_index
+        .find_by_file(file)
+        .into_iter()
+        .filter(|symbol| ranges_overlap(symbol.range, range))
+        .map(|symbol| symbol.node_id.clone())
+        .collect()
+}
+
+fn ranges_overlap(left: graph_core::TextRange, right: graph_core::TextRange) -> bool {
+    position_le(left.start, right.end) && position_le(right.start, left.end)
+}
+
+fn position_le(left: graph_core::TextPosition, right: graph_core::TextPosition) -> bool {
+    left.line < right.line || (left.line == right.line && left.character <= right.character)
+}
+
+fn rebuild_diagnostics_by_node(state: &AppStateHandle) {
+    let mut by_node: HashMap<String, Vec<DiagnosticRecord>> = HashMap::new();
+    for diagnostic in state.diagnostics_by_file.read().values().flatten() {
+        for node_id in &diagnostic.related_node_ids {
+            by_node
+                .entry(node_id.clone())
+                .or_default()
+                .push(diagnostic.clone());
+        }
+    }
+    *state.diagnostics_by_node.write() = by_node;
+}
+
+fn update_project_file_diagnostics(state: &AppStateHandle, file: &str, count: u32) {
+    let mut graph = state.graph.write();
+    if let Some(project_file) = graph
+        .files
+        .iter_mut()
+        .find(|project_file| project_file.path == file)
+    {
+        project_file.diagnostics_count = count;
+    }
+}
+
 async fn enrich_semantic_call_edges(
     snapshot: &mut GraphSnapshot,
     project_root: &Path,
-    client: &ra_client::RaClient,
+    analyzer: &AnalyzerState,
 ) {
     let symbol_index = SymbolIndex::from_nodes(&snapshot.nodes);
     if symbol_index.symbols.is_empty() {
@@ -980,7 +1428,7 @@ async fn enrich_semantic_call_edges(
     for (source_id, file, position) in callable_symbols {
         let items = match timeout(
             Duration::from_secs(2),
-            client.prepare_call_hierarchy(&file, position.line, position.character),
+            analyzer.prepare_call_hierarchy(&file, position.line, position.character),
         )
         .await
         {
@@ -995,18 +1443,18 @@ async fn enrich_semantic_call_edges(
             }
         };
         for item in items {
-            let outgoing = match timeout(Duration::from_secs(2), client.outgoing_calls(&item)).await
-            {
-                Ok(Ok(outgoing)) => outgoing,
-                Ok(Err(error)) => {
-                    warn!(?error, source = %source_id, "outgoingCalls failed");
-                    continue;
-                }
-                Err(_) => {
-                    warn!(source = %source_id, "outgoingCalls timed out");
-                    continue;
-                }
-            };
+            let outgoing =
+                match timeout(Duration::from_secs(2), analyzer.outgoing_calls(&item)).await {
+                    Ok(Ok(outgoing)) => outgoing,
+                    Ok(Err(error)) => {
+                        warn!(?error, source = %source_id, "outgoingCalls failed");
+                        continue;
+                    }
+                    Err(_) => {
+                        warn!(source = %source_id, "outgoingCalls timed out");
+                        continue;
+                    }
+                };
             for call in outgoing {
                 let Some(target_path) = Url::parse(call.to.uri.as_str())
                     .ok()
@@ -1124,26 +1572,9 @@ async fn resolve_rust_references(
     };
     let project_root = state.project_root.read().clone();
     let absolute_file = project_root.join(file);
-    let mut client = match timeout(
-        Duration::from_secs(5),
-        ra_client::RaClient::start(&state.rust_analyzer, &project_root),
-    )
-    .await
-    {
-        Ok(Ok(client)) => client,
-        Ok(Err(error)) => {
-            warn!(?error, node = %node.id, "rust-analyzer unavailable for references");
-            return Vec::new();
-        }
-        Err(_) => {
-            warn!(node = %node.id, "rust-analyzer reference startup timed out");
-            return Vec::new();
-        }
-    };
-
     let locations = match timeout(
         Duration::from_secs(4),
-        client.references(
+        state.analyzer.references(
             &absolute_file,
             selection_range.start.line,
             selection_range.start.character,
@@ -1154,16 +1585,13 @@ async fn resolve_rust_references(
         Ok(Ok(locations)) => locations,
         Ok(Err(error)) => {
             warn!(?error, node = %node.id, "rust-analyzer references failed");
-            let _ = client.shutdown().await;
             return Vec::new();
         }
         Err(_) => {
             warn!(node = %node.id, "rust-analyzer references timed out");
-            let _ = client.shutdown().await;
             return Vec::new();
         }
     };
-    let _ = client.shutdown().await;
 
     references_from_locations(graph, &project_root, locations)
 }
@@ -1253,24 +1681,6 @@ fn dedupe_references(references: &mut Vec<ReferenceRecord>) {
             reference.node.as_ref().map(|node| node.id.clone()),
         ))
     });
-}
-
-async fn check_rust_analyzer(rust_analyzer: &PathBuf) -> Result<()> {
-    let output = timeout(
-        Duration::from_secs(2),
-        Command::new(rust_analyzer).arg("--version").output(),
-    )
-    .await
-    .context("rust-analyzer --version timed out")?
-    .context("failed to run rust-analyzer --version")?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let message = if stderr.is_empty() { stdout } else { stderr };
-        anyhow::bail!("rust-analyzer --version failed: {message}");
-    }
 }
 
 fn update_status<F>(state: &AppStateHandle, mut update: F)
@@ -1447,6 +1857,7 @@ mod tests {
                 },
             }],
             related_types: Vec::new(),
+            diagnostics: Vec::new(),
         };
         assert_eq!(
             response.incoming_edges[0].confidence,
@@ -1526,5 +1937,48 @@ mod tests {
         assert!(location.node.is_none());
         assert_eq!(location.location.line, 7);
         assert_eq!(location.location.range.unwrap().start.line, 6);
+    }
+
+    #[test]
+    fn lsp_diagnostic_converts_and_associates_to_node() {
+        let node = test_node("main", Some("src/main.rs"), Some("app"));
+        let symbol_index = SymbolIndex::from_nodes(std::slice::from_ref(&node));
+        let diagnostic: ra_client::LspDiagnostic = serde_json::from_value(serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 1 },
+                "end": { "line": 0, "character": 2 }
+            },
+            "severity": 1,
+            "source": "rustc",
+            "message": "broken"
+        }))
+        .unwrap();
+
+        let record = diagnostic_from_lsp("src/main.rs", 0, diagnostic, &symbol_index);
+        assert_eq!(record.severity, DiagnosticSeverity::Error);
+        assert_eq!(record.source.as_deref(), Some("rustc"));
+        assert_eq!(record.related_node_ids, vec![node.id]);
+    }
+
+    #[test]
+    fn graph_patch_serializes_diagnostics_and_changed_files() {
+        let patch = GraphPatch {
+            diagnostics: vec![DiagnosticRecord {
+                id: "diagnostic:src/main.rs:0:0:0".into(),
+                language: LanguageId::Rust,
+                file: "src/main.rs".into(),
+                range: None,
+                severity: DiagnosticSeverity::Warning,
+                source: Some("rustc".into()),
+                message: "careful".into(),
+                code: None,
+                related_node_ids: vec!["fn:main@1".into()],
+            }],
+            changed_files: vec!["src/main.rs".into()],
+            ..GraphPatch::default()
+        };
+        let value = serde_json::to_value(&patch).unwrap();
+        assert_eq!(value["changedFiles"][0], "src/main.rs");
+        assert_eq!(value["diagnostics"][0]["message"], "careful");
     }
 }

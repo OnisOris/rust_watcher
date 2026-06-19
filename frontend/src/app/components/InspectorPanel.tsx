@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers } from 'lucide-react'
-import type { AnalyzerStatus, AppState, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord } from '../types'
+import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
+import type { AnalyzerStatus, AppState, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord } from '../types'
 
 interface InspectorPanelProps {
   selectedNode: GraphNode | null
@@ -181,6 +181,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
   const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const usedBy = incoming.filter(e => e.type === 'Uses' || e.type === 'TypeReference').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const references = details?.references ?? referenceRecordsFromNodes(usedBy)
+  const diagnostics = details?.diagnostics ?? []
   const callerConfidence = confidenceByNode(incoming, 'source')
   const calleeConfidence = confidenceByNode(outgoing, 'target')
 
@@ -212,6 +213,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
             {node.isAsync && <Badge color="#06B6D4">async</Badge>}
             {node.isUnsafe && <Badge color="#F87171">unsafe</Badge>}
             {node.isGeneric && <Badge color="#8B5CF6">generic</Badge>}
+            {diagnostics.length > 0 && <Badge color={diagnostics.some(d => d.severity === 'Error') ? '#F87171' : '#F59E0B'}>{diagnostics.length} diagnostics</Badge>}
           </div>
 
           {/* signature */}
@@ -290,6 +292,12 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
         {references.length > 0 && (
           <Card>
             <ReferenceList references={references.slice(0, 8)} onSelect={onSelectNode} />
+          </Card>
+        )}
+
+        {diagnostics.length > 0 && (
+          <Card>
+            <DiagnosticsList diagnostics={diagnostics} />
           </Card>
         )}
 
@@ -427,6 +435,31 @@ function ReferenceList({ references, onSelect }: { references: ReferenceRecord[]
       ))}
     </div>
   )
+}
+
+function DiagnosticsList({ diagnostics }: { diagnostics: DiagnosticRecord[] }) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <AlertTriangle size={11} color="#F87171" />
+        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>Diagnostics ({diagnostics.length})</span>
+      </div>
+      {diagnostics.map(diagnostic => (
+        <div key={diagnostic.id} className="rounded p-2 mb-1.5" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+          <div className="flex items-center gap-2 mb-1">
+            <DiagnosticBadge diagnostic={diagnostic} />
+            <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontFamily: 'JetBrains Mono, monospace' }}>L{diagnostic.range ? diagnostic.range.start.line + 1 : 0}</span>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--cc-text-muted)', lineHeight: 1.35 }}>{diagnostic.message}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DiagnosticBadge({ diagnostic }: { diagnostic: DiagnosticRecord }) {
+  const color = diagnostic.severity === 'Error' ? '#F87171' : diagnostic.severity === 'Warning' ? '#F59E0B' : '#7D8795'
+  return <Badge color={color}>{diagnostic.severity}</Badge>
 }
 
 function ConfidenceBadge({ confidence }: { confidence: EdgeConfidence }) {

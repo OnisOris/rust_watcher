@@ -85,12 +85,15 @@ pub type LspRange = TextRange;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticRecord {
+    pub id: String,
     pub language: LanguageId,
     pub file: String,
     pub range: Option<TextRange>,
     pub severity: DiagnosticSeverity,
+    pub source: Option<String>,
     pub message: String,
     pub code: Option<String>,
+    pub related_node_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -551,6 +554,8 @@ pub struct GraphPatch {
     pub added_edges: Vec<GraphEdge>,
     pub updated_edges: Vec<GraphEdge>,
     pub removed_edge_ids: Vec<String>,
+    pub diagnostics: Vec<DiagnosticRecord>,
+    pub changed_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -610,6 +615,7 @@ pub struct NodeDetailsResponse {
     pub callees: Vec<GraphNode>,
     pub references: Vec<ReferenceRecord>,
     pub related_types: Vec<GraphNode>,
+    pub diagnostics: Vec<DiagnosticRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

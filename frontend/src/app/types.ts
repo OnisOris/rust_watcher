@@ -29,6 +29,7 @@ export type EdgeType =
   | 'ExternalDependency'
 
 export type EdgeConfidence = 'Exact' | 'Semantic' | 'SyntaxFallback' | 'Heuristic'
+export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
@@ -138,6 +139,20 @@ export interface GraphPatch {
   addedEdges: GraphEdge[]
   updatedEdges: GraphEdge[]
   removedEdgeIds: string[]
+  diagnostics: DiagnosticRecord[]
+  changedFiles: string[]
+}
+
+export interface DiagnosticRecord {
+  id: string
+  language: string
+  file: string
+  range?: LspRange
+  severity: DiagnosticSeverity
+  source?: string
+  message: string
+  code?: string
+  relatedNodeIds: string[]
 }
 
 export interface SearchResult {
@@ -164,6 +179,7 @@ export interface NodeDetailsResponse {
   callees: GraphNode[]
   references: ReferenceRecord[]
   relatedTypes: GraphNode[]
+  diagnostics: DiagnosticRecord[]
 }
 
 export interface ReferenceRecord {

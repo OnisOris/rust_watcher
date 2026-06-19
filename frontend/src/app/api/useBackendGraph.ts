@@ -163,6 +163,17 @@ export function useBackendGraph(mode: GraphMode) {
       const existing = new Set(next.map(edge => edge.id))
       return [...next, ...patch.addedEdges.filter(edge => !existing.has(edge.id))]
     })
+    if (patch.diagnostics?.length || patch.changedFiles?.length) {
+      const counts = new Map<string, number>()
+      patch.diagnostics.forEach(diagnostic => {
+        counts.set(diagnostic.file, (counts.get(diagnostic.file) ?? 0) + 1)
+      })
+      const changed = new Set(patch.changedFiles ?? [])
+      setFiles(prev => prev.map(file => {
+        if (!changed.has(file.path) && !counts.has(file.path)) return file
+        return { ...file, diagnosticsCount: counts.get(file.path) ?? 0 }
+      }))
+    }
   }, [])
 
   const openProject = useCallback(async (path?: string) => {

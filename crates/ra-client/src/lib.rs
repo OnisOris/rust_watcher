@@ -17,17 +17,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use url::Url;
 
-pub use lsp_types::Location as LspLocation;
+pub use lsp_types::{
+    CallHierarchyIncomingCall as LspCallHierarchyIncomingCall,
+    CallHierarchyItem as LspCallHierarchyItem,
+    CallHierarchyOutgoingCall as LspCallHierarchyOutgoingCall, Diagnostic as LspDiagnostic,
+    DiagnosticSeverity as LspDiagnosticSeverity,
+    GotoDefinitionResponse as LspGotoDefinitionResponse, Location as LspLocation,
+    NumberOrString as LspNumberOrString, PublishDiagnosticsParams as LspPublishDiagnosticsParams,
+};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+#[derive(Debug, Clone)]
+pub struct LspNotification {
+    pub method: String,
+    pub params: Value,
+}
 
 pub struct RaClient {
     child: Child,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     pending: PendingMap,
+    notifications: broadcast::Sender<LspNotification>,
     next_id: AtomicU64,
 }
 
@@ -64,12 +78,14 @@ impl RaClient {
         }
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        spawn_reader(stdout, pending.clone());
+        let (notifications, _) = broadcast::channel(128);
+        spawn_reader(stdout, pending.clone(), notifications.clone());
 
         let client = Self {
             child,
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
             pending,
+            notifications,
             next_id: AtomicU64::new(1),
         };
         client.initialize(root.as_ref()).await?;
@@ -105,6 +121,10 @@ impl RaClient {
         let _ = self.notify("exit", json!(null)).await;
         let _ = self.child.kill().await;
         Ok(())
+    }
+
+    pub fn subscribe_notifications(&self) -> broadcast::Receiver<LspNotification> {
+        self.notifications.subscribe()
     }
 
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<DiscoveredSymbol>> {
@@ -274,22 +294,17 @@ impl RaClient {
     }
 }
 
-fn spawn_reader(stdout: tokio::process::ChildStdout, pending: PendingMap) {
+fn spawn_reader(
+    stdout: tokio::process::ChildStdout,
+    pending: PendingMap,
+    notifications: broadcast::Sender<LspNotification>,
+) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         loop {
             match read_lsp_message(&mut reader).await {
                 Ok(Some(message)) => {
-                    if let Some(id) = message.get("id").and_then(Value::as_u64) {
-                        let result = if let Some(error) = message.get("error") {
-                            Err(error.to_string())
-                        } else {
-                            Ok(message.get("result").cloned().unwrap_or(Value::Null))
-                        };
-                        if let Some(tx) = pending.lock().remove(&id) {
-                            let _ = tx.send(result);
-                        }
-                    }
+                    handle_lsp_message(message, &pending, &notifications);
                 }
                 Ok(None) => break,
                 Err(error) => {
@@ -299,6 +314,28 @@ fn spawn_reader(stdout: tokio::process::ChildStdout, pending: PendingMap) {
             }
         }
     });
+}
+
+fn handle_lsp_message(
+    message: Value,
+    pending: &PendingMap,
+    notifications: &broadcast::Sender<LspNotification>,
+) {
+    if let Some(id) = message.get("id").and_then(Value::as_u64) {
+        let result = if let Some(error) = message.get("error") {
+            Err(error.to_string())
+        } else {
+            Ok(message.get("result").cloned().unwrap_or(Value::Null))
+        };
+        if let Some(tx) = pending.lock().remove(&id) {
+            let _ = tx.send(result);
+        }
+    } else if let Some(method) = message.get("method").and_then(Value::as_str) {
+        let _ = notifications.send(LspNotification {
+            method: method.to_string(),
+            params: message.get("params").cloned().unwrap_or(Value::Null),
+        });
+    }
 }
 
 async fn read_lsp_message<R>(reader: &mut BufReader<R>) -> Result<Option<Value>>
@@ -426,5 +463,30 @@ fn convert_kind(kind: lsp_types::SymbolKind) -> SymbolKindName {
         lsp_types::SymbolKind::INTERFACE => SymbolKindName::Trait,
         lsp_types::SymbolKind::KEY => SymbolKindName::Macro,
         _ => SymbolKindName::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn dispatches_notifications_without_id() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = broadcast::channel(4);
+        handle_lsp_message(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "diagnostics": [] }
+            }),
+            &pending,
+            &tx,
+        );
+
+        let notification = rx.recv().await.unwrap();
+        assert_eq!(notification.method, "textDocument/publishDiagnostics");
+        assert!(notification.params.get("diagnostics").is_some());
     }
 }
