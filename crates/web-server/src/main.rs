@@ -8,7 +8,8 @@ use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use graph_builder::{
-    build_fallback_graph, enrich_file_symbols, filter_snapshot, focus_subgraph,
+    build_fallback_graph, enrich_api_routes_for_files, enrich_file_symbols,
+    enrich_syntax_relationships_for_files, filter_snapshot, focus_subgraph,
     push_unique_edge_with_confidence,
 };
 use graph_core::{
@@ -85,6 +86,12 @@ struct AnalyzerState {
     binary: PathBuf,
     root: RwLock<PathBuf>,
     client: AsyncMutex<Option<ra_client::RaClient>>,
+    opened_files: RwLock<HashSet<PathBuf>>,
+    file_versions: RwLock<HashMap<PathBuf, i32>>,
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[allow(dead_code)]
@@ -96,6 +103,8 @@ impl AnalyzerState {
             let _ = client.shutdown().await;
         }
         *client = None;
+        self.opened_files.write().clear();
+        self.file_versions.write().clear();
     }
 
     async fn ensure_started_locked(&self, client: &mut Option<ra_client::RaClient>) -> Result<()> {
@@ -110,10 +119,62 @@ impl AnalyzerState {
         .await
         .context("rust-analyzer initialize timed out")??;
         *client = Some(started);
+        self.opened_files.write().clear();
         Ok(())
     }
 
+    async fn ensure_document_open(&self, file: &Path) -> Result<()> {
+        let file = normalize_path(file);
+        if self.opened_files.read().contains(&file) {
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        let version = *self.file_versions.write().entry(file.clone()).or_insert(1);
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = guard.as_ref().unwrap().did_open(&file, text, version).await;
+        if result.is_ok() {
+            self.opened_files.write().insert(file);
+        } else {
+            *guard = None;
+        }
+        result
+    }
+
+    async fn sync_changed_file(&self, file: &Path) -> Result<i32> {
+        let file = normalize_path(file);
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        let was_open = self.opened_files.read().contains(&file);
+        if !was_open {
+            self.ensure_document_open(&file).await?;
+            return Ok(*self.file_versions.read().get(&file).unwrap_or(&1));
+        }
+        let version = self.increment_file_version(&file);
+        let mut guard = self.client.lock().await;
+        self.ensure_started_locked(&mut guard).await?;
+        let result = async {
+            let client = guard.as_ref().unwrap();
+            client.did_change(&file, text.clone(), version).await?;
+            client.did_save(&file, Some(text)).await
+        }
+        .await;
+        if result.is_err() {
+            *guard = None;
+        }
+        result.map(|_| version)
+    }
+
+    fn increment_file_version(&self, file: &Path) -> i32 {
+        let mut versions = self.file_versions.write();
+        let version = versions.entry(normalize_path(file)).or_insert(1);
+        *version += 1;
+        *version
+    }
+
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<graph_core::DiscoveredSymbol>> {
+        self.ensure_document_open(file).await?;
         let mut guard = self.client.lock().await;
         self.ensure_started_locked(&mut guard).await?;
         let result = guard.as_ref().unwrap().document_symbols(file).await;
@@ -327,6 +388,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         binary: args.rust_analyzer.clone(),
         root: RwLock::new(project_root.clone()),
         client: AsyncMutex::new(None),
+        opened_files: RwLock::new(HashSet::new()),
+        file_versions: RwLock::new(HashMap::new()),
     });
     let state = AppStateHandle {
         project_root: Arc::new(RwLock::new(project_root.clone())),
@@ -1110,7 +1173,6 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         status.progress = Some(20);
     });
 
-    let old_snapshot = state.graph.read().clone();
     let index = match index_project(&project_root) {
         Ok(index) => index,
         Err(error) => {
@@ -1119,6 +1181,48 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
             return;
         }
     };
+
+    let rust_files = changed_files
+        .iter()
+        .filter(|file| file.ends_with(".rs"))
+        .filter_map(|file| {
+            index
+                .files
+                .iter()
+                .find(|indexed| indexed.relative_path == *file)
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    let only_rust = !rust_files.is_empty()
+        && changed_files
+            .iter()
+            .all(|file| file.ends_with(".rs") || file.ends_with("Cargo.toml"));
+
+    if only_rust {
+        match index_changed_rust_files(&state, &project_root, rust_files, changed_files.clone())
+            .await
+        {
+            Ok(()) => {
+                state.is_indexing.store(false, Ordering::SeqCst);
+                return;
+            }
+            Err(error) => warn!(
+                ?error,
+                "incremental file patch failed; falling back to rebuild patch"
+            ),
+        }
+    }
+
+    rebuild_patch_snapshot(state, project_root, index, changed_files).await;
+}
+
+async fn rebuild_patch_snapshot(
+    state: AppStateHandle,
+    project_root: PathBuf,
+    index: project_indexer::ProjectIndex,
+    changed_files: Vec<String>,
+) {
+    let old_snapshot = state.graph.read().clone();
 
     let mut snapshot = build_fallback_graph(&index, state.status.read().clone());
     if state.analyzer.subscribe_notifications().await.is_ok() {
@@ -1153,6 +1257,108 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
     *state.graph.write() = snapshot;
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     state.is_indexing.store(false, Ordering::SeqCst);
+}
+
+async fn index_changed_rust_files(
+    state: &AppStateHandle,
+    project_root: &Path,
+    files: Vec<project_indexer::IndexedFile>,
+    changed_files: Vec<String>,
+) -> Result<()> {
+    let old_snapshot = state.graph.read().clone();
+    let mut snapshot = old_snapshot.clone();
+    let changed_set = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<HashSet<_>>();
+    let old_positions = old_snapshot
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .collect::<HashMap<_, _>>();
+
+    for file in &files {
+        state
+            .analyzer
+            .sync_changed_file(&file.absolute_path)
+            .await?;
+    }
+
+    remove_file_symbols_and_edges(&mut snapshot, &changed_set);
+    for file in &files {
+        let symbols = match timeout(
+            Duration::from_secs(3),
+            state.analyzer.document_symbols(&file.absolute_path),
+        )
+        .await
+        {
+            Ok(Ok(symbols)) => symbols,
+            Ok(Err(error)) => {
+                warn!(file = %file.relative_path, ?error, "documentSymbol failed for changed file");
+                graph_builder::discover_syntax_symbols(file)
+            }
+            Err(_) => {
+                warn!(file = %file.relative_path, "documentSymbol timed out for changed file");
+                graph_builder::discover_syntax_symbols(file)
+            }
+        };
+        enrich_file_symbols(&mut snapshot, file, &symbols);
+    }
+    enrich_syntax_relationships_for_files(&mut snapshot, &files);
+    enrich_api_routes_for_files(&mut snapshot, &files);
+    enrich_semantic_call_edges_for_files(
+        &mut snapshot,
+        project_root,
+        &state.analyzer,
+        &changed_set,
+    )
+    .await;
+    restore_existing_positions(&mut snapshot, &old_positions);
+    snapshot.status = ready_status(state, "Ready");
+    let diagnostics = state
+        .diagnostics_by_file
+        .read()
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    apply_diagnostics_to_files(&mut snapshot, &diagnostics);
+    let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
+    *state.graph.write() = snapshot;
+    let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
+    Ok(())
+}
+
+fn remove_file_symbols_and_edges(snapshot: &mut GraphSnapshot, changed_files: &HashSet<String>) {
+    let removed = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.file
+                .as_ref()
+                .is_some_and(|file| changed_files.contains(file))
+                && node.node_type != graph_core::NodeType::File
+        })
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    snapshot.nodes.retain(|node| !removed.contains(&node.id));
+    snapshot
+        .edges
+        .retain(|edge| !removed.contains(&edge.source) && !removed.contains(&edge.target));
+}
+
+fn restore_existing_positions(
+    snapshot: &mut GraphSnapshot,
+    old_positions: &HashMap<String, (f64, f64, f64, f64)>,
+) {
+    for node in &mut snapshot.nodes {
+        if let Some((x, y, vx, vy)) = old_positions.get(&node.id) {
+            node.x = *x;
+            node.y = *y;
+            node.vx = *vx;
+            node.vy = *vy;
+        }
+    }
 }
 
 fn diff_snapshots(
@@ -1454,6 +1660,72 @@ async fn enrich_semantic_call_edges(
                         warn!(source = %source_id, "outgoingCalls timed out");
                         continue;
                     }
+                };
+            for call in outgoing {
+                let Some(target_path) = Url::parse(call.to.uri.as_str())
+                    .ok()
+                    .and_then(|uri| uri.to_file_path().ok())
+                else {
+                    continue;
+                };
+                insert_semantic_call_edge(
+                    snapshot,
+                    &symbol_index,
+                    &source_id,
+                    &target_path,
+                    call.to.selection_range.start.line,
+                    call.to.selection_range.start.character,
+                );
+            }
+        }
+    }
+}
+
+async fn enrich_semantic_call_edges_for_files(
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+    analyzer: &AnalyzerState,
+    changed_files: &HashSet<String>,
+) {
+    let symbol_index = SymbolIndex::from_nodes(&snapshot.nodes);
+    if symbol_index.symbols.is_empty() {
+        return;
+    }
+    let callable_symbols = symbol_index
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            changed_files.contains(&symbol.file)
+                && symbol.language == LanguageId::Rust
+                && matches!(
+                    symbol.kind,
+                    SymbolKindName::Function | SymbolKindName::Method
+                )
+        })
+        .map(|symbol| {
+            (
+                symbol.node_id.clone(),
+                project_root.join(&symbol.file),
+                symbol.selection_range.start,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (source_id, file, position) in callable_symbols {
+        let items = match timeout(
+            Duration::from_secs(2),
+            analyzer.prepare_call_hierarchy(&file, position.line, position.character),
+        )
+        .await
+        {
+            Ok(Ok(items)) => items,
+            _ => continue,
+        };
+        for item in items {
+            let outgoing =
+                match timeout(Duration::from_secs(2), analyzer.outgoing_calls(&item)).await {
+                    Ok(Ok(outgoing)) => outgoing,
+                    _ => continue,
                 };
             for call in outgoing {
                 let Some(target_path) = Url::parse(call.to.uri.as_str())
@@ -1980,5 +2252,87 @@ mod tests {
         let value = serde_json::to_value(&patch).unwrap();
         assert_eq!(value["changedFiles"][0], "src/main.rs");
         assert_eq!(value["diagnostics"][0]["message"], "careful");
+    }
+
+    #[test]
+    fn changed_file_removal_keeps_unrelated_nodes() {
+        let mut snapshot = GraphSnapshot {
+            nodes: vec![
+                test_node("changed", Some("src/changed.rs"), Some("app")),
+                test_node("other", Some("src/other.rs"), Some("app")),
+            ],
+            edges: vec![graph_core::GraphEdge {
+                id: graph_core::edge_id(EdgeType::Calls, "fn:changed@1", "fn:other@1"),
+                source: "fn:changed@1".into(),
+                target: "fn:other@1".into(),
+                edge_type: EdgeType::Calls,
+                confidence: EdgeConfidence::SyntaxFallback,
+            }],
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        };
+        remove_file_symbols_and_edges(&mut snapshot, &HashSet::from(["src/changed.rs".into()]));
+        assert!(snapshot.nodes.iter().any(|node| node.id == "fn:other@1"));
+        assert!(!snapshot.nodes.iter().any(|node| node.id == "fn:changed@1"));
+        assert!(snapshot.edges.is_empty());
+    }
+
+    #[test]
+    fn unchanged_node_positions_are_preserved() {
+        let mut node = test_node("main", Some("src/main.rs"), Some("app"));
+        node.x = 42.0;
+        node.y = -7.0;
+        node.vx = 1.0;
+        node.vy = 2.0;
+        let positions = HashMap::from([(node.id.clone(), (node.x, node.y, node.vx, node.vy))]);
+        let mut updated = test_node("main", Some("src/main.rs"), Some("app"));
+        let mut snapshot = GraphSnapshot {
+            nodes: vec![updated.clone()],
+            edges: Vec::new(),
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        };
+        restore_existing_positions(&mut snapshot, &positions);
+        updated = snapshot.nodes.remove(0);
+        assert_eq!(
+            (updated.x, updated.y, updated.vx, updated.vy),
+            (42.0, -7.0, 1.0, 2.0)
+        );
+    }
+
+    #[test]
+    fn graph_patch_for_one_file_is_smaller_than_snapshot() {
+        let old = GraphSnapshot {
+            nodes: vec![
+                test_node("main", Some("src/main.rs"), Some("app")),
+                test_node("other", Some("src/other.rs"), Some("app")),
+            ],
+            edges: Vec::new(),
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        };
+        let mut new = old.clone();
+        new.nodes[0].signature = Some("fn main() {}".into());
+        let patch = diff_snapshots(&old, &new, vec!["src/main.rs".into()], Vec::new());
+        assert_eq!(patch.updated_nodes.len(), 1);
+        assert!(patch.updated_nodes.len() < new.nodes.len());
+        assert_eq!(patch.changed_files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn analyzer_file_versions_increment_without_restart() {
+        let analyzer = AnalyzerState {
+            binary: PathBuf::from("rust-analyzer"),
+            root: RwLock::new(PathBuf::from("/tmp/project")),
+            client: AsyncMutex::new(None),
+            opened_files: RwLock::new(HashSet::new()),
+            file_versions: RwLock::new(HashMap::new()),
+        };
+        let file = Path::new("/tmp/project/src/main.rs");
+        assert_eq!(analyzer.increment_file_version(file), 2);
+        assert_eq!(analyzer.increment_file_version(file), 3);
     }
 }

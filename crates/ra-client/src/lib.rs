@@ -4,7 +4,8 @@ use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionResponse, InitializeParams,
     InitializedParams, Location, Position, ReferenceContext, ReferenceParams, SymbolInformation,
-    TextDocumentIdentifier, TextDocumentPositionParams, Uri, WorkDoneProgressParams,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
     WorkspaceFolder,
 };
 use parking_lot::Mutex;
@@ -125,6 +126,32 @@ impl RaClient {
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<LspNotification> {
         self.notifications.subscribe()
+    }
+
+    pub async fn did_open(&self, file: &Path, text: String, version: i32) -> Result<()> {
+        self.notify(
+            "textDocument/didOpen",
+            did_open_params(file, text, version)?,
+        )
+        .await
+    }
+
+    pub async fn did_change(&self, file: &Path, text: String, version: i32) -> Result<()> {
+        self.notify(
+            "textDocument/didChange",
+            did_change_params(file, text, version)?,
+        )
+        .await
+    }
+
+    pub async fn did_save(&self, file: &Path, text: Option<String>) -> Result<()> {
+        self.notify("textDocument/didSave", did_save_params(file, text)?)
+            .await
+    }
+
+    pub async fn did_close(&self, file: &Path) -> Result<()> {
+        self.notify("textDocument/didClose", did_close_params(file)?)
+            .await
     }
 
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<DiscoveredSymbol>> {
@@ -377,6 +404,59 @@ fn text_document_position_params(
     })
 }
 
+fn did_open_params(
+    file: &Path,
+    text: String,
+    version: i32,
+) -> Result<lsp_types::DidOpenTextDocumentParams> {
+    Ok(lsp_types::DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: file_uri(file)?,
+            language_id: "rust".to_string(),
+            version,
+            text,
+        },
+    })
+}
+
+fn did_change_params(
+    file: &Path,
+    text: String,
+    version: i32,
+) -> Result<lsp_types::DidChangeTextDocumentParams> {
+    Ok(lsp_types::DidChangeTextDocumentParams {
+        text_document: VersionedTextDocumentIdentifier {
+            uri: file_uri(file)?,
+            version,
+        },
+        content_changes: vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text,
+        }],
+    })
+}
+
+fn did_save_params(
+    file: &Path,
+    text: Option<String>,
+) -> Result<lsp_types::DidSaveTextDocumentParams> {
+    Ok(lsp_types::DidSaveTextDocumentParams {
+        text_document: TextDocumentIdentifier {
+            uri: file_uri(file)?,
+        },
+        text,
+    })
+}
+
+fn did_close_params(file: &Path) -> Result<lsp_types::DidCloseTextDocumentParams> {
+    Ok(lsp_types::DidCloseTextDocumentParams {
+        text_document: TextDocumentIdentifier {
+            uri: file_uri(file)?,
+        },
+    })
+}
+
 fn directory_uri(path: &Path) -> Result<Uri> {
     let url = Url::from_directory_path(path).map_err(|_| {
         anyhow!(
@@ -488,5 +568,22 @@ mod tests {
         let notification = rx.recv().await.unwrap();
         assert_eq!(notification.method, "textDocument/publishDiagnostics");
         assert!(notification.params.get("diagnostics").is_some());
+    }
+
+    #[test]
+    fn did_open_and_change_params_serialize_full_text_documents() {
+        let file = Path::new("/tmp/example/src/lib.rs");
+        let open =
+            serde_json::to_value(did_open_params(file, "fn main() {}".into(), 7).unwrap()).unwrap();
+        assert_eq!(open["textDocument"]["languageId"], "rust");
+        assert_eq!(open["textDocument"]["version"], 7);
+        assert_eq!(open["textDocument"]["text"], "fn main() {}");
+
+        let change =
+            serde_json::to_value(did_change_params(file, "fn helper() {}".into(), 8).unwrap())
+                .unwrap();
+        assert_eq!(change["textDocument"]["version"], 8);
+        assert_eq!(change["contentChanges"][0]["text"], "fn helper() {}");
+        assert!(change["contentChanges"][0].get("range").is_none());
     }
 }

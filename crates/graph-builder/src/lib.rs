@@ -535,6 +535,13 @@ fn enrich_syntax_relationships(snapshot: &mut GraphSnapshot, files: &[IndexedFil
     }
 }
 
+pub fn enrich_syntax_relationships_for_files(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) {
+    enrich_syntax_relationships(snapshot, files);
+    dedupe_graph(snapshot);
+    update_connections(&mut snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
+}
+
 fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usize {
     let mut new_nodes = Vec::new();
     let mut new_edges = Vec::new();
@@ -600,6 +607,13 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
     snapshot.nodes.extend(new_nodes);
     snapshot.edges.extend(new_edges);
     dedupe_graph(snapshot);
+    count
+}
+
+pub fn enrich_api_routes_for_files(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usize {
+    let count = enrich_api_routes(snapshot, files);
+    update_connections(&mut snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
     count
 }
 

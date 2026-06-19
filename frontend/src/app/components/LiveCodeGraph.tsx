@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
-import type { GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode } from '../types'
+import type { DiagnosticRecord, GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode } from '../types'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
@@ -11,6 +11,7 @@ interface LiveCodeGraphProps {
   theme: ThemeMode
   layoutSettings: GraphLayoutSettings
   labelMode: GraphLabelMode
+  diagnosticsByNode?: Map<string, DiagnosticRecord[]>
   onSelectNode: (id: string | null) => void
   onUpdateNodes: (nodes: GraphNode[]) => void
 }
@@ -866,24 +867,80 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
   ctx.restore()
 }
 
-function compactLabel(label: string, isImportant: boolean) {
-  const max = isImportant ? 34 : 24
-  return label.length > max ? `${label.slice(0, max - 1)}…` : label
+function drawDiagnosticBadge(ctx: CanvasRenderingContext2D, n: GraphNode, severity: 'Error' | 'Warning') {
+  const size = NODE_SIZES[n.type]
+  const color = severity === 'Error' ? '#F87171' : '#F59E0B'
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.globalAlpha = 0.95
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(n.x, n.y, size + 4, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(n.x + size * 0.75, n.y - size * 0.75, 3.5, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
 }
 
 function labelFont(isSelected: boolean, isHovered: boolean) {
   return `${isSelected ? '700' : '500'} ${isSelected || isHovered ? 12 : 10}px Inter, sans-serif`
 }
 
+function labelLineHeight(isSelected: boolean, isHovered: boolean) {
+  return isSelected || isHovered ? 14 : 12
+}
+
+function splitLabelParts(label: string) {
+  if (!label.includes('_')) return [label]
+  const parts = label.split('_')
+  return parts.map((part, index) => index < parts.length - 1 ? `${part}_` : part)
+}
+
+function fitLabelLine(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  if (ctx.measureText(text).width <= maxWidth) return text
+  let fitted = text
+  while (fitted.length > 1 && ctx.measureText(`${fitted}…`).width > maxWidth) {
+    fitted = fitted.slice(0, -1)
+  }
+  return `${fitted}…`
+}
+
+function wrapLabel(ctx: CanvasRenderingContext2D, label: string, isImportant: boolean) {
+  const maxWidth = isImportant ? 160 : 118
+  const parts = splitLabelParts(label)
+  const lines: string[] = []
+  let current = ''
+
+  for (const part of parts) {
+    const next = current ? `${current}${part}` : part
+    if (ctx.measureText(next).width <= maxWidth || !current) {
+      current = next
+      continue
+    }
+    lines.push(current)
+    current = part
+    if (lines.length === 2) break
+  }
+  if (current && lines.length < 2) lines.push(current)
+
+  const compacted = lines.length > 0 ? lines : [label]
+  if (parts.join('') !== compacted.join('') && compacted.length > 0) {
+    compacted[compacted.length - 1] = `${compacted[compacted.length - 1].replace(/…$/, '')}…`
+  }
+  return compacted.slice(0, 2).map(line => fitLabelLine(ctx, line, maxWidth))
+}
+
 function labelBounds(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
   const size = NODE_SIZES[n.type]
-  const label = compactLabel(n.label, isSelected || isHovered)
   ctx.font = labelFont(isSelected, isHovered)
-  const width = ctx.measureText(label).width + 10
-  const height = isSelected || isHovered ? 17 : 14
+  const lines = wrapLabel(ctx, n.label, isSelected || isHovered)
+  const width = Math.max(...lines.map(line => ctx.measureText(line).width)) + 10
+  const height = lines.length * labelLineHeight(isSelected, isHovered) + 2
   const offsetY = n.type === 'Module' ? size * 0.7 + 5 : size + 5
   return {
-    label,
+    lines,
     x1: n.x - width / 2,
     y1: n.y + offsetY - 1,
     x2: n.x + width / 2,
@@ -951,13 +1008,13 @@ function drawLabels(
     const box = labelBounds(ctx, candidate.node, candidate.isSelected, candidate.isHovered)
     if (labelMode !== 'all' && !force && occupied.some(existing => boxesOverlap(existing, box))) continue
 
-    drawLabel(ctx, candidate.node, candidate.isSelected, candidate.isHovered, theme, box.label)
+    drawLabel(ctx, candidate.node, candidate.isSelected, candidate.isHovered, theme, box.lines)
     occupied.push(box)
     drawn++
   }
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, theme: CanvasTheme, label: string) {
+function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, theme: CanvasTheme, lines: string[]) {
   const size = NODE_SIZES[n.type]
   const color = NODE_COLORS[n.type]
   ctx.save()
@@ -969,7 +1026,9 @@ function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: bool
   ctx.shadowColor = theme.card
   ctx.shadowBlur = 5
   ctx.fillStyle = isSelected ? theme.text : isHovered ? color : theme.textMuted
-  ctx.fillText(label, n.x, n.y + offsetY)
+  lines.forEach((line, index) => {
+    ctx.fillText(line, n.x, n.y + offsetY + index * labelLineHeight(isSelected, isHovered))
+  })
   ctx.restore()
 }
 
@@ -1047,7 +1106,7 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, diagnosticsByNode, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
   const animFrameRef = useRef<number>(0)
@@ -1338,6 +1397,10 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         const isFaded = hoveredNodeRef.current !== null && !hoveredConnections.has(n.id) && !isHovered && n.id !== hoveredNodeRef.current
 
         drawNode(ctx, n, isSelected, isHovered, isFocusContext, isFaded, canvasColors)
+        const diagnostics = diagnosticsByNode?.get(n.id) ?? []
+        if (diagnostics.length > 0) {
+          drawDiagnosticBadge(ctx, n, diagnostics.some(diagnostic => diagnostic.severity === 'Error') ? 'Error' : 'Warning')
+        }
         labelCandidates.push({
           node: n,
           isSelected,
@@ -1392,7 +1455,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       cancelAnimationFrame(animFrameRef.current)
       ro.disconnect()
     }
-  }, [edges, filters, getVisibleNodeIds, labelMode, theme])
+  }, [diagnosticsByNode, edges, filters, getVisibleNodeIds, labelMode, theme])
 
   // mouse events
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

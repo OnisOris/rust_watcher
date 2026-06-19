@@ -61,6 +61,7 @@ export default function App() {
     edges,
     files,
     events,
+    diagnosticsByNode,
     selectedNodeId,
     setSelectedNodeId,
     openProject,
@@ -205,6 +206,7 @@ export default function App() {
             theme={theme}
             layoutSettings={layoutSettings}
             labelMode={labelMode}
+            diagnosticsByNode={diagnosticsByNode}
             onSelectNode={handleSelectNode}
             onUpdateNodes={() => {}}
           />

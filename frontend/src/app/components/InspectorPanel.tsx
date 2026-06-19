@@ -396,11 +396,11 @@ function NodeList({ label, icon, nodes, onSelect, confidenceByNodeId }: {
         <button
           key={n.id}
           onClick={() => onSelect(n.id)}
-          className="flex items-center gap-2 w-full rounded py-1 px-1.5 transition-colors"
+          className="flex items-start gap-2 w-full rounded py-1 px-1.5 transition-colors"
           style={{ background: 'none', cursor: 'pointer' }}
         >
           <TypeDot type={n.type} />
-          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', textAlign: 'left', flex: 1 }}>{n.label}</span>
+          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', textAlign: 'left', flex: 1, minWidth: 0, overflowWrap: 'anywhere', lineHeight: 1.35 }}>{n.label}</span>
           {confidenceByNodeId?.get(n.id) && <ConfidenceBadge confidence={confidenceByNodeId.get(n.id)!} />}
           <ChevronRight size={10} color="var(--cc-text-faint)" />
         </button>
@@ -470,7 +470,7 @@ function ConfidenceBadge({ confidence }: { confidence: EdgeConfidence }) {
     Heuristic: '#7D8795',
   }
   return (
-    <span style={{ fontSize: 9, color: colors[confidence], border: `1px solid ${colors[confidence]}30`, background: `${colors[confidence]}18`, borderRadius: 4, padding: '1px 4px' }}>
+    <span style={{ fontSize: 9, color: colors[confidence], border: `1px solid ${colors[confidence]}30`, background: `${colors[confidence]}18`, borderRadius: 4, padding: '1px 4px', flexShrink: 0, marginTop: 1 }}>
       {confidence}
     </span>
   )

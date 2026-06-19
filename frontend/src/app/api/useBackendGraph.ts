@@ -11,6 +11,7 @@ import type {
   GraphNode,
   GraphPatch,
   GraphSnapshot,
+  DiagnosticRecord,
   ProjectFile,
   SearchResult,
 } from '../types'
@@ -45,6 +46,8 @@ export function useBackendGraph(mode: GraphMode) {
   const [edges, setEdges] = useState<GraphEdge[]>([])
   const [files, setFiles] = useState<ProjectFile[]>([])
   const [events, setEvents] = useState<AnalysisEvent[]>([])
+  const [diagnosticsByFile, setDiagnosticsByFile] = useState<Map<string, DiagnosticRecord[]>>(new Map())
+  const [diagnosticsByNode, setDiagnosticsByNode] = useState<Map<string, DiagnosticRecord[]>>(new Map())
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [backendAvailable, setBackendAvailable] = useState(true)
 
@@ -62,6 +65,8 @@ export function useBackendGraph(mode: GraphMode) {
     setEdges(snapshot.edges)
     setFiles(snapshot.files)
     setEvents(snapshot.events)
+    setDiagnosticsByFile(new Map())
+    setDiagnosticsByNode(new Map())
     applyStatus(snapshot.status)
   }, [applyStatus])
 
@@ -164,17 +169,33 @@ export function useBackendGraph(mode: GraphMode) {
       return [...next, ...patch.addedEdges.filter(edge => !existing.has(edge.id))]
     })
     if (patch.diagnostics?.length || patch.changedFiles?.length) {
-      const counts = new Map<string, number>()
+      const nextByFile = new Map(diagnosticsByFile)
+      for (const file of patch.changedFiles ?? []) nextByFile.set(file, [])
       patch.diagnostics.forEach(diagnostic => {
-        counts.set(diagnostic.file, (counts.get(diagnostic.file) ?? 0) + 1)
+        const list = nextByFile.get(diagnostic.file) ?? []
+        list.push(diagnostic)
+        nextByFile.set(diagnostic.file, list)
       })
+      const nextByNode = new Map<string, DiagnosticRecord[]>()
+      nextByFile.forEach(diagnostics => {
+        diagnostics.forEach(diagnostic => {
+          diagnostic.relatedNodeIds.forEach(nodeId => {
+            const list = nextByNode.get(nodeId) ?? []
+            list.push(diagnostic)
+            nextByNode.set(nodeId, list)
+          })
+        })
+      })
+      setDiagnosticsByFile(nextByFile)
+      setDiagnosticsByNode(nextByNode)
+      const counts = new Map([...nextByFile.entries()].map(([file, diagnostics]) => [file, diagnostics.length]))
       const changed = new Set(patch.changedFiles ?? [])
       setFiles(prev => prev.map(file => {
         if (!changed.has(file.path) && !counts.has(file.path)) return file
         return { ...file, diagnosticsCount: counts.get(file.path) ?? 0 }
       }))
     }
-  }, [])
+  }, [diagnosticsByFile])
 
   const openProject = useCallback(async (path?: string) => {
     try {
@@ -249,6 +270,8 @@ export function useBackendGraph(mode: GraphMode) {
     edges,
     files,
     events,
+    diagnosticsByFile,
+    diagnosticsByNode,
     selectedNode,
     selectedNodeId,
     setSelectedNodeId,
