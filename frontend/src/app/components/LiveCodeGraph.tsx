@@ -40,6 +40,7 @@ const EDGE_COLORS: Record<EdgeType, string> = {
   Calls: '#06B6D4',
   Renders: '#14B8A6',
   ApiCall: '#E11D48',
+  EndpointHandler: '#F97316',
   Implements: '#10B981',
   TypeReference: '#3B82F6',
   DataFlow: '#8B5CF6',
@@ -398,7 +399,7 @@ function springDegreeScale(edgeType: EdgeType, a: GraphNode, b: GraphNode, degre
   const aDegree = Math.max(1, degree.get(a.id) ?? 1)
   const bDegree = Math.max(1, degree.get(b.id) ?? 1)
   const hubScale = 1 / Math.sqrt(Math.max(aDegree, bDegree))
-  const typeScale = edgeType === 'Contains' ? 0.82 : edgeType === 'ApiCall' ? 0.72 : 1
+  const typeScale = edgeType === 'Contains' ? 0.82 : edgeType === 'ApiCall' || edgeType === 'EndpointHandler' ? 0.72 : 1
   return Math.max(0.08, hubScale * typeScale)
 }
 
@@ -425,6 +426,7 @@ function springLengthFor(edgeType: EdgeType, base: number) {
     case 'Contains':
       return base * 0.86
     case 'ApiCall':
+    case 'EndpointHandler':
     case 'ExternalDependency':
       return base * 1.45
     case 'Renders':
@@ -1318,9 +1320,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
           || selectedConnections.has(edge.source) && selectedConnections.has(edge.target)
         const baseColor = EDGE_COLORS[edge.type]
         const color = isActive ? baseColor : baseColor + '99'
-        const width = edge.type === 'DataFlow' || edge.type === 'ApiCall' ? 2.5 : edge.type === 'Calls' || edge.type === 'Renders' ? 1.8 : 1.2
+        const width = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler' ? 2.5 : edge.type === 'Calls' || edge.type === 'Renders' ? 1.8 : 1.2
         const dashed = edge.type === 'Implements' || edge.type === 'ExternalDependency' || edge.type === 'Renders'
-        const animated = edge.type === 'DataFlow' || edge.type === 'ApiCall'
+        const animated = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler'
 
         drawArrow(ctx, src.x, src.y, tgt.x, tgt.y, color, width, dashed, animated, ts, NODE_SIZES[src.type], NODE_SIZES[tgt.type])
       }

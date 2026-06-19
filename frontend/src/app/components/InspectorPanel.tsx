@@ -154,8 +154,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
   const outgoing = edges.filter(e => e.source === node.id)
   const incoming = edges.filter(e => e.target === node.id)
 
-  const callers = incoming.filter(e => e.type === 'Calls').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const callees = outgoing.filter(e => e.type === 'Calls').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  const callers = incoming.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
+  const callees = outgoing.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const apiCallers = incoming.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const apiTargets = outgoing.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const renders = outgoing.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]

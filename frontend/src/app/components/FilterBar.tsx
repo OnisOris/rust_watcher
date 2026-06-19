@@ -8,7 +8,7 @@ interface FilterBarProps {
 }
 
 const ALL_NODE_TYPES: NodeType[] = ['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate']
-const ALL_EDGE_TYPES: EdgeType[] = ['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency']
+const ALL_EDGE_TYPES: EdgeType[] = ['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency']
 
 const NODE_COLORS: Record<NodeType, string> = {
   File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Enum: '#F59E0B',

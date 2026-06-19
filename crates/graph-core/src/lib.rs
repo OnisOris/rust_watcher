@@ -1,6 +1,114 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LanguageId {
+    Rust,
+    TypeScript,
+    JavaScript,
+    Other(String),
+}
+
+impl LanguageId {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+            Self::JavaScript => "javascript",
+            Self::Other(language) => language.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for LanguageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for LanguageId {
+    fn from(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "rs" | "rust" => Self::Rust,
+            "ts" | "tsx" | "typescript" => Self::TypeScript,
+            "js" | "jsx" | "javascript" => Self::JavaScript,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+impl Serialize for LanguageId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguageId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from(value.as_str()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFile {
+    pub language: LanguageId,
+    pub absolute_path: String,
+    pub relative_path: String,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TextPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TextRange {
+    pub start: TextPosition,
+    pub end: TextPosition,
+}
+
+pub type LspPosition = TextPosition;
+pub type LspRange = TextRange;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticRecord {
+    pub language: LanguageId,
+    pub file: String,
+    pub range: Option<TextRange>,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+pub trait LanguageAnalyzer {
+    fn language_id(&self) -> LanguageId;
+    fn supported_extensions(&self) -> &'static [&'static str];
+    fn discover_files(&self, root: &Path) -> Vec<SourceFile>;
+    fn symbols(&self, file: &SourceFile) -> Vec<SymbolRecord>;
+    fn edges(&self, symbols: &[SymbolRecord]) -> Vec<GraphEdge>;
+    fn diagnostics(&self, file: &SourceFile) -> Vec<DiagnosticRecord>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeType {
@@ -28,6 +136,7 @@ pub enum EdgeType {
     Calls,
     Renders,
     ApiCall,
+    EndpointHandler,
     Implements,
     TypeReference,
     DataFlow,
@@ -73,27 +182,16 @@ pub enum AnalyzerStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LspPosition {
-    pub line: u32,
-    pub character: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LspRange {
-    pub start: LspPosition,
-    pub end: LspPosition,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolRecord {
     pub id: String,
+    pub language: LanguageId,
     pub name: String,
     pub kind: SymbolKindName,
     pub file: String,
-    pub range: LspRange,
-    pub selection_range: LspRange,
+    pub range: TextRange,
+    pub selection_range: TextRange,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,16 +199,46 @@ pub struct SymbolIndex {
     pub symbols: Vec<SymbolRecord>,
     #[serde(skip)]
     by_id: HashMap<String, usize>,
+    #[serde(skip)]
+    by_language: HashMap<LanguageId, Vec<usize>>,
+    #[serde(skip)]
+    by_file: HashMap<String, Vec<usize>>,
+    #[serde(skip)]
+    by_name: HashMap<String, Vec<usize>>,
+    #[serde(skip)]
+    by_range: HashMap<TextRange, Vec<usize>>,
+    #[serde(skip)]
+    by_kind: HashMap<SymbolKindName, Vec<usize>>,
 }
 
 impl SymbolIndex {
     pub fn new(symbols: Vec<SymbolRecord>) -> Self {
-        let by_id = symbols
-            .iter()
-            .enumerate()
-            .map(|(idx, symbol)| (symbol.id.clone(), idx))
-            .collect();
-        Self { symbols, by_id }
+        let mut by_id = HashMap::new();
+        let mut by_language: HashMap<LanguageId, Vec<usize>> = HashMap::new();
+        let mut by_file: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_range: HashMap<TextRange, Vec<usize>> = HashMap::new();
+        let mut by_kind: HashMap<SymbolKindName, Vec<usize>> = HashMap::new();
+        for (idx, symbol) in symbols.iter().enumerate() {
+            by_id.insert(symbol.id.clone(), idx);
+            by_language
+                .entry(symbol.language.clone())
+                .or_default()
+                .push(idx);
+            by_file.entry(symbol.file.clone()).or_default().push(idx);
+            by_name.entry(symbol.name.clone()).or_default().push(idx);
+            by_range.entry(symbol.range).or_default().push(idx);
+            by_kind.entry(symbol.kind).or_default().push(idx);
+        }
+        Self {
+            symbols,
+            by_id,
+            by_language,
+            by_file,
+            by_name,
+            by_range,
+            by_kind,
+        }
     }
 
     pub fn from_nodes(nodes: &[GraphNode]) -> Self {
@@ -124,6 +252,26 @@ impl SymbolIndex {
 
     pub fn get(&self, id: &str) -> Option<&SymbolRecord> {
         self.by_id.get(id).and_then(|idx| self.symbols.get(*idx))
+    }
+
+    pub fn find_by_language(&self, language: &LanguageId) -> Vec<&SymbolRecord> {
+        self.records_for_indices(self.by_language.get(language))
+    }
+
+    pub fn find_by_file(&self, file: &str) -> Vec<&SymbolRecord> {
+        self.records_for_indices(self.by_file.get(file))
+    }
+
+    pub fn find_by_name(&self, name: &str) -> Vec<&SymbolRecord> {
+        self.records_for_indices(self.by_name.get(name))
+    }
+
+    pub fn find_by_range(&self, range: TextRange) -> Vec<&SymbolRecord> {
+        self.records_for_indices(self.by_range.get(&range))
+    }
+
+    pub fn find_by_kind(&self, kind: SymbolKindName) -> Vec<&SymbolRecord> {
+        self.records_for_indices(self.by_kind.get(&kind))
     }
 
     pub fn find_by_file_position(
@@ -156,12 +304,25 @@ impl SymbolIndex {
             .filter(|symbol| contains_position(symbol.range, line, character))
             .min_by_key(|symbol| range_span(symbol.range))
     }
+
+    fn records_for_indices(&self, indices: Option<&Vec<usize>>) -> Vec<&SymbolRecord> {
+        indices
+            .into_iter()
+            .flat_map(|indices| indices.iter())
+            .filter_map(|idx| self.symbols.get(*idx))
+            .collect()
+    }
 }
 
 impl SymbolRecord {
     pub fn from_node(node: &GraphNode) -> Option<Self> {
         Some(Self {
             id: node.id.clone(),
+            language: node
+                .language
+                .as_deref()
+                .map(LanguageId::from)
+                .unwrap_or(LanguageId::Rust),
             name: node.label.clone(),
             kind: SymbolKindName::from_node_type(node.node_type),
             file: node.file.clone()?,
@@ -184,7 +345,7 @@ fn range_span(range: LspRange) -> u32 {
         + range.end.character.saturating_sub(range.start.character)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymbolKindName {
     File,
     Module,
@@ -199,6 +360,13 @@ pub enum SymbolKindName {
     Namespace,
     Class,
     Macro,
+    Impl,
+    Component,
+    Hook,
+    Interface,
+    TypeAlias,
+    Endpoint,
+    ExternalCrate,
     Other,
 }
 
@@ -213,13 +381,13 @@ impl SymbolKindName {
             NodeType::Function => Self::Function,
             NodeType::Method => Self::Method,
             NodeType::Macro => Self::Macro,
-            NodeType::Impl
-            | NodeType::Component
-            | NodeType::Hook
-            | NodeType::Interface
-            | NodeType::TypeAlias
-            | NodeType::Endpoint
-            | NodeType::ExternalCrate => Self::Other,
+            NodeType::Impl => Self::Impl,
+            NodeType::Component => Self::Component,
+            NodeType::Hook => Self::Hook,
+            NodeType::Interface => Self::Interface,
+            NodeType::TypeAlias => Self::TypeAlias,
+            NodeType::Endpoint => Self::Endpoint,
+            NodeType::ExternalCrate => Self::ExternalCrate,
         }
     }
 }
@@ -240,6 +408,8 @@ pub struct DiscoveredSymbol {
 #[serde(rename_all = "camelCase")]
 pub struct GraphNode {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     #[serde(rename = "type")]
     pub node_type: NodeType,
     pub label: String,
@@ -449,4 +619,76 @@ impl AppStatus {
 
 pub fn edge_id(edge_type: EdgeType, source: &str, target: &str) -> String {
     format!("{edge_type:?}:{source}->{target}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(line: u32, start: u32, end: u32) -> TextRange {
+        TextRange {
+            start: TextPosition {
+                line,
+                character: start,
+            },
+            end: TextPosition {
+                line,
+                character: end,
+            },
+        }
+    }
+
+    fn symbol(
+        id: &str,
+        language: LanguageId,
+        file: &str,
+        name: &str,
+        kind: SymbolKindName,
+        range: TextRange,
+    ) -> SymbolRecord {
+        SymbolRecord {
+            id: id.into(),
+            language,
+            name: name.into(),
+            kind,
+            file: file.into(),
+            range,
+            selection_range: range,
+        }
+    }
+
+    #[test]
+    fn symbol_index_stores_rust_and_typescript_together() {
+        let rust_range = range(2, 0, 12);
+        let ts_range = range(4, 7, 21);
+        let index = SymbolIndex::new(vec![
+            symbol(
+                "fn:demo::main@3",
+                LanguageId::Rust,
+                "src/main.rs",
+                "main",
+                SymbolKindName::Function,
+                rust_range,
+            ),
+            symbol(
+                "component:frontend/src/App.tsx::App@5",
+                LanguageId::TypeScript,
+                "frontend/src/App.tsx",
+                "App",
+                SymbolKindName::Component,
+                ts_range,
+            ),
+        ]);
+
+        assert_eq!(index.get("fn:demo::main@3").unwrap().name, "main");
+        assert_eq!(index.find_by_language(&LanguageId::Rust).len(), 1);
+        assert_eq!(index.find_by_language(&LanguageId::TypeScript).len(), 1);
+        assert_eq!(index.find_by_file("frontend/src/App.tsx")[0].name, "App");
+        assert_eq!(index.find_by_name("main")[0].language, LanguageId::Rust);
+        assert_eq!(index.find_by_range(ts_range)[0].name, "App");
+        assert_eq!(
+            index.find_by_kind(SymbolKindName::Component)[0].language,
+            LanguageId::TypeScript
+        );
+    }
 }

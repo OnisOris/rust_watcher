@@ -306,7 +306,7 @@ function springDegreeScale(edgeType: EdgeType, a: GraphNode, b: GraphNode, degre
   const aDegree = Math.max(1, degree.get(a.id) ?? 1)
   const bDegree = Math.max(1, degree.get(b.id) ?? 1)
   const hubScale = 1 / Math.sqrt(Math.max(aDegree, bDegree))
-  const typeScale = edgeType === 'Contains' ? 0.82 : edgeType === 'ApiCall' ? 0.72 : 1
+  const typeScale = edgeType === 'Contains' ? 0.82 : edgeType === 'ApiCall' || edgeType === 'EndpointHandler' ? 0.72 : 1
   return Math.max(0.08, hubScale * typeScale)
 }
 
@@ -333,6 +333,7 @@ function springLengthFor(edgeType: EdgeType, base: number) {
     case 'Contains':
       return base * 0.86
     case 'ApiCall':
+    case 'EndpointHandler':
     case 'ExternalDependency':
       return base * 1.45
     case 'Renders':

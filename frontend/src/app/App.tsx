@@ -13,7 +13,7 @@ import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate'])
-const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
+const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
 
 const DEFAULT_FILTERS: GraphFilters = {
   nodeTypes: ALL_NODE_TYPES,
@@ -329,10 +329,12 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
     keepEdgeTypes.add('ExternalDependency')
     keepEdgeTypes.add('Uses')
     keepEdgeTypes.add('ApiCall')
+    keepEdgeTypes.add('EndpointHandler')
   } else {
     keepEdgeTypes.add('Contains')
     keepEdgeTypes.add('Calls')
     keepEdgeTypes.add('ApiCall')
+    keepEdgeTypes.add('EndpointHandler')
   }
 
   edges
@@ -352,7 +354,7 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
     while (grew) {
       grew = false
       for (const edge of edges) {
-        if (edge.type !== 'Contains' && edge.type !== 'Calls') continue
+        if (edge.type !== 'Contains' && edge.type !== 'Calls' && edge.type !== 'EndpointHandler') continue
         const sourceKept = keep.has(edge.source)
         const targetKept = keep.has(edge.target)
         if (edge.type === 'Contains' && targetKept && !sourceKept) {
@@ -362,6 +364,10 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
           }
         }
         if (edge.type === 'Calls' && sourceKept && !targetKept && byId.get(edge.target)?.type === 'Endpoint') {
+          keep.add(edge.target)
+          grew = true
+        }
+        if (edge.type === 'EndpointHandler' && sourceKept && !targetKept) {
           keep.add(edge.target)
           grew = true
         }

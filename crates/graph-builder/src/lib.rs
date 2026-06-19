@@ -1,7 +1,8 @@
 use graph_core::{
-    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, DiscoveredSymbol,
-    EdgeConfidence, EdgeType, GraphEdge, GraphMode, GraphNode, GraphSnapshot, NodeType,
-    ProjectFile, SymbolKindName, Visibility,
+    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, DiagnosticRecord,
+    DiscoveredSymbol, EdgeConfidence, EdgeType, GraphEdge, GraphMode, GraphNode, GraphSnapshot,
+    LanguageAnalyzer, LanguageId, NodeType, ProjectFile, SourceFile, SymbolKindName, SymbolRecord,
+    Visibility,
 };
 use project_indexer::{relative_to, IndexedFile, ProjectIndex};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -148,30 +149,213 @@ pub fn enrich_file_symbols(
     file: &IndexedFile,
     symbols: &[DiscoveredSymbol],
 ) {
-    let file_node_id = file_id(&file.relative_path);
-    let mut new_nodes = Vec::new();
-    let mut new_edges = Vec::new();
-    for symbol in symbols {
-        push_symbol(
-            &mut new_nodes,
-            &mut new_edges,
-            &file_node_id,
-            file,
-            symbol,
-            0,
-        );
-    }
-    snapshot.nodes.extend(new_nodes);
-    snapshot.edges.extend(new_edges);
-    dedupe_graph(snapshot);
-    update_connections(&mut snapshot.nodes, &snapshot.edges);
-    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
+    RustLanguageAdapter.enrich_file_symbols(snapshot, file, symbols);
 }
 
-pub fn discover_syntax_symbols(file: &IndexedFile) -> Vec<DiscoveredSymbol> {
-    let Ok(source) = fs::read_to_string(&file.absolute_path) else {
-        return Vec::new();
+pub struct RustLanguageAdapter;
+
+impl RustLanguageAdapter {
+    pub fn enrich_file_symbols(
+        &self,
+        snapshot: &mut GraphSnapshot,
+        file: &IndexedFile,
+        symbols: &[DiscoveredSymbol],
+    ) {
+        let file_node_id = file_id(&file.relative_path);
+        let mut new_nodes = Vec::new();
+        let mut new_edges = Vec::new();
+        for symbol in symbols {
+            push_symbol(
+                &mut new_nodes,
+                &mut new_edges,
+                &file_node_id,
+                file,
+                symbol,
+                0,
+            );
+        }
+        snapshot.nodes.extend(new_nodes);
+        snapshot.edges.extend(new_edges);
+        dedupe_graph(snapshot);
+        update_connections(&mut snapshot.nodes, &snapshot.edges);
+        snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
+    }
+}
+
+impl LanguageAnalyzer for RustLanguageAdapter {
+    fn language_id(&self) -> LanguageId {
+        LanguageId::Rust
+    }
+
+    fn supported_extensions(&self) -> &'static [&'static str] {
+        &["rs"]
+    }
+
+    fn discover_files(&self, root: &Path) -> Vec<SourceFile> {
+        let mut paths = Vec::new();
+        collect_language_files(root, self.supported_extensions(), &mut paths);
+        paths
+            .into_iter()
+            .map(|path| SourceFile {
+                language: LanguageId::Rust,
+                absolute_path: path.display().to_string(),
+                relative_path: relative_to(root, &path),
+                text: fs::read_to_string(&path).ok(),
+            })
+            .collect()
+    }
+
+    fn symbols(&self, file: &SourceFile) -> Vec<SymbolRecord> {
+        let Some(source) = file.text.as_deref() else {
+            return Vec::new();
+        };
+        discover_syntax_symbols_from_source(source)
+            .into_iter()
+            .filter_map(|symbol| {
+                symbol_record_from_discovered(LanguageId::Rust, &file.relative_path, symbol)
+            })
+            .collect()
+    }
+
+    fn edges(&self, _symbols: &[SymbolRecord]) -> Vec<GraphEdge> {
+        Vec::new()
+    }
+
+    fn diagnostics(&self, _file: &SourceFile) -> Vec<DiagnosticRecord> {
+        Vec::new()
+    }
+}
+
+pub struct TypeScriptLanguageAdapter;
+
+impl TypeScriptLanguageAdapter {
+    pub fn enrich_graph(&self, snapshot: &mut GraphSnapshot, project_root: &Path) -> usize {
+        enrich_typescript_graph_impl(snapshot, project_root)
+    }
+}
+
+impl LanguageAnalyzer for TypeScriptLanguageAdapter {
+    fn language_id(&self) -> LanguageId {
+        LanguageId::TypeScript
+    }
+
+    fn supported_extensions(&self) -> &'static [&'static str] {
+        &["ts", "tsx", "js", "jsx"]
+    }
+
+    fn discover_files(&self, root: &Path) -> Vec<SourceFile> {
+        let mut files = Vec::new();
+        collect_ts_files(root, root, &mut files);
+        files
+            .into_iter()
+            .map(|file| SourceFile {
+                language: language_for_ts_path(&file.relative_path),
+                absolute_path: root.join(&file.relative_path).display().to_string(),
+                relative_path: file.relative_path,
+                text: Some(file.source),
+            })
+            .collect()
+    }
+
+    fn symbols(&self, file: &SourceFile) -> Vec<SymbolRecord> {
+        let Some(source) = file.text.clone() else {
+            return Vec::new();
+        };
+        let ts_file = TsFile {
+            relative_path: file.relative_path.clone(),
+            module_path: ts_module_path(&file.relative_path),
+            source,
+        };
+        discover_ts_symbols(&ts_file)
+            .into_iter()
+            .map(|symbol| {
+                let line = symbol.line.saturating_sub(1);
+                let label_len = symbol.label.len() as u32;
+                SymbolRecord {
+                    id: symbol.id,
+                    language: file.language.clone(),
+                    name: symbol.label,
+                    kind: SymbolKindName::from_node_type(symbol.node_type),
+                    file: file.relative_path.clone(),
+                    range: graph_core::TextRange {
+                        start: graph_core::TextPosition { line, character: 0 },
+                        end: graph_core::TextPosition {
+                            line,
+                            character: symbol.signature.len() as u32,
+                        },
+                    },
+                    selection_range: graph_core::TextRange {
+                        start: graph_core::TextPosition { line, character: 0 },
+                        end: graph_core::TextPosition {
+                            line,
+                            character: label_len,
+                        },
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn edges(&self, _symbols: &[SymbolRecord]) -> Vec<GraphEdge> {
+        Vec::new()
+    }
+
+    fn diagnostics(&self, _file: &SourceFile) -> Vec<DiagnosticRecord> {
+        Vec::new()
+    }
+}
+
+fn collect_language_files(
+    current: &Path,
+    extensions: &[&str],
+    files: &mut Vec<std::path::PathBuf>,
+) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
     };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if path.is_dir() {
+            if matches!(
+                name,
+                "node_modules" | "dist" | "build" | "coverage" | "target" | ".git" | ".vite"
+            ) {
+                continue;
+            }
+            collect_language_files(&path, extensions, files);
+            continue;
+        }
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        if extension.is_some_and(|extension| extensions.contains(&extension)) {
+            files.push(path);
+        }
+    }
+    files.sort();
+}
+
+fn symbol_record_from_discovered(
+    language: LanguageId,
+    file: &str,
+    symbol: DiscoveredSymbol,
+) -> Option<SymbolRecord> {
+    let range = symbol.range?;
+    let selection_range = symbol.selection_range?;
+    Some(SymbolRecord {
+        id: format!("symbol:{file}::{}@{}", symbol.name, symbol.line),
+        language,
+        name: symbol.name,
+        kind: symbol.kind,
+        file: file.to_string(),
+        range,
+        selection_range,
+    })
+}
+
+fn discover_syntax_symbols_from_source(source: &str) -> Vec<DiscoveredSymbol> {
     let mut symbols = Vec::new();
     let mut container: Option<DiscoveredSymbol> = None;
     let mut container_depth = 0i32;
@@ -266,6 +450,13 @@ pub fn discover_syntax_symbols(file: &IndexedFile) -> Vec<DiscoveredSymbol> {
     symbols
 }
 
+pub fn discover_syntax_symbols(file: &IndexedFile) -> Vec<DiscoveredSymbol> {
+    let Ok(source) = fs::read_to_string(&file.absolute_path) else {
+        return Vec::new();
+    };
+    discover_syntax_symbols_from_source(&source)
+}
+
 fn enrich_syntax_relationships(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) {
     let existing_edges: HashSet<_> = snapshot.edges.iter().map(|edge| edge.id.clone()).collect();
     let mut new_edges = Vec::new();
@@ -357,6 +548,7 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                 let label = format!("{} {}", method.to_ascii_uppercase(), path);
                 new_nodes.push(GraphNode {
                     id: id.clone(),
+                    language: Some(LanguageId::Rust.to_string()),
                     node_type: NodeType::Endpoint,
                     label,
                     file: Some(file.relative_path.clone()),
@@ -384,7 +576,7 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                     .first_of_type(&handler, NodeType::Function)
                     .or_else(|| node_index.first_of_type(&handler, NodeType::Method))
                 {
-                    new_edges.push(edge(EdgeType::Calls, &id, &handler_node.id));
+                    new_edges.push(edge(EdgeType::EndpointHandler, &id, &handler_node.id));
                 }
             }
         }
@@ -414,6 +606,10 @@ struct TsSymbol {
 }
 
 fn enrich_typescript_graph(snapshot: &mut GraphSnapshot, project_root: &Path) -> usize {
+    TypeScriptLanguageAdapter.enrich_graph(snapshot, project_root)
+}
+
+fn enrich_typescript_graph_impl(snapshot: &mut GraphSnapshot, project_root: &Path) -> usize {
     let mut files = Vec::new();
     collect_ts_files(project_root, project_root, &mut files);
     if files.is_empty() {
@@ -462,6 +658,7 @@ fn enrich_typescript_graph(snapshot: &mut GraphSnapshot, project_root: &Path) ->
         for symbol in &symbols {
             snapshot.nodes.push(GraphNode {
                 id: symbol.id.clone(),
+                language: Some(language_for_ts_path(&file.relative_path).to_string()),
                 node_type: symbol.node_type,
                 label: symbol.label.clone(),
                 file: Some(file.relative_path.clone()),
@@ -477,8 +674,8 @@ fn enrich_typescript_graph(snapshot: &mut GraphSnapshot, project_root: &Path) ->
                 pinned: None,
                 bookmarked: None,
                 connections: None,
-                range: None,
-                selection_range: None,
+                range: Some(line_range(symbol.line, raw_text_len(&symbol.signature))),
+                selection_range: Some(line_range(symbol.line, symbol.label.len() as u32)),
                 x: 650.0 + (symbol.line as f64 % 19.0) * 18.0,
                 y: (symbol.line as f64 * 23.0) % 560.0 - 280.0,
                 vx: 0.0,
@@ -914,6 +1111,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 EdgeType::Contains,
                 EdgeType::Uses,
                 EdgeType::ApiCall,
+                EdgeType::EndpointHandler,
                 EdgeType::ModDeclaration,
                 EdgeType::ExternalDependency,
             ]
@@ -944,6 +1142,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 EdgeType::Calls,
                 EdgeType::Renders,
                 EdgeType::ApiCall,
+                EdgeType::EndpointHandler,
                 EdgeType::TypeReference,
                 EdgeType::Implements,
                 EdgeType::Uses,
@@ -961,9 +1160,14 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
             ]
             .into_iter()
             .collect(),
-            [EdgeType::Calls, EdgeType::Renders, EdgeType::ApiCall]
-                .into_iter()
-                .collect(),
+            [
+                EdgeType::Calls,
+                EdgeType::Renders,
+                EdgeType::ApiCall,
+                EdgeType::EndpointHandler,
+            ]
+            .into_iter()
+            .collect(),
         ),
         GraphMode::DataFlow => (
             [
@@ -983,6 +1187,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
             [
                 EdgeType::DataFlow,
                 EdgeType::ApiCall,
+                EdgeType::EndpointHandler,
                 EdgeType::Calls,
                 EdgeType::Contains,
             ]
@@ -1046,14 +1251,23 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
     ) {
         let semantic_edge_types: Option<HashSet<EdgeType>> = match mode {
             GraphMode::CallFlow => Some(
-                [EdgeType::Calls, EdgeType::Renders, EdgeType::ApiCall]
-                    .into_iter()
-                    .collect(),
+                [
+                    EdgeType::Calls,
+                    EdgeType::Renders,
+                    EdgeType::ApiCall,
+                    EdgeType::EndpointHandler,
+                ]
+                .into_iter()
+                .collect(),
             ),
             GraphMode::DataFlow => Some(
-                [EdgeType::DataFlow, EdgeType::ApiCall]
-                    .into_iter()
-                    .collect(),
+                [
+                    EdgeType::DataFlow,
+                    EdgeType::ApiCall,
+                    EdgeType::EndpointHandler,
+                ]
+                .into_iter()
+                .collect(),
             ),
             GraphMode::Traits => None,
             _ => None,
@@ -1151,6 +1365,7 @@ fn push_symbol(
     let text = signature.as_deref().unwrap_or(&symbol.name);
     nodes.push(GraphNode {
         id: id.clone(),
+        language: Some(LanguageId::Rust.to_string()),
         node_type,
         label: symbol.name.clone(),
         file: Some(file.relative_path.clone()),
@@ -1196,6 +1411,13 @@ fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
         SymbolKindName::Function => Some(NodeType::Function),
         SymbolKindName::Method | SymbolKindName::Constructor => Some(NodeType::Method),
         SymbolKindName::Macro => Some(NodeType::Macro),
+        SymbolKindName::Impl => Some(NodeType::Impl),
+        SymbolKindName::Component => Some(NodeType::Component),
+        SymbolKindName::Hook => Some(NodeType::Hook),
+        SymbolKindName::Interface => Some(NodeType::Interface),
+        SymbolKindName::TypeAlias => Some(NodeType::TypeAlias),
+        SymbolKindName::Endpoint => Some(NodeType::Endpoint),
+        SymbolKindName::ExternalCrate => Some(NodeType::ExternalCrate),
         SymbolKindName::Other => None,
     }
 }
@@ -1463,15 +1685,32 @@ fn syntax_symbol(
     kind: SymbolKindName,
     line_idx: usize,
 ) -> DiscoveredSymbol {
+    let name = name.into();
+    let line = line_idx as u32 + 1;
     DiscoveredSymbol {
-        name: name.into(),
+        selection_range: Some(line_range(line, name.len() as u32)),
+        name,
         detail: Some(raw_line.trim().to_string()),
         kind,
         file: None,
-        line: line_idx as u32 + 1,
-        range: None,
-        selection_range: None,
+        line,
+        range: Some(line_range(line, raw_text_len(raw_line))),
         children: Vec::new(),
+    }
+}
+
+fn raw_text_len(text: &str) -> u32 {
+    text.chars().count() as u32
+}
+
+fn line_range(one_based_line: u32, end_character: u32) -> graph_core::TextRange {
+    let line = one_based_line.saturating_sub(1);
+    graph_core::TextRange {
+        start: graph_core::TextPosition { line, character: 0 },
+        end: graph_core::TextPosition {
+            line,
+            character: end_character,
+        },
     }
 }
 
@@ -1536,8 +1775,15 @@ fn node(
     x: f64,
     y: f64,
 ) -> GraphNode {
+    let language = infer_node_language(
+        node_type,
+        file.as_deref(),
+        module.as_deref(),
+        crate_name.as_deref(),
+    );
     GraphNode {
         id,
+        language,
         node_type,
         label,
         file,
@@ -1725,6 +1971,7 @@ mod tests {
     fn filter_snapshot_call_flow_keeps_call_edges() {
         let snapshot = test_snapshot();
         let filtered = filter_snapshot(&snapshot, GraphMode::CallFlow);
+        assert!(filtered.nodes.iter().all(|node| node.language.is_some()));
         assert!(filtered.nodes.iter().all(|node| matches!(
             node.node_type,
             NodeType::Function
@@ -1737,6 +1984,92 @@ mod tests {
             .edges
             .iter()
             .any(|edge| edge.edge_type == EdgeType::Calls));
+    }
+
+    #[test]
+    fn filter_snapshot_preserves_language_metadata() {
+        let snapshot = test_snapshot();
+        let filtered = filter_snapshot(&snapshot, GraphMode::Meso);
+        let main = filtered
+            .nodes
+            .iter()
+            .find(|node| node.id == "fn:src/main.rs::main@1")
+            .unwrap();
+        assert_eq!(main.language.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn fallback_graph_bridges_typescript_api_calls_to_rust_handlers() {
+        let root = std::env::temp_dir().join(format!("rust-watcher-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"bridge_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+fn health() {}
+
+fn main() {
+    app.route("/api/health", get(health));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/App.tsx"),
+            r#"
+export function App() {
+  fetch("/api/health")
+  return <main />
+}
+"#,
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/health")
+            .unwrap();
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "health")
+            .unwrap();
+        let component = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Component && node.label == "App")
+            .unwrap();
+
+        assert_eq!(endpoint.language.as_deref(), Some("rust"));
+        assert_eq!(component.language.as_deref(), Some("typescript"));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == component.id
+                && edge.target == endpoint.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::EndpointHandler
+                && edge.source == endpoint.id
+                && edge.target == handler.id
+        }));
+
+        let (focused_nodes, focused_edges) =
+            focus_subgraph(&snapshot, &endpoint.id, Some(1)).unwrap();
+        assert!(focused_nodes.iter().any(|node| node.id == component.id));
+        assert!(focused_nodes.iter().any(|node| node.id == handler.id));
+        assert!(focused_edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::EndpointHandler));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1792,6 +2125,54 @@ fn external_id(name: &str) -> String {
 
 fn file_id(path: &str) -> String {
     format!("file:{path}")
+}
+
+fn language_for_ts_path(path: &str) -> LanguageId {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("js" | "jsx") => LanguageId::JavaScript,
+        _ => LanguageId::TypeScript,
+    }
+}
+
+fn language_for_file(path: &str) -> Option<String> {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("rs") => Some(LanguageId::Rust.to_string()),
+        Some("ts" | "tsx") => Some(LanguageId::TypeScript.to_string()),
+        Some("js" | "jsx") => Some(LanguageId::JavaScript.to_string()),
+        _ => None,
+    }
+}
+
+fn infer_node_language(
+    node_type: NodeType,
+    file: Option<&str>,
+    module: Option<&str>,
+    crate_name: Option<&str>,
+) -> Option<String> {
+    if let Some(language) = file.and_then(language_for_file) {
+        return Some(language);
+    }
+    if module.is_some_and(|module| module.contains("typescript"))
+        || crate_name == Some("frontend")
+        || matches!(
+            node_type,
+            NodeType::Component | NodeType::Hook | NodeType::Interface | NodeType::TypeAlias
+        )
+    {
+        return Some(LanguageId::TypeScript.to_string());
+    }
+    if matches!(node_type, NodeType::ExternalCrate)
+        || crate_name.is_some_and(|crate_name| crate_name != "frontend")
+    {
+        return Some(LanguageId::Rust.to_string());
+    }
+    None
 }
 
 fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, line: u32) -> String {

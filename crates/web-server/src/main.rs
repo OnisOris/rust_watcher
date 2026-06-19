@@ -279,12 +279,12 @@ async fn node_details(
         .collect::<Vec<_>>();
     let callers = incoming_edges
         .iter()
-        .filter(|edge| edge.edge_type == EdgeType::Calls)
+        .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
         .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied().cloned())
         .collect::<Vec<_>>();
     let callees = outgoing_edges
         .iter()
-        .filter(|edge| edge.edge_type == EdgeType::Calls)
+        .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
         .filter_map(|edge| node_by_id.get(edge.target.as_str()).copied().cloned())
         .collect::<Vec<_>>();
     let references = incoming_edges
@@ -292,7 +292,11 @@ async fn node_details(
         .filter(|edge| {
             matches!(
                 edge.edge_type,
-                EdgeType::Calls | EdgeType::TypeReference | EdgeType::Uses | EdgeType::DataFlow
+                EdgeType::Calls
+                    | EdgeType::EndpointHandler
+                    | EdgeType::TypeReference
+                    | EdgeType::Uses
+                    | EdgeType::DataFlow
             )
         })
         .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied().cloned())
@@ -1160,6 +1164,7 @@ mod tests {
     fn test_node(label: &str, file: Option<&str>, module: Option<&str>) -> GraphNode {
         GraphNode {
             id: format!("fn:{}@1", label),
+            language: Some("rust".into()),
             node_type: graph_core::NodeType::Function,
             label: label.into(),
             file: file.map(str::to_string),

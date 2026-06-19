@@ -21,6 +21,7 @@ export type EdgeType =
   | 'Calls'
   | 'Renders'
   | 'ApiCall'
+  | 'EndpointHandler'
   | 'Implements'
   | 'TypeReference'
   | 'DataFlow'
@@ -50,6 +51,7 @@ export const DEFAULT_GRAPH_LAYOUT_SETTINGS: GraphLayoutSettings = {
 
 export interface GraphNode {
   id: string
+  language?: string
   type: NodeType
   label: string
   file?: string
