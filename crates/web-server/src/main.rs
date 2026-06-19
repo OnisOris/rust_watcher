@@ -14,7 +14,8 @@ use graph_builder::{
 use graph_core::{
     AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, EdgeConfidence,
     EdgeType, FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphSnapshot,
-    NodeDetailsResponse, SearchResult, ServerMessage, SymbolIndex,
+    LanguageId, NodeDetailsResponse, ReferenceRecord, SearchResult, ServerMessage, SourceLocation,
+    SymbolIndex, SymbolKindName,
 };
 use parking_lot::RwLock;
 use project_indexer::{index_project, start_watcher};
@@ -256,7 +257,7 @@ async fn node_details(
     State(state): State<AppStateHandle>,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let graph = state.graph.read();
+    let graph = state.graph.read().clone();
     let Some(node) = graph.nodes.iter().find(|node| node.id == id).cloned() else {
         return (StatusCode::NOT_FOUND, "node not found").into_response();
     };
@@ -287,20 +288,10 @@ async fn node_details(
         .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
         .filter_map(|edge| node_by_id.get(edge.target.as_str()).copied().cloned())
         .collect::<Vec<_>>();
-    let references = incoming_edges
-        .iter()
-        .filter(|edge| {
-            matches!(
-                edge.edge_type,
-                EdgeType::Calls
-                    | EdgeType::EndpointHandler
-                    | EdgeType::TypeReference
-                    | EdgeType::Uses
-                    | EdgeType::DataFlow
-            )
-        })
-        .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied().cloned())
-        .collect::<Vec<_>>();
+    let mut references = graph_reference_records(&incoming_edges, &node_by_id);
+    references.extend(resolve_rust_references(&state, &graph, &node).await);
+    dedupe_references(&mut references);
+    let related_types = related_type_nodes(&incoming_edges, &outgoing_edges, &node_by_id);
 
     (
         StatusCode::OK,
@@ -311,6 +302,7 @@ async fn node_details(
             callers,
             callees,
             references,
+            related_types,
         }),
     )
         .into_response()
@@ -966,31 +958,26 @@ async fn enrich_semantic_call_edges(
     if symbol_index.symbols.is_empty() {
         return;
     }
-    let existing_edges = snapshot
-        .edges
+    let callable_symbols = symbol_index
+        .symbols
         .iter()
-        .map(|edge| edge.id.clone())
-        .collect::<HashSet<_>>();
-    let callable_nodes = snapshot
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.node_type,
-                graph_core::NodeType::Function
-                    | graph_core::NodeType::Method
-                    | graph_core::NodeType::Component
-                    | graph_core::NodeType::Hook
-            )
+        .filter(|symbol| {
+            symbol.language == LanguageId::Rust
+                && matches!(
+                    symbol.kind,
+                    SymbolKindName::Function | SymbolKindName::Method
+                )
         })
-        .filter_map(|node| {
-            let range = node.selection_range?;
-            let file = node.file.as_ref()?;
-            Some((node.id.clone(), project_root.join(file), range.start))
+        .map(|symbol| {
+            (
+                symbol.node_id.clone(),
+                project_root.join(&symbol.file),
+                symbol.selection_range.start,
+            )
         })
         .collect::<Vec<_>>();
 
-    for (source_id, file, position) in callable_nodes {
+    for (source_id, file, position) in callable_symbols {
         let items = match timeout(
             Duration::from_secs(2),
             client.prepare_call_hierarchy(&file, position.line, position.character),
@@ -1027,23 +1014,245 @@ async fn enrich_semantic_call_edges(
                 else {
                     continue;
                 };
-                if let Some(target) = symbol_index.find_by_uri_path_position(
+                insert_semantic_call_edge(
+                    snapshot,
+                    &symbol_index,
+                    &source_id,
                     &target_path,
                     call.to.selection_range.start.line,
                     call.to.selection_range.start.character,
-                ) {
-                    push_unique_edge_with_confidence(
-                        &mut snapshot.edges,
-                        &existing_edges,
-                        EdgeType::Calls,
-                        &source_id,
-                        &target.id,
-                        EdgeConfidence::Semantic,
-                    );
-                }
+                );
             }
         }
     }
+}
+
+fn insert_semantic_call_edge(
+    snapshot: &mut GraphSnapshot,
+    symbol_index: &SymbolIndex,
+    source_id: &str,
+    target_path: &Path,
+    line: u32,
+    character: u32,
+) -> bool {
+    let Some(target) = symbol_index.find_by_uri_path_position(target_path, line, character) else {
+        return false;
+    };
+    push_unique_edge_with_confidence(
+        &mut snapshot.edges,
+        &HashSet::new(),
+        EdgeType::Calls,
+        source_id,
+        &target.node_id,
+        EdgeConfidence::Semantic,
+    );
+    true
+}
+
+fn graph_reference_records(
+    incoming_edges: &[graph_core::GraphEdge],
+    node_by_id: &HashMap<&str, &GraphNode>,
+) -> Vec<ReferenceRecord> {
+    incoming_edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.edge_type,
+                EdgeType::Calls
+                    | EdgeType::EndpointHandler
+                    | EdgeType::TypeReference
+                    | EdgeType::Uses
+                    | EdgeType::DataFlow
+            )
+        })
+        .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied())
+        .filter_map(|node| reference_from_node(Some(node.clone())))
+        .collect()
+}
+
+fn related_type_nodes(
+    incoming_edges: &[graph_core::GraphEdge],
+    outgoing_edges: &[graph_core::GraphEdge],
+    node_by_id: &HashMap<&str, &GraphNode>,
+) -> Vec<GraphNode> {
+    let mut seen = HashSet::new();
+    incoming_edges
+        .iter()
+        .chain(outgoing_edges.iter())
+        .filter(|edge| {
+            matches!(
+                edge.edge_type,
+                EdgeType::TypeReference | EdgeType::Implements
+            )
+        })
+        .flat_map(|edge| [edge.source.as_str(), edge.target.as_str()])
+        .filter_map(|id| node_by_id.get(id).copied())
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                graph_core::NodeType::Struct
+                    | graph_core::NodeType::Enum
+                    | graph_core::NodeType::Trait
+                    | graph_core::NodeType::Impl
+                    | graph_core::NodeType::Interface
+                    | graph_core::NodeType::TypeAlias
+            )
+        })
+        .filter(|node| seen.insert(node.id.clone()))
+        .cloned()
+        .collect()
+}
+
+async fn resolve_rust_references(
+    state: &AppStateHandle,
+    graph: &GraphSnapshot,
+    node: &GraphNode,
+) -> Vec<ReferenceRecord> {
+    if node.language.as_deref() != Some(LanguageId::Rust.as_str())
+        || !matches!(
+            node.node_type,
+            graph_core::NodeType::Function | graph_core::NodeType::Method
+        )
+    {
+        return Vec::new();
+    }
+    let Some(file) = node.file.as_ref() else {
+        return Vec::new();
+    };
+    let Some(selection_range) = node.selection_range else {
+        return Vec::new();
+    };
+    let project_root = state.project_root.read().clone();
+    let absolute_file = project_root.join(file);
+    let mut client = match timeout(
+        Duration::from_secs(5),
+        ra_client::RaClient::start(&state.rust_analyzer, &project_root),
+    )
+    .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
+            warn!(?error, node = %node.id, "rust-analyzer unavailable for references");
+            return Vec::new();
+        }
+        Err(_) => {
+            warn!(node = %node.id, "rust-analyzer reference startup timed out");
+            return Vec::new();
+        }
+    };
+
+    let locations = match timeout(
+        Duration::from_secs(4),
+        client.references(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(locations)) => locations,
+        Ok(Err(error)) => {
+            warn!(?error, node = %node.id, "rust-analyzer references failed");
+            let _ = client.shutdown().await;
+            return Vec::new();
+        }
+        Err(_) => {
+            warn!(node = %node.id, "rust-analyzer references timed out");
+            let _ = client.shutdown().await;
+            return Vec::new();
+        }
+    };
+    let _ = client.shutdown().await;
+
+    references_from_locations(graph, &project_root, locations)
+}
+
+fn references_from_locations(
+    graph: &GraphSnapshot,
+    project_root: &Path,
+    locations: Vec<ra_client::LspLocation>,
+) -> Vec<ReferenceRecord> {
+    let symbol_index = SymbolIndex::from_nodes(&graph.nodes);
+    let node_by_id = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    locations
+        .into_iter()
+        .filter_map(|location| {
+            reference_from_location(project_root, &symbol_index, &node_by_id, location)
+        })
+        .collect()
+}
+
+fn reference_from_location(
+    project_root: &Path,
+    symbol_index: &SymbolIndex,
+    node_by_id: &HashMap<&str, &GraphNode>,
+    location: ra_client::LspLocation,
+) -> Option<ReferenceRecord> {
+    let path = Url::parse(location.uri.as_str())
+        .ok()?
+        .to_file_path()
+        .ok()?;
+    let file = project_indexer::relative_to(project_root, &path);
+    let range = graph_core::TextRange {
+        start: graph_core::TextPosition {
+            line: location.range.start.line,
+            character: location.range.start.character,
+        },
+        end: graph_core::TextPosition {
+            line: location.range.end.line,
+            character: location.range.end.character,
+        },
+    };
+    let node = symbol_index
+        .find_by_uri_path_position(&path, range.start.line, range.start.character)
+        .and_then(|symbol| node_by_id.get(symbol.node_id.as_str()).copied())
+        .cloned();
+    Some(ReferenceRecord {
+        node,
+        location: SourceLocation {
+            file,
+            line: range.start.line + 1,
+            character: range.start.character,
+            range: Some(range),
+        },
+    })
+}
+
+fn reference_from_node(node: Option<GraphNode>) -> Option<ReferenceRecord> {
+    let node = node?;
+    let file = node.file.clone()?;
+    let range = node.range;
+    Some(ReferenceRecord {
+        location: SourceLocation {
+            file,
+            line: node
+                .line
+                .unwrap_or_else(|| range.map(|range| range.start.line + 1).unwrap_or_default()),
+            character: node
+                .selection_range
+                .map(|range| range.start.character)
+                .unwrap_or_default(),
+            range,
+        },
+        node: Some(node),
+    })
+}
+
+fn dedupe_references(references: &mut Vec<ReferenceRecord>) {
+    let mut seen = HashSet::new();
+    references.retain(|reference| {
+        seen.insert((
+            reference.location.file.clone(),
+            reference.location.line,
+            reference.location.character,
+            reference.node.as_ref().map(|node| node.id.clone()),
+        ))
+    });
 }
 
 async fn check_rust_analyzer(rust_analyzer: &PathBuf) -> Result<()> {
@@ -1159,9 +1368,19 @@ fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_core::{EdgeConfidence, Visibility};
+    use graph_core::{EdgeConfidence, LspPosition, LspRange, Visibility};
 
     fn test_node(label: &str, file: Option<&str>, module: Option<&str>) -> GraphNode {
+        let range = LspRange {
+            start: LspPosition {
+                line: 0,
+                character: 0,
+            },
+            end: LspPosition {
+                line: 0,
+                character: label.len() as u32,
+            },
+        };
         GraphNode {
             id: format!("fn:{}@1", label),
             language: Some("rust".into()),
@@ -1180,8 +1399,8 @@ mod tests {
             pinned: None,
             bookmarked: None,
             connections: None,
-            range: None,
-            selection_range: None,
+            range: Some(range),
+            selection_range: Some(range),
             x: 0.0,
             y: 0.0,
             vx: 0.0,
@@ -1218,11 +1437,94 @@ mod tests {
             outgoing_edges: vec![edge],
             callers: Vec::new(),
             callees: Vec::new(),
-            references: Vec::new(),
+            references: vec![ReferenceRecord {
+                node: None,
+                location: SourceLocation {
+                    file: "src/main.rs".into(),
+                    line: 1,
+                    character: 0,
+                    range: None,
+                },
+            }],
+            related_types: Vec::new(),
         };
         assert_eq!(
             response.incoming_edges[0].confidence,
             EdgeConfidence::Semantic
         );
+        assert_eq!(response.references[0].location.file, "src/main.rs");
+    }
+
+    #[test]
+    fn semantic_call_edge_insertion_resolves_target_from_symbol_index() {
+        let source = test_node("main", Some("src/main.rs"), Some("app"));
+        let mut target = test_node("helper", Some("src/main.rs"), Some("app"));
+        let target_range = LspRange {
+            start: LspPosition {
+                line: 4,
+                character: 0,
+            },
+            end: LspPosition {
+                line: 4,
+                character: 6,
+            },
+        };
+        target.line = Some(5);
+        target.range = Some(target_range);
+        target.selection_range = Some(target_range);
+        let mut snapshot = GraphSnapshot {
+            nodes: vec![source.clone(), target.clone()],
+            edges: vec![graph_core::GraphEdge {
+                id: graph_core::edge_id(EdgeType::Calls, &source.id, &target.id),
+                source: source.id.clone(),
+                target: target.id.clone(),
+                edge_type: EdgeType::Calls,
+                confidence: EdgeConfidence::SyntaxFallback,
+            }],
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        };
+        let symbol_index = SymbolIndex::from_nodes(&snapshot.nodes);
+
+        assert!(insert_semantic_call_edge(
+            &mut snapshot,
+            &symbol_index,
+            &source.id,
+            Path::new("/tmp/project/src/main.rs"),
+            4,
+            0,
+        ));
+        let edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| edge.source == source.id && edge.target == target.id)
+            .unwrap();
+        assert_eq!(edge.confidence, EdgeConfidence::Semantic);
+    }
+
+    #[test]
+    fn reference_records_preserve_unresolved_source_locations() {
+        let location = ReferenceRecord {
+            node: None,
+            location: SourceLocation {
+                file: "src/lib.rs".into(),
+                line: 7,
+                character: 3,
+                range: Some(LspRange {
+                    start: LspPosition {
+                        line: 6,
+                        character: 3,
+                    },
+                    end: LspPosition {
+                        line: 6,
+                        character: 8,
+                    },
+                }),
+            },
+        };
+        assert!(location.node.is_none());
+        assert_eq!(location.location.line, 7);
+        assert_eq!(location.location.range.unwrap().start.line, 6);
     }
 }

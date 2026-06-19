@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers } from 'lucide-react'
-import type { AnalyzerStatus, AppState, GraphNode, GraphEdge } from '../types'
+import type { AnalyzerStatus, AppState, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord } from '../types'
 
 interface InspectorPanelProps {
   selectedNode: GraphNode | null
@@ -150,20 +150,39 @@ function ProjectOverview({
 function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenInEditor }: {
   node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
 }) {
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
-  const outgoing = edges.filter(e => e.source === node.id)
-  const incoming = edges.filter(e => e.target === node.id)
+  const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
+  const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
 
-  const callers = incoming.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const callees = outgoing.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  useEffect(() => {
+    let cancelled = false
+    setDetails(null)
+    fetch(`/api/node/${encodeURIComponent(node.id)}/details`)
+      .then(response => response.ok ? response.json() : null)
+      .then((payload: NodeDetailsResponse | null) => {
+        if (!cancelled) setDetails(payload)
+      })
+      .catch(() => {
+        if (!cancelled) setDetails(null)
+      })
+    return () => { cancelled = true }
+  }, [node.id])
+
+  const outgoing = details?.outgoingEdges ?? edges.filter(e => e.source === node.id)
+  const incoming = details?.incomingEdges ?? edges.filter(e => e.target === node.id)
+
+  const callers = details?.callers ?? incoming.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
+  const callees = details?.callees ?? outgoing.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const apiCallers = incoming.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const apiTargets = outgoing.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const renders = outgoing.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const renderedBy = incoming.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const typeRefs = outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  const typeRefs = details?.relatedTypes.length ? details.relatedTypes : outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const dataFlowTargets = outgoing.filter(e => e.type === 'DataFlow').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const usedBy = incoming.filter(e => e.type === 'Uses' || e.type === 'TypeReference').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
+  const references = details?.references ?? referenceRecordsFromNodes(usedBy)
+  const callerConfidence = confidenceByNode(incoming, 'source')
+  const calleeConfidence = confidenceByNode(outgoing, 'target')
 
   const typeColor = NODE_TYPE_COLORS[node.type] ?? '#7D8795'
 
@@ -220,10 +239,10 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
           <Card>
             <SectionLabel label="Call Graph" />
             {callers.length > 0 && (
-              <NodeList label="Called by" icon={<ArrowDownRight size={11} color="#06B6D4" />} nodes={callers} onSelect={onSelectNode} />
+              <NodeList label="Called by" icon={<ArrowDownRight size={11} color="#06B6D4" />} nodes={callers} onSelect={onSelectNode} confidenceByNodeId={callerConfidence} />
             )}
             {callees.length > 0 && (
-              <NodeList label="Calls" icon={<ArrowUpRight size={11} color="#EC4899" />} nodes={callees} onSelect={onSelectNode} />
+              <NodeList label="Calls" icon={<ArrowUpRight size={11} color="#EC4899" />} nodes={callees} onSelect={onSelectNode} confidenceByNodeId={calleeConfidence} />
             )}
             {apiCallers.length > 0 && (
               <NodeList label="API called by" icon={<ArrowDownRight size={11} color="#E11D48" />} nodes={apiCallers} onSelect={onSelectNode} />
@@ -265,6 +284,12 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
         {usedBy.length > 0 && (
           <Card>
             <NodeList label="Used by" icon={<ChevronRight size={11} color="#F59E0B" />} nodes={usedBy.slice(0, 6)} onSelect={onSelectNode} />
+          </Card>
+        )}
+
+        {references.length > 0 && (
+          <Card>
+            <ReferenceList references={references.slice(0, 8)} onSelect={onSelectNode} />
           </Card>
         )}
 
@@ -346,7 +371,13 @@ function SmallStat({ label, value }: { label: string; value: number }) {
   )
 }
 
-function NodeList({ label, icon, nodes, onSelect }: { label: string; icon: ReactNode; nodes: GraphNode[]; onSelect: (id: string) => void }) {
+function NodeList({ label, icon, nodes, onSelect, confidenceByNodeId }: {
+  label: string
+  icon: ReactNode
+  nodes: GraphNode[]
+  onSelect: (id: string) => void
+  confidenceByNodeId?: Map<string, EdgeConfidence>
+}) {
   return (
     <div className="mb-1">
       <div className="flex items-center gap-1.5 mb-1.5">
@@ -362,11 +393,76 @@ function NodeList({ label, icon, nodes, onSelect }: { label: string; icon: React
         >
           <TypeDot type={n.type} />
           <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', textAlign: 'left', flex: 1 }}>{n.label}</span>
+          {confidenceByNodeId?.get(n.id) && <ConfidenceBadge confidence={confidenceByNodeId.get(n.id)!} />}
           <ChevronRight size={10} color="var(--cc-text-faint)" />
         </button>
       ))}
     </div>
   )
+}
+
+function ReferenceList({ references, onSelect }: { references: ReferenceRecord[]; onSelect: (id: string) => void }) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <ChevronRight size={11} color="#F59E0B" />
+        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>References ({references.length})</span>
+      </div>
+      {references.map((reference, index) => (
+        <button
+          key={`${reference.location.file}:${reference.location.line}:${reference.location.character}:${reference.node?.id ?? index}`}
+          onClick={() => reference.node && onSelect(reference.node.id)}
+          disabled={!reference.node}
+          className="flex items-center gap-2 w-full rounded py-1 px-1.5 transition-colors"
+          style={{ background: 'none', cursor: reference.node ? 'pointer' : 'default', opacity: reference.node ? 1 : 0.82 }}
+        >
+          <TypeDot type={reference.node?.type ?? 'File'} />
+          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', textAlign: 'left', flex: 1 }}>
+            {reference.node?.label ?? reference.location.file}
+          </span>
+          <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontFamily: 'JetBrains Mono, monospace' }}>
+            L{reference.location.line}
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ConfidenceBadge({ confidence }: { confidence: EdgeConfidence }) {
+  const colors: Record<EdgeConfidence, string> = {
+    Exact: '#34D399',
+    Semantic: '#06B6D4',
+    SyntaxFallback: '#F59E0B',
+    Heuristic: '#7D8795',
+  }
+  return (
+    <span style={{ fontSize: 9, color: colors[confidence], border: `1px solid ${colors[confidence]}30`, background: `${colors[confidence]}18`, borderRadius: 4, padding: '1px 4px' }}>
+      {confidence}
+    </span>
+  )
+}
+
+function confidenceByNode(edges: GraphEdge[], side: 'source' | 'target') {
+  const map = new Map<string, EdgeConfidence>()
+  edges.forEach(edge => {
+    if (edge.confidence) map.set(edge[side], edge.confidence)
+  })
+  return map
+}
+
+function referenceRecordsFromNodes(nodes: GraphNode[]): ReferenceRecord[] {
+  return nodes
+    .filter(node => node.file)
+    .map(node => ({
+      node,
+      location: {
+        file: node.file!,
+        line: node.line ?? 0,
+        character: node.selectionRange?.start.character ?? 0,
+        range: node.range,
+      },
+    }))
 }
 
 function TypeDot({ type }: { type: string }) {

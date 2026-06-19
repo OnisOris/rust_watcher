@@ -186,10 +186,18 @@ pub enum AnalyzerStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SymbolRecord {
     pub id: String,
+    pub node_id: String,
     pub language: LanguageId,
+    pub node_type: NodeType,
+    pub label: String,
     pub name: String,
     pub kind: SymbolKindName,
     pub file: String,
+    pub module: Option<String>,
+    #[serde(rename = "crate")]
+    pub crate_name: Option<String>,
+    pub line: u32,
+    pub character: u32,
     pub range: TextRange,
     pub selection_range: TextRange,
 }
@@ -252,6 +260,10 @@ impl SymbolIndex {
 
     pub fn get(&self, id: &str) -> Option<&SymbolRecord> {
         self.by_id.get(id).and_then(|idx| self.symbols.get(*idx))
+    }
+
+    pub fn find_by_node_id(&self, node_id: &str) -> Option<&SymbolRecord> {
+        self.get(node_id)
     }
 
     pub fn find_by_language(&self, language: &LanguageId) -> Vec<&SymbolRecord> {
@@ -318,14 +330,21 @@ impl SymbolRecord {
     pub fn from_node(node: &GraphNode) -> Option<Self> {
         Some(Self {
             id: node.id.clone(),
+            node_id: node.id.clone(),
             language: node
                 .language
                 .as_deref()
                 .map(LanguageId::from)
                 .unwrap_or(LanguageId::Rust),
+            node_type: node.node_type,
+            label: node.label.clone(),
             name: node.label.clone(),
             kind: SymbolKindName::from_node_type(node.node_type),
             file: node.file.clone()?,
+            module: node.module.clone(),
+            crate_name: node.crate_name.clone(),
+            line: node.line.unwrap_or(node.selection_range?.start.line + 1),
+            character: node.selection_range?.start.character,
             range: node.range?,
             selection_range: node.selection_range?,
         })
@@ -589,7 +608,26 @@ pub struct NodeDetailsResponse {
     pub outgoing_edges: Vec<GraphEdge>,
     pub callers: Vec<GraphNode>,
     pub callees: Vec<GraphNode>,
-    pub references: Vec<GraphNode>,
+    pub references: Vec<ReferenceRecord>,
+    pub related_types: Vec<GraphNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<GraphNode>,
+    pub location: SourceLocation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceLocation {
+    pub file: String,
+    pub line: u32,
+    pub character: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<TextRange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -646,12 +684,20 @@ mod tests {
         kind: SymbolKindName,
         range: TextRange,
     ) -> SymbolRecord {
+        let name = name.to_string();
         SymbolRecord {
             id: id.into(),
+            node_id: id.into(),
             language,
-            name: name.into(),
+            node_type: NodeType::Function,
+            label: name.clone(),
+            name,
             kind,
             file: file.into(),
+            module: Some("test".into()),
+            crate_name: Some("test".into()),
+            line: range.start.line + 1,
+            character: range.start.character,
             range,
             selection_range: range,
         }
@@ -681,6 +727,10 @@ mod tests {
         ]);
 
         assert_eq!(index.get("fn:demo::main@3").unwrap().name, "main");
+        assert_eq!(
+            index.find_by_node_id("fn:demo::main@3").unwrap().label,
+            "main"
+        );
         assert_eq!(index.find_by_language(&LanguageId::Rust).len(), 1);
         assert_eq!(index.find_by_language(&LanguageId::TypeScript).len(), 1);
         assert_eq!(index.find_by_file("frontend/src/App.tsx")[0].name, "App");

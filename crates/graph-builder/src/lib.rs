@@ -272,11 +272,18 @@ impl LanguageAnalyzer for TypeScriptLanguageAdapter {
                 let line = symbol.line.saturating_sub(1);
                 let label_len = symbol.label.len() as u32;
                 SymbolRecord {
-                    id: symbol.id,
+                    id: symbol.id.clone(),
+                    node_id: symbol.id,
                     language: file.language.clone(),
+                    node_type: symbol.node_type,
+                    label: symbol.label.clone(),
                     name: symbol.label,
                     kind: SymbolKindName::from_node_type(symbol.node_type),
                     file: file.relative_path.clone(),
+                    module: Some(ts_file.module_path.clone()),
+                    crate_name: Some("frontend".to_string()),
+                    line: symbol.line,
+                    character: 0,
                     range: graph_core::TextRange {
                         start: graph_core::TextPosition { line, character: 0 },
                         end: graph_core::TextPosition {
@@ -346,10 +353,17 @@ fn symbol_record_from_discovered(
     let selection_range = symbol.selection_range?;
     Some(SymbolRecord {
         id: format!("symbol:{file}::{}@{}", symbol.name, symbol.line),
+        node_id: format!("symbol:{file}::{}@{}", symbol.name, symbol.line),
         language,
+        node_type: map_kind(&symbol)?,
+        label: symbol.name.clone(),
         name: symbol.name,
         kind: symbol.kind,
         file: file.to_string(),
+        module: None,
+        crate_name: None,
+        line: range.start.line + 1,
+        character: selection_range.start.character,
         range,
         selection_range,
     })
@@ -1048,7 +1062,11 @@ pub fn push_unique_edge_with_confidence(
     confidence: EdgeConfidence,
 ) {
     let id = edge_id(edge_type, source, target);
-    if existing_edges.contains(&id) || edges.iter().any(|edge| edge.id == id) {
+    if let Some(edge) = edges.iter_mut().find(|edge| edge.id == id) {
+        edge.confidence = strongest_confidence(edge.confidence, confidence);
+        return;
+    }
+    if existing_edges.contains(&id) {
         return;
     }
     edges.push(GraphEdge {
@@ -1058,6 +1076,23 @@ pub fn push_unique_edge_with_confidence(
         edge_type,
         confidence,
     });
+}
+
+fn strongest_confidence(left: EdgeConfidence, right: EdgeConfidence) -> EdgeConfidence {
+    if confidence_rank(right) > confidence_rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn confidence_rank(confidence: EdgeConfidence) -> u8 {
+    match confidence {
+        EdgeConfidence::Heuristic => 0,
+        EdgeConfidence::SyntaxFallback => 1,
+        EdgeConfidence::Semantic => 2,
+        EdgeConfidence::Exact => 3,
+    }
 }
 
 fn contains_call(line: &str, name: &str) -> bool {
@@ -1814,7 +1849,21 @@ fn edge(edge_type: EdgeType, source: &str, target: &str) -> GraphEdge {
         source: source.to_string(),
         target: target.to_string(),
         edge_type,
-        confidence: EdgeConfidence::Heuristic,
+        confidence: default_edge_confidence(edge_type),
+    }
+}
+
+fn default_edge_confidence(edge_type: EdgeType) -> EdgeConfidence {
+    match edge_type {
+        EdgeType::Contains | EdgeType::EndpointHandler | EdgeType::ExternalDependency => {
+            EdgeConfidence::Exact
+        }
+        EdgeType::Calls | EdgeType::Renders | EdgeType::TypeReference | EdgeType::DataFlow => {
+            EdgeConfidence::SyntaxFallback
+        }
+        EdgeType::ApiCall | EdgeType::ModDeclaration => EdgeConfidence::Semantic,
+        EdgeType::Uses => EdgeConfidence::Heuristic,
+        EdgeType::Implements => EdgeConfidence::SyntaxFallback,
     }
 }
 

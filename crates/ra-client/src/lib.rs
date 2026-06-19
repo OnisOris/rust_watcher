@@ -20,6 +20,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::oneshot;
 use url::Url;
 
+pub use lsp_types::Location as LspLocation;
+
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
 pub struct RaClient {

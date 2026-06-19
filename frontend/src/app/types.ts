@@ -162,7 +162,20 @@ export interface NodeDetailsResponse {
   outgoingEdges: GraphEdge[]
   callers: GraphNode[]
   callees: GraphNode[]
-  references: GraphNode[]
+  references: ReferenceRecord[]
+  relatedTypes: GraphNode[]
+}
+
+export interface ReferenceRecord {
+  node?: GraphNode
+  location: SourceLocation
+}
+
+export interface SourceLocation {
+  file: string
+  line: number
+  character: number
+  range?: LspRange
 }
 
 export interface GraphFilters {
