@@ -35,6 +35,16 @@ export type EdgeType =
   | 'ExternalDependency'
 
 export type EdgeConfidence = 'Exact' | 'Semantic' | 'SyntaxFallback' | 'Heuristic'
+export type DataFlowKind =
+  | 'Argument'
+  | 'ReturnValue'
+  | 'Assignment'
+  | 'StateUpdate'
+  | 'PropertyBinding'
+  | 'ApiRequest'
+  | 'ApiResponse'
+  | 'ModelUse'
+  | 'Unknown'
 export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
@@ -89,6 +99,10 @@ export interface GraphEdge {
   target: string
   type: EdgeType
   confidence?: EdgeConfidence
+  label?: string
+  description?: string
+  dataFlowKind?: DataFlowKind
+  evidence?: string
   bundledCount?: number
   bundledTypes?: EdgeType[]
   bundledEdgeIds?: string[]

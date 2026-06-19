@@ -160,19 +160,21 @@ describe('graph view helpers', () => {
       node('endpoint', undefined, 'Endpoint'),
       node('handler', 'rust', 'Function'),
       node('service', 'rust', 'Function'),
+      node('model', 'rust', 'Struct'),
       node('noise', 'rust', 'Function'),
     ]
     const edges: GraphEdge[] = [
       { id: 'api', source: 'component', target: 'endpoint', type: 'ApiCall' },
       { id: 'handler', source: 'endpoint', target: 'handler', type: 'EndpointHandler' },
       { id: 'call', source: 'handler', target: 'service', type: 'Calls' },
+      { id: 'response', source: 'service', target: 'model', type: 'DataFlow', dataFlowKind: 'ReturnValue' },
       { id: 'noise', source: 'noise', target: 'service', type: 'Calls' },
     ]
 
     const route = buildRouteFlowGraph({ nodes, edges })
 
-    expect(route.nodes.map(n => n.id)).toEqual(['component', 'endpoint', 'handler', 'service'])
-    expect(route.edges.map(e => e.id)).toEqual(['api', 'handler', 'call'])
+    expect(route.nodes.map(n => n.id)).toEqual(['component', 'endpoint', 'handler', 'service', 'model'])
+    expect(route.edges.map(e => e.id)).toEqual(['api', 'handler', 'call', 'response'])
   })
 
   it('collapsed group stats count hidden diagnostics', () => {

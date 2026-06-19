@@ -201,6 +201,19 @@ pub enum EdgeConfidence {
     Heuristic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DataFlowKind {
+    Argument,
+    ReturnValue,
+    Assignment,
+    StateUpdate,
+    PropertyBinding,
+    ApiRequest,
+    ApiResponse,
+    ModelUse,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteKey {
@@ -578,6 +591,14 @@ pub struct GraphEdge {
     pub edge_type: EdgeType,
     #[serde(default)]
     pub confidence: EdgeConfidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_flow_kind: Option<DataFlowKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

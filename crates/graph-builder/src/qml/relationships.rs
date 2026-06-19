@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use graph_core::{
-    route_key, EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot, NodeType,
+    route_key, DataFlowKind, EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot,
+    NodeType,
 };
 
 use super::api_calls::build_endpoint_route_index;
 use super::imports::{resolve_qml_component, resolve_qml_import};
 use super::{QmlFile, QmlImport, QmlRelationshipFact, QmlSymbol};
-use crate::{file_id, push_unique_edge_with_confidence};
+use crate::{file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence};
 
 pub(super) fn enrich_qml_relationships(
     snapshot: &mut GraphSnapshot,
@@ -132,7 +133,9 @@ pub(super) fn collect_qml_relationship_edges(
                     source_id,
                     target_name,
                 } => {
+                    let mut resolved = false;
                     if let Some(target_id) = symbols_by_label.get(target_name) {
+                        resolved = true;
                         push_unique_edge_with_confidence(
                             &mut edges,
                             &existing_edges,
@@ -141,13 +144,27 @@ pub(super) fn collect_qml_relationship_edges(
                             target_id,
                             EdgeConfidence::Heuristic,
                         );
-                        push_unique_edge_with_confidence(
+                        push_unique_data_flow_edge(
                             &mut edges,
                             &existing_edges,
-                            EdgeType::DataFlow,
                             target_id,
                             source_id,
                             EdgeConfidence::Heuristic,
+                            DataFlowKind::PropertyBinding,
+                            target_name.clone(),
+                            "QML binding/reference",
+                        );
+                    }
+                    if !resolved {
+                        push_unique_data_flow_edge(
+                            &mut edges,
+                            &existing_edges,
+                            source_id,
+                            source_id,
+                            EdgeConfidence::Heuristic,
+                            DataFlowKind::PropertyBinding,
+                            target_name.clone(),
+                            "QML unresolved binding/reference",
                         );
                     }
                 }
@@ -166,6 +183,16 @@ pub(super) fn collect_qml_relationship_edges(
                                 source_id,
                                 endpoint_id,
                                 EdgeConfidence::Semantic,
+                            );
+                            push_unique_data_flow_edge(
+                                &mut edges,
+                                &existing_edges,
+                                source_id,
+                                endpoint_id,
+                                EdgeConfidence::Semantic,
+                                DataFlowKind::ApiRequest,
+                                format!("{method} {path}"),
+                                "QML API call",
                             );
                         }
                     }

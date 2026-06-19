@@ -1,7 +1,7 @@
 use graph_core::{
-    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, DiscoveredSymbol,
-    EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot, LanguageId, NodeType,
-    ProjectFile, SymbolKindName, SymbolRecord, Visibility,
+    edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, DataFlowKind,
+    DiscoveredSymbol, EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot, LanguageId,
+    NodeType, ProjectFile, SymbolKindName, SymbolRecord, Visibility,
 };
 use project_indexer::{IndexedFile, ProjectIndex};
 use std::collections::{HashMap, HashSet};
@@ -450,6 +450,11 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
     let mut new_nodes = Vec::new();
     let mut new_edges = Vec::new();
     let node_index = SyntaxNodeIndex::new(&snapshot.nodes);
+    let existing_edge_ids = snapshot
+        .edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<HashSet<_>>();
 
     for file in files {
         let Ok(source) = fs::read_to_string(&file.absolute_path) else {
@@ -502,6 +507,16 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                     .or_else(|| node_index.first_of_type(&handler, NodeType::Method))
                 {
                     new_edges.push(edge(EdgeType::EndpointHandler, &id, &handler_node.id));
+                    push_unique_data_flow_edge(
+                        &mut new_edges,
+                        &existing_edge_ids,
+                        &handler_node.id,
+                        &id,
+                        EdgeConfidence::Semantic,
+                        DataFlowKind::ApiResponse,
+                        "handler response",
+                        handler_node.signature.clone().unwrap_or_default(),
+                    );
                 }
             }
         }
@@ -682,12 +697,15 @@ fn add_function_relationships(
             );
         }
         if line.contains(&construct) || line.contains(&associated) {
-            push_unique_edge(
+            push_unique_data_flow_edge(
                 edges,
                 &HashSet::new(),
-                EdgeType::DataFlow,
                 &target.id,
                 source_id,
+                EdgeConfidence::SyntaxFallback,
+                DataFlowKind::ModelUse,
+                target.label.clone(),
+                line.to_string(),
             );
         }
     }
@@ -732,6 +750,45 @@ pub fn push_unique_edge_with_confidence(
         target: target.to_string(),
         edge_type,
         confidence,
+        label: None,
+        description: None,
+        data_flow_kind: None,
+        evidence: None,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn push_unique_data_flow_edge(
+    edges: &mut Vec<GraphEdge>,
+    existing_edges: &HashSet<String>,
+    source: &str,
+    target: &str,
+    confidence: EdgeConfidence,
+    kind: DataFlowKind,
+    label: impl Into<String>,
+    evidence: impl Into<String>,
+) {
+    let id = edge_id(EdgeType::DataFlow, source, target);
+    if let Some(edge) = edges.iter_mut().find(|edge| edge.id == id) {
+        edge.confidence = strongest_confidence(edge.confidence, confidence);
+        edge.data_flow_kind = Some(kind);
+        return;
+    }
+    if existing_edges.contains(&id) {
+        return;
+    }
+    let label = label.into();
+    let evidence = evidence.into();
+    edges.push(GraphEdge {
+        id,
+        source: source.to_string(),
+        target: target.to_string(),
+        edge_type: EdgeType::DataFlow,
+        confidence,
+        label: (!label.is_empty()).then_some(label),
+        description: None,
+        data_flow_kind: Some(kind),
+        evidence: (!evidence.is_empty()).then_some(evidence),
     });
 }
 
@@ -1097,6 +1154,10 @@ fn edge_with_confidence(
         target: target.to_string(),
         edge_type,
         confidence,
+        label: None,
+        description: None,
+        data_flow_kind: None,
+        evidence: None,
     }
 }
 
@@ -1383,6 +1444,18 @@ export function App() {
                 && edge.source == endpoint.id
                 && edge.target == handler.id
         }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == component.id
+                && edge.target == endpoint.id
+                && edge.data_flow_kind == Some(DataFlowKind::ApiRequest)
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == handler.id
+                && edge.target == endpoint.id
+                && edge.data_flow_kind == Some(DataFlowKind::ApiResponse)
+        }));
 
         let (focused_nodes, focused_edges) =
             focus_subgraph(&snapshot, &endpoint.id, Some(1)).unwrap();
@@ -1552,6 +1625,18 @@ export type UserId = User['id']
             edge.edge_type == EdgeType::EndpointHandler
                 && edge.source == endpoint.id
                 && edge.target == handler.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == get_users.id
+                && edge.target == endpoint.id
+                && edge.data_flow_kind == Some(DataFlowKind::ApiRequest)
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == use_users.id
+                && edge.target == user_list.id
+                && edge.data_flow_kind == Some(DataFlowKind::ReturnValue)
         }));
 
         let _ = std::fs::remove_dir_all(root);
@@ -1945,6 +2030,21 @@ export function useUsers() {
                 && edge.source == hook.id
                 && edge.target == endpoint.id
         }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == handler.id
+                && edge.target == endpoint.id
+                && edge.data_flow_kind == Some(DataFlowKind::ReturnValue)
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == method.id
+                && edge.target == handler.id
+                && matches!(
+                    edge.data_flow_kind,
+                    Some(DataFlowKind::Assignment | DataFlowKind::ReturnValue)
+                )
+        }));
         assert!(snapshot.nodes.iter().any(|node| {
             node.node_type == NodeType::Endpoint
                 && node.label == "GET /api/health"
@@ -2284,6 +2384,16 @@ Rectangle {
             edge.edge_type == EdgeType::ApiCall
                 && edge.source == function.id
                 && edge.target == python_endpoint.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.data_flow_kind == Some(DataFlowKind::PropertyBinding)
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == function.id
+                && edge.target == rust_endpoint.id
+                && edge.data_flow_kind == Some(DataFlowKind::ApiRequest)
         }));
         assert!(snapshot
             .edges

@@ -194,6 +194,27 @@ export function buildRouteFlowGraph(graph: { nodes: GraphNode[]; edges: GraphEdg
     }
   }
 
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const edge of graph.edges) {
+      if (edge.type !== 'DataFlow') continue
+      if (!keepNodes.has(edge.source) && !keepNodes.has(edge.target)) continue
+      if (!keepEdges.has(edge.id)) {
+        keepEdges.add(edge.id)
+        grew = true
+      }
+      if (!keepNodes.has(edge.source)) {
+        keepNodes.add(edge.source)
+        grew = true
+      }
+      if (!keepNodes.has(edge.target)) {
+        keepNodes.add(edge.target)
+        grew = true
+      }
+    }
+  }
+
   return {
     nodes: graph.nodes.filter(node => keepNodes.has(node.id) || (node.type === 'Endpoint' && hasApiEdge(graph.edges, node.id))),
     edges: graph.edges.filter(edge =>
@@ -256,7 +277,7 @@ function modeVisibility(mode: GraphMode): { nodeTypes: Set<NodeType>; edgeTypes:
   if (mode === 'DataFlow') {
     return {
       nodeTypes: new Set(['Function', 'Method', 'Component', 'Hook', 'Endpoint', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler']),
-      edgeTypes: new Set(['DataFlow', 'ApiCall', 'EndpointHandler', 'Calls', 'Contains']),
+      edgeTypes: new Set(['DataFlow', 'ApiCall', 'EndpointHandler', 'Calls', 'TypeReference', 'Uses']),
     }
   }
   if (mode === 'Traits') {

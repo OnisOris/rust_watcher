@@ -1,4 +1,4 @@
-use graph_core::{EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot};
+use graph_core::{DataFlowKind, EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -6,7 +6,7 @@ use super::api_routes::collect_py_endpoint_nodes_and_edges;
 use super::imports::add_py_import_edges;
 use super::parser::{node_text, parse_py_tree};
 use super::{PyFile, PySymbol};
-use crate::{file_id, push_unique_edge_with_confidence};
+use crate::{file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence};
 
 pub(super) fn enrich_py_relationships(
     snapshot: &mut GraphSnapshot,
@@ -131,6 +131,20 @@ fn collect_py_ast_relationship_edges(
                         target_id,
                         confidence,
                     );
+                    push_unique_data_flow_edge(
+                        edges,
+                        existing_edges,
+                        target_id,
+                        source_id,
+                        confidence,
+                        if is_inside_assignment(node) {
+                            DataFlowKind::Assignment
+                        } else {
+                            DataFlowKind::ReturnValue
+                        },
+                        callee_name,
+                        node_text(node, source),
+                    );
                 }
             }
         }
@@ -156,6 +170,20 @@ fn collect_py_ast_relationship_edges(
             }
         }
     }
+}
+
+fn is_inside_assignment(node: Node<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "assignment" {
+            return true;
+        }
+        if matches!(parent.kind(), "function_definition" | "class_definition") {
+            return false;
+        }
+        current = parent.parent();
+    }
+    false
 }
 
 fn owner_py_symbol_id<'a>(symbols: &'a [PySymbol], node: Node<'_>) -> Option<&'a str> {

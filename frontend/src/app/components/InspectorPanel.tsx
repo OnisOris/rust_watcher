@@ -207,6 +207,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   const contained = outgoing.filter(e => e.type === 'Contains').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const typeRefs = details?.relatedTypes.length ? details.relatedTypes : outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const dataFlowTargets = outgoing.filter(e => e.type === 'DataFlow').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
+  const incomingDataFlow = incoming.filter(e => e.type === 'DataFlow')
+  const outgoingDataFlow = outgoing.filter(e => e.type === 'DataFlow')
   const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const usedBy = incoming.filter(e => e.type === 'Uses' || e.type === 'TypeReference').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const references = details?.references ?? referenceRecordsFromNodes(usedBy)
@@ -335,9 +337,14 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
         )}
 
         {/* data flow */}
-        {dataFlowTargets.length > 0 && (
+        {(incomingDataFlow.length > 0 || outgoingDataFlow.length > 0) && (
           <Card>
-            <NodeList label="Data Flow →" icon={<GitBranch size={11} color="#8B5CF6" />} nodes={dataFlowTargets} onSelect={onSelectNode} />
+            <DataFlowList
+              incoming={incomingDataFlow}
+              outgoing={outgoingDataFlow}
+              nodeMap={nodeMap}
+              onSelect={onSelectNode}
+            />
           </Card>
         )}
 
@@ -502,6 +509,61 @@ function ReferenceList({ references, onSelect }: { references: ReferenceRecord[]
         </button>
       ))}
     </div>
+  )
+}
+
+function DataFlowList({
+  incoming,
+  outgoing,
+  nodeMap,
+  onSelect,
+}: {
+  incoming: GraphEdge[]
+  outgoing: GraphEdge[]
+  nodeMap: Map<string, GraphNode>
+  onSelect: (id: string) => void
+}) {
+  return (
+    <div>
+      <SectionHeader title="Data flow" icon={<GitBranch size={11} color="#8B5CF6" />} />
+      {incoming.length > 0 && (
+        <div className="mb-2">
+          <div style={{ fontSize: 10, color: 'var(--cc-text-faint)', marginBottom: 4 }}>Incoming</div>
+          {incoming.slice(0, 6).map(edge => (
+            <DataFlowRow key={edge.id} edge={edge} node={nodeMap.get(edge.source)} direction="from" onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+      {outgoing.length > 0 && (
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--cc-text-faint)', marginBottom: 4 }}>Outgoing</div>
+          {outgoing.slice(0, 6).map(edge => (
+            <DataFlowRow key={edge.id} edge={edge} node={nodeMap.get(edge.target)} direction="to" onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DataFlowRow({ edge, node, direction, onSelect }: { edge: GraphEdge; node?: GraphNode; direction: 'from' | 'to'; onSelect: (id: string) => void }) {
+  return (
+    <button
+      onClick={() => node && onSelect(node.id)}
+      className="mb-1.5 w-full rounded px-2 py-1.5 text-left"
+      style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', cursor: node ? 'pointer' : 'default' }}
+    >
+      <div className="flex items-center gap-1.5">
+        <Badge color="#8B5CF6">{edge.dataFlowKind ?? 'Unknown'}</Badge>
+        <span style={{ fontSize: 10, color: 'var(--cc-text-muted)' }}>{direction}</span>
+        <span style={{ fontSize: 10, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node?.label ?? 'unresolved'}</span>
+      </div>
+      {(edge.label || edge.evidence) && (
+        <div style={{ marginTop: 4, fontSize: 10, color: 'var(--cc-text-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {edge.label}{edge.label && edge.evidence ? ' · ' : ''}{edge.evidence}
+        </div>
+      )}
+    </button>
   )
 }
 

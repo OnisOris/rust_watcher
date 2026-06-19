@@ -2741,6 +2741,27 @@ mod tests {
         }
     }
 
+    fn test_edge(
+        edge_type: EdgeType,
+        source: impl Into<String>,
+        target: impl Into<String>,
+        confidence: EdgeConfidence,
+    ) -> graph_core::GraphEdge {
+        let source = source.into();
+        let target = target.into();
+        graph_core::GraphEdge {
+            id: graph_core::edge_id(edge_type, &source, &target),
+            source,
+            target,
+            edge_type,
+            confidence,
+            label: None,
+            description: None,
+            data_flow_kind: None,
+            evidence: None,
+        }
+    }
+
     #[test]
     fn search_scoring_prefers_exact_then_prefix_then_contains() {
         let exact = test_node("main", Some("src/main.rs"), Some("app"));
@@ -2757,13 +2778,7 @@ mod tests {
     #[test]
     fn node_details_shape_can_hold_confidence_edges() {
         let node = test_node("main", Some("src/main.rs"), Some("app"));
-        let edge = graph_core::GraphEdge {
-            id: "Calls:a->b".into(),
-            source: "a".into(),
-            target: "b".into(),
-            edge_type: EdgeType::Calls,
-            confidence: EdgeConfidence::Semantic,
-        };
+        let edge = test_edge(EdgeType::Calls, "a", "b", EdgeConfidence::Semantic);
         let response = NodeDetailsResponse {
             node,
             incoming_edges: vec![edge.clone()],
@@ -2799,13 +2814,12 @@ mod tests {
         let mut handler = test_node("users", Some("backend/main.py"), Some("backend"));
         handler.id = "py-fn:backend/main.py::users@8".into();
         handler.language = Some("python".into());
-        let edge = graph_core::GraphEdge {
-            id: graph_core::edge_id(EdgeType::EndpointHandler, &endpoint.id, &handler.id),
-            source: endpoint.id.clone(),
-            target: handler.id.clone(),
-            edge_type: EdgeType::EndpointHandler,
-            confidence: EdgeConfidence::Exact,
-        };
+        let edge = test_edge(
+            EdgeType::EndpointHandler,
+            endpoint.id.clone(),
+            handler.id.clone(),
+            EdgeConfidence::Exact,
+        );
         let node_by_id = HashMap::from([
             (endpoint.id.as_str(), &endpoint),
             (handler.id.as_str(), &handler),
@@ -2845,13 +2859,12 @@ mod tests {
         target.selection_range = Some(target_range);
         let mut snapshot = GraphSnapshot {
             nodes: vec![source.clone(), target.clone()],
-            edges: vec![graph_core::GraphEdge {
-                id: graph_core::edge_id(EdgeType::Calls, &source.id, &target.id),
-                source: source.id.clone(),
-                target: target.id.clone(),
-                edge_type: EdgeType::Calls,
-                confidence: EdgeConfidence::SyntaxFallback,
-            }],
+            edges: vec![test_edge(
+                EdgeType::Calls,
+                source.id.clone(),
+                target.id.clone(),
+                EdgeConfidence::SyntaxFallback,
+            )],
             files: Vec::new(),
             events: Vec::new(),
             status: AppStatus::empty(),
@@ -2949,13 +2962,12 @@ mod tests {
                 test_node("changed", Some("src/changed.rs"), Some("app")),
                 test_node("other", Some("src/other.rs"), Some("app")),
             ],
-            edges: vec![graph_core::GraphEdge {
-                id: graph_core::edge_id(EdgeType::Calls, "fn:changed@1", "fn:other@1"),
-                source: "fn:changed@1".into(),
-                target: "fn:other@1".into(),
-                edge_type: EdgeType::Calls,
-                confidence: EdgeConfidence::SyntaxFallback,
-            }],
+            edges: vec![test_edge(
+                EdgeType::Calls,
+                "fn:changed@1",
+                "fn:other@1",
+                EdgeConfidence::SyntaxFallback,
+            )],
             files: Vec::new(),
             events: Vec::new(),
             status: AppStatus::empty(),

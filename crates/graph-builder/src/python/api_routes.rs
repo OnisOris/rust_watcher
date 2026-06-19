@@ -1,10 +1,12 @@
-use graph_core::{EdgeConfidence, EdgeType, GraphEdge, GraphNode, NodeType, Visibility};
+use graph_core::{
+    DataFlowKind, EdgeConfidence, EdgeType, GraphEdge, GraphNode, NodeType, Visibility,
+};
 use std::collections::HashSet;
 use tree_sitter::Node;
 
 use super::parser::{node_text, py_range};
 use super::{PyFile, PySymbol};
-use crate::{file_id, push_unique_edge_with_confidence};
+use crate::{file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence};
 
 pub(super) fn collect_py_endpoint_nodes_and_edges(
     node: Node<'_>,
@@ -122,6 +124,16 @@ fn add_endpoint_for_decorated_definition(
                 &endpoint_id,
                 handler_id,
                 EdgeConfidence::Exact,
+            );
+            push_unique_data_flow_edge(
+                edges,
+                existing_edges,
+                handler_id,
+                &endpoint_id,
+                EdgeConfidence::Semantic,
+                DataFlowKind::ReturnValue,
+                "handler response",
+                node_text(function_node, source),
             );
         }
     }

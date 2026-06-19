@@ -1,4 +1,4 @@
-use graph_core::{EdgeConfidence, EdgeType, GraphEdge, GraphSnapshot, NodeType};
+use graph_core::{DataFlowKind, EdgeConfidence, EdgeType, GraphEdge, GraphSnapshot, NodeType};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -7,7 +7,8 @@ use super::imports::add_ts_import_edges;
 use super::parser::{node_text, parse_ts_tree};
 use super::{TsFile, TsSymbol};
 use crate::{
-    brace_delta, contains_call, edge_with_confidence, file_id, push_unique_edge_with_confidence,
+    brace_delta, contains_call, edge_with_confidence, file_id, push_unique_data_flow_edge,
+    push_unique_edge_with_confidence,
 };
 
 pub(super) fn enrich_ts_relationships(
@@ -265,8 +266,58 @@ fn collect_ts_ast_relationship_edges(
                             endpoint_id,
                             EdgeConfidence::Semantic,
                         );
+                        push_unique_data_flow_edge(
+                            edges,
+                            existing_edges,
+                            source_id,
+                            endpoint_id,
+                            EdgeConfidence::Semantic,
+                            DataFlowKind::ApiRequest,
+                            format!("request {api_path}"),
+                            node_text(node, source),
+                        );
                     }
                 }
+            }
+            if callee_name.starts_with("use") && callee_name.len() > 3 {
+                if let Some(hook_id) = symbols_by_label.get(&callee_name) {
+                    if hook_id != source_id {
+                        push_unique_data_flow_edge(
+                            edges,
+                            existing_edges,
+                            hook_id,
+                            source_id,
+                            EdgeConfidence::Semantic,
+                            DataFlowKind::ReturnValue,
+                            format!("{callee_name} result"),
+                            node_text(node, source),
+                        );
+                    }
+                }
+            }
+            if callee_name.starts_with("set") && callee_name.len() > 3 {
+                push_unique_data_flow_edge(
+                    edges,
+                    existing_edges,
+                    source_id,
+                    source_id,
+                    EdgeConfidence::Heuristic,
+                    DataFlowKind::StateUpdate,
+                    callee_name,
+                    node_text(node, source),
+                );
+            }
+            if node_text(node, source).contains(".json(") {
+                push_unique_data_flow_edge(
+                    edges,
+                    existing_edges,
+                    source_id,
+                    source_id,
+                    EdgeConfidence::Heuristic,
+                    DataFlowKind::ApiResponse,
+                    "response.json()",
+                    node_text(node, source),
+                );
             }
         }
         _ => {}
