@@ -49,6 +49,33 @@ describe('graph patch helpers', () => {
     expect(next.find(node => node.id === 'a')?.label).toBe('a2')
   })
 
+  it('updates nodes without dropping existing positions', () => {
+    const nodes: GraphNode[] = [
+      { id: 'a', type: 'Function', label: 'a', x: 42, y: -7, vx: 1, vy: 2, pinned: true },
+    ]
+    const next = applyGraphPatchToNodes(nodes, emptyPatch({
+      updatedNodes: [{ id: 'a', type: 'Function', label: 'renamed', x: 0, y: 0, vx: 0, vy: 0 }],
+    }))
+
+    expect(next[0]).toMatchObject({ label: 'renamed', x: 42, y: -7, vx: 1, vy: 2, pinned: true })
+  })
+
+  it('places added nodes near related existing nodes when possible', () => {
+    const nodes: GraphNode[] = [
+      { id: 'a', type: 'Function', label: 'a', x: 100, y: 100, vx: 0, vy: 0 },
+    ]
+    const next = applyGraphPatchToNodes(nodes, emptyPatch({
+      addedNodes: [{ id: 'b', type: 'Function', label: 'b', x: 0, y: 0, vx: 0, vy: 0 }],
+      addedEdges: [{ id: 'Calls:a->b', source: 'a', target: 'b', type: 'Calls' }],
+    }))
+    const added = next.find(node => node.id === 'b')
+
+    expect(added?.x).not.toBe(0)
+    expect(added?.y).not.toBe(0)
+    expect(Math.abs((added?.x ?? 0) - 100)).toBeLessThan(120)
+    expect(Math.abs((added?.y ?? 0) - 100)).toBeLessThan(120)
+  })
+
   it('adds, updates, and removes edges', () => {
     const edges: GraphEdge[] = [
       { id: 'Calls:a->old', source: 'a', target: 'old', type: 'Calls' },
@@ -62,6 +89,29 @@ describe('graph patch helpers', () => {
 
     expect(next.map(edge => edge.id)).toEqual(['Calls:a->b', 'Calls:b->c'])
     expect(next.find(edge => edge.id === 'Calls:a->b')?.confidence).toBe('Semantic')
+  })
+
+  it('removes edges connected to removed nodes', () => {
+    const edges: GraphEdge[] = [
+      { id: 'Calls:a->old', source: 'a', target: 'old', type: 'Calls' },
+      { id: 'Calls:a->b', source: 'a', target: 'b', type: 'Calls' },
+    ]
+    const next = applyGraphPatchToEdges(edges, emptyPatch({ removedNodeIds: ['old'] }))
+
+    expect(next.map(edge => edge.id)).toEqual(['Calls:a->b'])
+  })
+
+  it('repeated patches preserve layout', () => {
+    const first = applyGraphPatchToNodes([
+      { id: 'a', type: 'Function', label: 'a', x: 10, y: 20, vx: 0, vy: 0 },
+    ], emptyPatch({
+      updatedNodes: [{ id: 'a', type: 'Function', label: 'a1', x: 0, y: 0, vx: 0, vy: 0 }],
+    }))
+    const second = applyGraphPatchToNodes(first, emptyPatch({
+      updatedNodes: [{ id: 'a', type: 'Function', label: 'a2', x: 999, y: 999, vx: 0, vy: 0 }],
+    }))
+
+    expect(second[0]).toMatchObject({ label: 'a2', x: 10, y: 20 })
   })
 
   it('preserves unrelated diagnostics across patches', () => {

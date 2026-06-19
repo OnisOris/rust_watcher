@@ -9,7 +9,8 @@ import { SearchCommandPalette } from './components/SearchCommandPalette'
 import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { useBackendGraph } from './api/useBackendGraph'
-import { applyCollapsedGroups, applyGraphFilters } from './api/graphView'
+import { applyCollapsedGroups, applyGraphFilters, applyGraphMode } from './api/graphView'
+import { applySavedViewState, normalizeSavedView, serializableFilters } from './api/savedViews'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView } from './types'
 
@@ -99,8 +100,12 @@ export default function App() {
     || layoutSettings.linkLength !== DEFAULT_GRAPH_LAYOUT_SETTINGS.linkLength
     || layoutSettings.damping !== DEFAULT_GRAPH_LAYOUT_SETTINGS.damping
   const { nodes: visibleGraphNodes, edges: visibleGraphEdges } = useMemo(
-    () => applyCollapsedGroups(applyGraphFilters(applyGraphLens(graphNodes, edges, graphLens), filters), collapsedGroups),
-    [graphNodes, edges, graphLens, filters, collapsedGroups],
+    () => {
+      const modeGraph = applyGraphMode({ nodes: graphNodes, edges }, mode)
+      const lensGraph = applyGraphLens(modeGraph.nodes, modeGraph.edges, graphLens)
+      return applyCollapsedGroups(applyGraphFilters(lensGraph, filters), collapsedGroups)
+    },
+    [graphNodes, edges, mode, graphLens, filters, collapsedGroups],
   )
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -154,17 +159,11 @@ export default function App() {
   }, [saveNodeLayout])
 
   const applySavedView = useCallback((view: SavedView) => {
-    setFilters(current => ({
-      ...current,
-      ...view.filters,
-      nodeTypes: view.filters.nodeTypes instanceof Set ? view.filters.nodeTypes : current.nodeTypes,
-      edgeTypes: view.filters.edgeTypes instanceof Set ? view.filters.edgeTypes : current.edgeTypes,
-      languages: view.filters.languages instanceof Set ? view.filters.languages : current.languages,
-    }))
-    if (view.focusedNodeId) {
-      setSelectedNodeId(view.focusedNodeId)
-    }
-  }, [setSelectedNodeId])
+    const next = applySavedViewState(filters, view)
+    setFilters(next.filters)
+    setCollapsedGroups(next.collapsedGroups)
+    setSelectedNodeId(next.focusedNodeId)
+  }, [filters, setSelectedNodeId])
 
   const loadSavedViews = useCallback(async () => {
     try {
@@ -193,7 +192,7 @@ export default function App() {
           filters: serializableFilters(filters),
           focusedNodeId: selectedNodeId,
           collapsedGroups: [...collapsedGroups],
-          layoutOverrides: {},
+          // TODO: per-view layout overrides can build on the separate global layout store.
         }),
       })
       if (response.ok) {
@@ -232,10 +231,6 @@ export default function App() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [])
-
-  useEffect(() => {
-    refreshSnapshot(mode)
-  }, [mode, refreshSnapshot])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -504,38 +499,6 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
   )
 
   return { nodes: filteredNodes, edges: filteredEdges }
-}
-
-function serializableFilters(filters: GraphFilters) {
-  return {
-    ...filters,
-    nodeTypes: [...filters.nodeTypes],
-    edgeTypes: [...filters.edgeTypes],
-    languages: [...filters.languages],
-  }
-}
-
-function normalizeSavedView(view: SavedView): SavedView {
-  const rawFilters = view.filters as Partial<GraphFilters> & {
-    nodeTypes?: NodeType[] | Set<NodeType>
-    edgeTypes?: EdgeType[] | Set<EdgeType>
-    languages?: LanguageFilter[] | Set<LanguageFilter>
-  }
-  return {
-    ...view,
-    filters: {
-      ...view.filters,
-      nodeTypes: rawFilters.nodeTypes
-        ? rawFilters.nodeTypes instanceof Set ? rawFilters.nodeTypes : new Set(rawFilters.nodeTypes)
-        : undefined,
-      edgeTypes: rawFilters.edgeTypes
-        ? rawFilters.edgeTypes instanceof Set ? rawFilters.edgeTypes : new Set(rawFilters.edgeTypes)
-        : undefined,
-      languages: rawFilters.languages
-        ? rawFilters.languages instanceof Set ? rawFilters.languages : new Set(rawFilters.languages)
-        : undefined,
-    },
-  }
 }
 
 // ── Indexing screen ─────────────────────────────────────────────────────────

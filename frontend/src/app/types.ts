@@ -147,6 +147,7 @@ export interface GraphPatch {
   removedEdgeIds: string[]
   diagnostics: DiagnosticRecord[]
   changedFiles: string[]
+  fullRebuild?: boolean
 }
 
 export interface DiagnosticRecord {

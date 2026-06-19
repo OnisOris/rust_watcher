@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyCollapsedGroups, applyGraphFilters } from './graphView'
+import { applyCollapsedGroups, applyGraphFilters, applyGraphMode } from './graphView'
 import type { EdgeType, GraphEdge, GraphFilters, GraphNode, LanguageFilter, NodeType } from '../types'
 
 const allNodeTypes = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
@@ -81,5 +81,22 @@ describe('graph view helpers', () => {
       target: 'endpoint',
       type: 'ApiCall',
     })
+  })
+
+  it('derives Macro view from full graph state', () => {
+    const nodes = [
+      node('file:a', 'rust', 'File'),
+      node('fn:a', 'rust', 'Function'),
+      node('endpoint', undefined, 'Endpoint'),
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'contains', source: 'file:a', target: 'fn:a', type: 'Contains' },
+      { id: 'handler', source: 'endpoint', target: 'fn:a', type: 'EndpointHandler' },
+    ]
+
+    const macro = applyGraphMode({ nodes, edges }, 'Macro')
+
+    expect(macro.nodes.map(n => n.id)).toEqual(['file:a', 'endpoint'])
+    expect(macro.edges).toEqual([])
   })
 })
