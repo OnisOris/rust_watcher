@@ -29,6 +29,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::File,
                 NodeType::Module,
                 NodeType::Struct,
+                NodeType::Class,
                 NodeType::Enum,
                 NodeType::Trait,
                 NodeType::Impl,
@@ -84,6 +85,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Hook,
                 NodeType::Endpoint,
                 NodeType::Struct,
+                NodeType::Class,
                 NodeType::Enum,
                 NodeType::Trait,
                 NodeType::Interface,
@@ -106,6 +108,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Trait,
                 NodeType::Impl,
                 NodeType::Struct,
+                NodeType::Class,
                 NodeType::Enum,
                 NodeType::Method,
             ]

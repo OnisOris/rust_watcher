@@ -410,7 +410,7 @@ function FileRow({ file, depth, selected, onClick }: {
 
 function KindBadge({ kind }: { kind: string }) {
   const colors: Record<string, string> = {
-    Function: '#EC4899', Struct: '#06B6D4', Trait: '#10B981', Enum: '#F59E0B', Module: '#8B5CF6',
+    Function: '#EC4899', Struct: '#06B6D4', Class: '#0EA5E9', Trait: '#10B981', Enum: '#F59E0B', Module: '#8B5CF6',
   }
   const color = colors[kind] ?? '#7D8795'
   return (

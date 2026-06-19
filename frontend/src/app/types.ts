@@ -2,6 +2,7 @@ export type NodeType =
   | 'File'
   | 'Module'
   | 'Struct'
+  | 'Class'
   | 'Enum'
   | 'Trait'
   | 'Impl'

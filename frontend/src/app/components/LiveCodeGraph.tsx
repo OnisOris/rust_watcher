@@ -21,6 +21,7 @@ const NODE_COLORS: Record<NodeType, string> = {
   File: '#3B82F6',
   Module: '#8B5CF6',
   Struct: '#06B6D4',
+  Class: '#0EA5E9',
   Enum: '#F59E0B',
   Trait: '#10B981',
   Impl: '#6366F1',
@@ -55,6 +56,7 @@ const NODE_SIZES: Record<NodeType, number> = {
   ExternalCrate: 24,
   File: 18,
   Struct: 18,
+  Class: 18,
   Enum: 18,
   Trait: 18,
   Impl: 10,
@@ -853,9 +855,9 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
       break
     }
     default: {
-      // Function, Hook, Interface, TypeAlias, Struct, ExternalCrate
+      // Function, Hook, Interface, TypeAlias, Struct, Class, ExternalCrate
       ctx.beginPath()
-      if (n.type === 'Struct' || n.type === 'Interface' || n.type === 'TypeAlias') {
+      if (n.type === 'Struct' || n.type === 'Class' || n.type === 'Interface' || n.type === 'TypeAlias') {
         ctx.roundRect(n.x - size, n.y - size * 0.65, size * 2, size * 1.3, 5)
       } else {
         ctx.arc(n.x, n.y, size, 0, Math.PI * 2)
@@ -961,6 +963,7 @@ function labelPriority(node: GraphNode, degree: number, isSelected: boolean, isH
     File: 90,
     Endpoint: 86,
     Struct: 72,
+    Class: 72,
     Enum: 70,
     Trait: 70,
     Impl: 52,
@@ -982,6 +985,7 @@ function isKeyLabel(node: GraphNode, degree: number) {
     || node.type === 'File'
     || node.type === 'Endpoint'
     || node.type === 'Struct'
+    || node.type === 'Class'
     || node.type === 'Trait'
 }
 

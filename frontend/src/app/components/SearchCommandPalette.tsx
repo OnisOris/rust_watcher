@@ -15,6 +15,7 @@ const KIND_ICONS: Record<string, ReactNode> = {
   File: <File size={13} color="#3B82F6" />,
   Module: <Package size={13} color="#8B5CF6" />,
   Struct: <Layers size={13} color="#06B6D4" />,
+  Class: <Layers size={13} color="#0EA5E9" />,
   Enum: <Layers size={13} color="#F59E0B" />,
   Trait: <GitBranch size={13} color="#10B981" />,
   Function: <Zap size={13} color="#EC4899" />,
@@ -29,7 +30,7 @@ const KIND_ICONS: Record<string, ReactNode> = {
 }
 
 const KIND_COLORS: Record<string, string> = {
-  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Enum: '#F59E0B',
+  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Enum: '#F59E0B',
   Trait: '#10B981', Function: '#EC4899', Method: '#F97316', Macro: '#EF4444',
   Component: '#14B8A6', Hook: '#A855F7', Interface: '#22C55E', TypeAlias: '#84CC16',
   Endpoint: '#E11D48', ExternalCrate: '#7D8795', Impl: '#6366F1',

@@ -6,6 +6,7 @@ const NODE_SIZES: Record<NodeType, number> = {
   ExternalCrate: 24,
   File: 18,
   Struct: 18,
+  Class: 18,
   Enum: 18,
   Trait: 18,
   Impl: 10,

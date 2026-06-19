@@ -30,6 +30,7 @@ pub(crate) fn language_for_file(path: &str) -> Option<String> {
         .and_then(|extension| extension.to_str())
     {
         Some("rs") => Some(LanguageId::Rust.to_string()),
+        Some("py") => Some(LanguageId::Python.to_string()),
         Some("ts" | "tsx") => Some(LanguageId::TypeScript.to_string()),
         Some("js" | "jsx") => Some(LanguageId::JavaScript.to_string()),
         _ => None,
@@ -65,6 +66,7 @@ pub(crate) fn infer_node_language(
 pub(crate) fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, line: u32) -> String {
     let prefix = match node_type {
         NodeType::Struct => "struct",
+        NodeType::Class => "class",
         NodeType::Enum => "enum",
         NodeType::Trait => "trait",
         NodeType::Impl => "impl",

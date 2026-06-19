@@ -7,11 +7,11 @@ interface FilterBarProps {
   onFiltersChange: (f: GraphFilters) => void
 }
 
-const ALL_NODE_TYPES: NodeType[] = ['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate']
+const ALL_NODE_TYPES: NodeType[] = ['File', 'Module', 'Struct', 'Class', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate']
 const ALL_EDGE_TYPES: EdgeType[] = ['Contains', 'Imports', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency']
 
 const NODE_COLORS: Record<NodeType, string> = {
-  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Enum: '#F59E0B',
+  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Enum: '#F59E0B',
   Trait: '#10B981', Impl: '#6366F1', Function: '#EC4899', Method: '#F97316',
   Component: '#14B8A6', Hook: '#A855F7', Interface: '#22C55E', TypeAlias: '#84CC16',
   Endpoint: '#E11D48', Macro: '#EF4444', ExternalCrate: '#7D8795',

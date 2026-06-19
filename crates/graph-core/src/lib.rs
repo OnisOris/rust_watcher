@@ -10,6 +10,7 @@ pub enum LanguageId {
     Rust,
     TypeScript,
     JavaScript,
+    Python,
     Other(String),
 }
 
@@ -19,6 +20,7 @@ impl LanguageId {
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
             Self::JavaScript => "javascript",
+            Self::Python => "python",
             Self::Other(language) => language.as_str(),
         }
     }
@@ -36,6 +38,7 @@ impl From<&str> for LanguageId {
             "rs" | "rust" => Self::Rust,
             "ts" | "tsx" | "typescript" => Self::TypeScript,
             "js" | "jsx" | "javascript" => Self::JavaScript,
+            "py" | "python" => Self::Python,
             other => Self::Other(other.to_string()),
         }
     }
@@ -151,6 +154,7 @@ pub enum NodeType {
     File,
     Module,
     Struct,
+    Class,
     Enum,
     Trait,
     Impl,
@@ -432,6 +436,7 @@ impl SymbolKindName {
             NodeType::File => Self::File,
             NodeType::Module => Self::Module,
             NodeType::Struct => Self::Struct,
+            NodeType::Class => Self::Class,
             NodeType::Enum => Self::Enum,
             NodeType::Trait => Self::Trait,
             NodeType::Function => Self::Function,

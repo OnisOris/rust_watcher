@@ -11,12 +11,14 @@ use uuid::Uuid;
 pub(crate) mod endpoints;
 pub mod filters;
 pub(crate) mod ids;
+pub mod python;
 pub mod rust;
 pub mod typescript;
 
 pub(crate) use endpoints::*;
 pub use filters::{filter_snapshot, focus_subgraph};
 pub(crate) use ids::*;
+pub use python::PythonLanguageAdapter;
 pub use rust::RustLanguageAdapter;
 pub use typescript::TypeScriptLanguageAdapter;
 
@@ -134,6 +136,7 @@ pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> Grap
     }
     enrich_syntax_relationships(&mut snapshot, &index.files);
     let endpoint_count = enrich_api_routes(&mut snapshot, &index.files);
+    let python_count = python::enrich_python_graph(&mut snapshot, &index.root);
     let frontend_count = typescript::enrich_typescript_graph(&mut snapshot, &index.root);
 
     update_connections(&mut snapshot.nodes, &snapshot.edges);
@@ -141,11 +144,12 @@ pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> Grap
     snapshot.events = vec![event(
         AnalysisEventType::Graph,
         format!(
-            "Fallback graph built: {} files, {} syntax symbols, {} endpoints, {} frontend symbols, {} nodes, {} edges",
+            "Fallback graph built: {} files, {} syntax symbols, {} endpoints, {} frontend symbols, {} python symbols, {} nodes, {} edges",
             snapshot.files.len(),
             syntax_symbols_count,
             endpoint_count,
             frontend_count,
+            python_count,
             snapshot.nodes.len(),
             snapshot.edges.len()
         ),
@@ -793,9 +797,8 @@ fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
         SymbolKindName::Module | SymbolKindName::Package | SymbolKindName::Namespace => {
             Some(NodeType::Module)
         }
-        SymbolKindName::Struct | SymbolKindName::Object | SymbolKindName::Class => {
-            Some(NodeType::Struct)
-        }
+        SymbolKindName::Struct | SymbolKindName::Object => Some(NodeType::Struct),
+        SymbolKindName::Class => Some(NodeType::Class),
         SymbolKindName::Enum => Some(NodeType::Enum),
         SymbolKindName::Trait => Some(NodeType::Trait),
         SymbolKindName::Function => Some(NodeType::Function),
@@ -1751,6 +1754,193 @@ fn main() {
     }
 
     #[test]
+    fn python_adapter_detects_symbols_edges_endpoint_and_ts_bridge() {
+        let root = std::env::temp_dir().join(format!("rust-watcher-python-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("backend/services")).unwrap();
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"python_bridge_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+fn health() {}
+
+fn main() {
+    app.route("/api/health", get(health));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("backend/main.py"),
+            r#"
+from fastapi import FastAPI
+from .services.users import UserService, get_users
+
+app = FastAPI()
+
+@app.get("/api/users")
+async def users():
+    service = UserService()
+    return service.list_users()
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("backend/services/users.py"),
+            r#"
+from ..models import User
+
+class UserService:
+    def list_users(self):
+        return get_users()
+
+def get_users():
+    return [User(id="1", name="Ada")]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("backend/models.py"),
+            r#"
+class User:
+    def __init__(self, id: str, name: str):
+        self.id = id
+        self.name = name
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/useUsers.ts"),
+            r#"
+export function useUsers() {
+  return fetch('/api/users')
+}
+"#,
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let class = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Class && node.label == "UserService")
+            .unwrap();
+        let function = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_type == NodeType::Function
+                    && node.label == "get_users"
+                    && node.language.as_deref() == Some("python")
+            })
+            .unwrap();
+        let method = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_type == NodeType::Method && node.label == "UserService::list_users"
+            })
+            .unwrap();
+        let endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users")
+            .unwrap();
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_type == NodeType::Function
+                    && node.label == "users"
+                    && node.language.as_deref() == Some("python")
+            })
+            .unwrap();
+        let hook = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Hook && node.label == "useUsers")
+            .unwrap();
+
+        assert_eq!(class.language.as_deref(), Some("python"));
+        assert_eq!(function.language.as_deref(), Some("python"));
+        assert!(function.range.is_some());
+        assert!(method.selection_range.is_some());
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Imports
+                && edge.source == file_id("backend/main.py")
+                && edge.target == file_id("backend/services/users.py")
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Calls
+                && edge.source == method.id
+                && edge.target == function.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::EndpointHandler
+                && edge.source == endpoint.id
+                && edge.target == handler.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == hook.id
+                && edge.target == endpoint.id
+        }));
+        assert!(snapshot.nodes.iter().any(|node| {
+            node.node_type == NodeType::Endpoint
+                && node.label == "GET /api/health"
+                && node.language.as_deref() == Some("rust")
+        }));
+
+        let adapter = PythonLanguageAdapter;
+        let discovered = block_on_ready(adapter.discover_files(&root)).unwrap();
+        assert!(discovered
+            .iter()
+            .any(|file| file.relative_path == "backend/main.py"));
+        let symbols = block_on_ready(
+            adapter.symbols(
+                discovered
+                    .iter()
+                    .find(|file| file.relative_path == "backend/services/users.py")
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.node_type == NodeType::Class && symbol.label == "UserService"));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.node_type == NodeType::Method && symbol.label == "UserService::list_users"
+        }));
+
+        let mut all_symbols = Vec::new();
+        for file in &discovered {
+            all_symbols.extend(block_on_ready(adapter.symbols(file)).unwrap());
+        }
+        let context = AnalysisContext {
+            project_root: &root,
+            files: &discovered,
+            symbols: &all_symbols,
+            graph_nodes: &snapshot.nodes,
+            graph_edges: &[],
+        };
+        let adapter_edges = block_on_ready(adapter.edges(&context)).unwrap();
+        assert!(adapter_edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Imports));
+        assert!(adapter_edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Calls));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn symbol_ids_are_stable() {
         let file = IndexedFile {
             absolute_path: PathBuf::from("/tmp/project/src/main.rs"),
@@ -1772,6 +1962,7 @@ fn main() {
 
         assert_async_analyzer(&RustLanguageAdapter);
         assert_async_analyzer(&TypeScriptLanguageAdapter);
+        assert_async_analyzer(&PythonLanguageAdapter);
     }
 }
 
