@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Filter, X, ChevronDown } from 'lucide-react'
-import type { GraphFilters, NodeType, EdgeType, LanguageFilter, SavedView } from '../types'
+import type { EdgeVisibilityLevel, GraphFilters, NodeType, EdgeType, LanguageFilter, SavedView } from '../types'
 
 interface FilterBarProps {
   filters: GraphFilters
@@ -23,6 +23,7 @@ const NODE_COLORS: Record<NodeType, string> = {
 }
 
 const DEPTH_OPTIONS: Array<1 | 2 | 3 | 'full'> = [1, 2, 3, 'full']
+const EDGE_VISIBILITY_OPTIONS: EdgeVisibilityLevel[] = ['Essential', 'Semantic', 'All']
 const LANGUAGE_FILTERS: Array<{ id: LanguageFilter; label: string; color: string }> = [
   { id: 'rust', label: 'Rust', color: '#EC4899' },
   { id: 'typescript', label: 'TS/JS', color: '#14B8A6' },
@@ -112,6 +113,14 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
 
           {/* quick toggles */}
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+            {EDGE_VISIBILITY_OPTIONS.map(level => (
+              <QuickToggle
+                key={level}
+                label={level === 'Essential' ? 'Ess' : level === 'Semantic' ? 'Sem' : 'All'}
+                active={filters.edgeVisibility === level}
+                onToggle={() => onFiltersChange({ ...filters, edgeVisibility: level })}
+              />
+            ))}
             <QuickToggle
               label="Tests"
               active={!filters.showTests}
@@ -180,6 +189,26 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
                     </div>
                   </div>
                 )}
+                <div style={{ marginTop: 10 }}>
+                  <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Quick</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {LANGUAGE_FILTERS.filter(language => language.id !== 'external').map(language => (
+                      <FilterChip
+                        key={`quick-${language.id}`}
+                        label={language.label}
+                        active={filters.languages.size === 1 && filters.languages.has(language.id)}
+                        color={language.color}
+                        onToggle={() => onFiltersChange({ ...filters, languages: new Set([language.id]) })}
+                      />
+                    ))}
+                    <FilterChip
+                      label="Diagnostics"
+                      active={filters.edgeVisibility === 'Essential'}
+                      color="#F59E0B"
+                      onToggle={() => onFiltersChange({ ...filters, edgeVisibility: 'Essential' })}
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* node types */}

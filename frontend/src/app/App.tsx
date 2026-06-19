@@ -9,7 +9,15 @@ import { SearchCommandPalette } from './components/SearchCommandPalette'
 import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { useBackendGraph } from './api/useBackendGraph'
-import { applyCollapsedGroups, applyGraphFilters, applyGraphMode } from './api/graphView'
+import {
+  applyCollapsedGroups,
+  applyGraphFilters,
+  applyGraphMode,
+  buildNeighborhoodGraph,
+  buildCollapsedGroupStats,
+  buildRouteFlowGraph,
+  bundleEdges,
+} from './api/graphView'
 import { applySavedViewState, normalizeSavedView, serializableFilters } from './api/savedViews'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView } from './types'
@@ -22,6 +30,7 @@ const DEFAULT_FILTERS: GraphFilters = {
   nodeTypes: ALL_NODE_TYPES,
   edgeTypes: ALL_EDGE_TYPES,
   languages: ALL_LANGUAGES,
+  edgeVisibility: 'Semantic',
   showTests: true,
   showExternal: true,
   onlyPublicAPI: false,
@@ -29,11 +38,12 @@ const DEFAULT_FILTERS: GraphFilters = {
   onlyCurrentFile: false,
 }
 
-type GraphLens = 'all' | 'architecture' | 'api'
+type GraphLens = 'all' | 'architecture' | 'api' | 'route'
 
 const DEFAULT_VIEWS: SavedView[] = [
   { id: 'default-full', name: 'Full graph', filters: {}, focusedNodeId: null, collapsedGroups: [] },
   { id: 'default-api', name: 'Frontend API bridge', filters: { languages: new Set<LanguageFilter>(['typescript', 'qml', 'endpoints', 'rust', 'python']) }, focusedNodeId: null, collapsedGroups: [] },
+  { id: 'default-route', name: 'Route Flow', filters: { edgeVisibility: 'Essential' }, focusedNodeId: null, collapsedGroups: [] },
   { id: 'default-rust', name: 'Rust backend', filters: { languages: new Set<LanguageFilter>(['rust', 'endpoints']) }, focusedNodeId: null, collapsedGroups: [] },
   { id: 'default-python', name: 'Python backend', filters: { languages: new Set<LanguageFilter>(['python', 'endpoints']) }, focusedNodeId: null, collapsedGroups: [] },
   { id: 'default-qml', name: 'QML UI', filters: { languages: new Set<LanguageFilter>(['qml', 'endpoints']) }, focusedNodeId: null, collapsedGroups: [] },
@@ -60,6 +70,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarityOpen, setClarityOpen] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
+  const [neighborhoodNodeId, setNeighborhoodNodeId] = useState<string | null>(null)
   const [labelMode, setLabelMode] = useState<GraphLabelMode>('auto')
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
@@ -101,11 +112,33 @@ export default function App() {
     || layoutSettings.damping !== DEFAULT_GRAPH_LAYOUT_SETTINGS.damping
   const { nodes: visibleGraphNodes, edges: visibleGraphEdges } = useMemo(
     () => {
-      const modeGraph = applyGraphMode({ nodes: graphNodes, edges }, mode)
-      const lensGraph = applyGraphLens(modeGraph.nodes, modeGraph.edges, graphLens)
-      return applyCollapsedGroups(applyGraphFilters(lensGraph, filters), collapsedGroups)
+      const modeGraph = graphLens === 'route'
+        ? { nodes: graphNodes, edges }
+        : applyGraphMode({ nodes: graphNodes, edges }, mode)
+      const lensGraph = graphLens === 'route'
+        ? buildRouteFlowGraph(modeGraph)
+        : applyGraphLens(modeGraph.nodes, modeGraph.edges, graphLens)
+      const neighborhoodGraph = neighborhoodNodeId
+        ? buildNeighborhoodGraph(lensGraph, neighborhoodNodeId)
+        : lensGraph
+      const collapsedStats = buildCollapsedGroupStats(neighborhoodGraph, collapsedGroups, diagnosticsByNode)
+      const annotatedGraph = {
+        nodes: neighborhoodGraph.nodes.map(node => {
+          const stats = collapsedStats.get(node.id)
+          if (!stats) return node
+          const edgeTypes = [...new Set([...stats.incomingEdgeTypes, ...stats.outgoingEdgeTypes])].slice(0, 3).join(', ')
+          return {
+            ...node,
+            connections: stats.hiddenNodeCount,
+            description: `Collapsed: ${stats.hiddenNodeCount} hidden · ${stats.hiddenDiagnosticCount} diagnostics${edgeTypes ? ` · ${edgeTypes}` : ''}`,
+          }
+        }),
+        edges: neighborhoodGraph.edges,
+      }
+      const filteredGraph = applyCollapsedGroups(applyGraphFilters(annotatedGraph, filters), collapsedGroups)
+      return { nodes: filteredGraph.nodes, edges: bundleEdges(filteredGraph.edges) }
     },
-    [graphNodes, edges, mode, graphLens, filters, collapsedGroups],
+    [graphNodes, edges, mode, graphLens, neighborhoodNodeId, filters, collapsedGroups, diagnosticsByNode],
   )
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -163,6 +196,7 @@ export default function App() {
     setFilters(next.filters)
     setCollapsedGroups(next.collapsedGroups)
     setSelectedNodeId(next.focusedNodeId)
+    setNeighborhoodNodeId(null)
   }, [filters, setSelectedNodeId])
 
   const loadSavedViews = useCallback(async () => {
@@ -284,7 +318,7 @@ export default function App() {
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         onClarityToggle={() => setClarityOpen(open => !open)}
         clarityOpen={clarityOpen}
-        clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned}
+        clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
         theme={theme}
       />
 
@@ -364,7 +398,7 @@ export default function App() {
                 <>
                   <span style={{ color: 'var(--cc-border)' }}>·</span>
                   <span style={{ fontSize: 10, color: '#06B6D4' }}>
-                    {graphLens === 'architecture' ? 'Architecture' : 'API Bridge'}: {visibleGraphNodes.length}/{visibleGraphEdges.length}
+                    {graphLens === 'architecture' ? 'Architecture' : graphLens === 'route' ? 'Route Flow' : 'API Bridge'}: {visibleGraphNodes.length}/{visibleGraphEdges.length}
                   </span>
                 </>
               )}
@@ -391,6 +425,8 @@ export default function App() {
           onTogglePin={togglePinNode}
           onToggleCollapse={toggleCollapseGroup}
           collapsedGroups={collapsedGroups}
+          onShowNeighborhood={id => setNeighborhoodNodeId(current => current === id ? null : id)}
+          neighborhoodNodeId={neighborhoodNodeId}
           onSelectNode={handleSelectNode}
           onOpenInEditor={openInEditor}
         />

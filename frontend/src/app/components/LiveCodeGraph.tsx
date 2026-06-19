@@ -234,6 +234,7 @@ function visibleGraphSignature(
     [...visibleIds].sort().join('|'),
     [...filters.nodeTypes].sort().join('|'),
     [...filters.edgeTypes].sort().join('|'),
+    filters.edgeVisibility,
   ].join('::')
 }
 
@@ -1049,6 +1050,7 @@ function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: bool
 
 // ── MiniMap ────────────────────────────────────────────────────────────────
 function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x: number; y: number }, zoom: number, canvasW: number, canvasH: number, theme: CanvasTheme) {
+  if (nodes.length < 25) return
   const mmW = 160, mmH = 100, mmX = canvasW - mmW - 16, mmY = canvasH - mmH - 16
   const innerX = mmX + 8, innerY = mmY + 8, innerW = mmW - 16, innerH = mmH - 22
   ctx.save()
@@ -1117,6 +1119,25 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
   }
   ctx.restore()
 
+  ctx.restore()
+}
+
+function drawEdgeBundleBadge(ctx: CanvasRenderingContext2D, src: GraphNode, tgt: GraphNode, count: number, theme: CanvasTheme) {
+  const x = (src.x + tgt.x) / 2
+  const y = (src.y + tgt.y) / 2
+  ctx.save()
+  ctx.fillStyle = theme.card
+  ctx.strokeStyle = theme.border
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.roundRect(x - 10, y - 8, 20, 16, 8)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = theme.textMuted
+  ctx.font = '10px Inter, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(String(count), x, y)
   ctx.restore()
 }
 
@@ -1395,6 +1416,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         const animated = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler'
 
         drawArrow(ctx, src.x, src.y, tgt.x, tgt.y, color, width, dashed, animated, ts, NODE_SIZES[src.type], NODE_SIZES[tgt.type])
+        if ((edge.bundledCount ?? 1) > 1) {
+          drawEdgeBundleBadge(ctx, src, tgt, edge.bundledCount ?? 1, canvasColors)
+        }
       }
 
       // draw nodes
@@ -1411,6 +1435,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         const diagnostics = diagnosticsByNode?.get(n.id) ?? []
         if (diagnostics.length > 0) {
           drawDiagnosticBadge(ctx, n, diagnostics.some(diagnostic => diagnostic.severity === 'Error') ? 'Error' : 'Warning')
+        }
+        if (n.description?.startsWith('Collapsed:') && (n.connections ?? 0) > 0) {
+          drawGroupCountBadge(ctx, n, n.connections ?? 0, canvasColors)
         }
         labelCandidates.push({
           node: n,
@@ -1554,4 +1581,24 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       />
     </div>
   )
+}
+
+function drawGroupCountBadge(ctx: CanvasRenderingContext2D, n: GraphNode, count: number, theme: CanvasTheme) {
+  const size = NODE_SIZES[n.type]
+  const x = n.x + size * 0.65
+  const y = n.y - size * 0.65
+  ctx.save()
+  ctx.fillStyle = theme.card
+  ctx.strokeStyle = NODE_COLORS[n.type]
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.roundRect(x - 11, y - 8, 22, 16, 8)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = theme.text
+  ctx.font = '9px Inter, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(String(count), x, y)
+  ctx.restore()
 }

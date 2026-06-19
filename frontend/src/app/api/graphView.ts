@@ -1,4 +1,13 @@
-import type { EdgeType, GraphEdge, GraphFilters, GraphMode, GraphNode, NodeType } from '../types'
+import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphMode, GraphNode, NodeType } from '../types'
+
+export interface CollapsedGroupStats {
+  groupId: string
+  hiddenNodeCount: number
+  hiddenDiagnosticCount: number
+  incomingEdgeTypes: EdgeType[]
+  outgoingEdgeTypes: EdgeType[]
+  language?: string
+}
 
 export function applyGraphMode(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, mode: GraphMode) {
   const { nodeTypes, edgeTypes } = modeVisibility(mode)
@@ -38,8 +47,48 @@ export function applyGraphMode(graph: { nodes: GraphNode[]; edges: GraphEdge[] }
 export function applyGraphFilters(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, filters: GraphFilters) {
   const nodes = graph.nodes.filter(node => matchesLanguageFilter(node, filters))
   const nodeIds = new Set(nodes.map(node => node.id))
-  const edges = graph.edges.filter(edge => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+  const edges = applyEdgeVisibilityLevel(
+    graph.edges.filter(edge => nodeIds.has(edge.source) && nodeIds.has(edge.target)),
+    filters,
+  )
   return { nodes, edges }
+}
+
+export function applyEdgeVisibilityLevel(edges: GraphEdge[], filters: Pick<GraphFilters, 'edgeTypes' | 'edgeVisibility'>) {
+  return edges.filter(edge => {
+    if (!filters.edgeTypes.has(edge.type)) return false
+    if (filters.edgeVisibility === 'All') return true
+    if (isEssentialEdge(edge)) return true
+    if (filters.edgeVisibility === 'Semantic') {
+      return edge.type === 'Calls'
+        || edge.type === 'Imports'
+        || edge.type === 'Uses'
+        || edge.type === 'DataFlow'
+        || edge.type === 'TypeReference'
+    }
+    return false
+  })
+}
+
+export function bundleEdges(edges: GraphEdge[]) {
+  const byKey = new Map<string, GraphEdge[]>()
+  for (const edge of edges) {
+    const key = `${edge.source}::${edge.target}::${edge.type}`
+    const group = byKey.get(key) ?? []
+    group.push(edge)
+    byKey.set(key, group)
+  }
+  return [...byKey.values()].map(group => {
+    const [first] = group
+    if (group.length === 1) return first
+    return {
+      ...first,
+      id: `${first.type}:${first.source}->${first.target}:bundle:${group.length}`,
+      bundledCount: group.length,
+      bundledTypes: [...new Set(group.map(edge => edge.type))],
+      bundledEdgeIds: group.map(edge => edge.id),
+    }
+  })
 }
 
 export function applyCollapsedGroups(
@@ -71,7 +120,7 @@ export function applyCollapsedGroups(
 
   const nodes = graph.nodes.filter(node => !ownerByHiddenNode.has(node.id))
   const nodeIds = new Set(nodes.map(node => node.id))
-  const edgeById = new Map<string, GraphEdge>()
+  const remappedEdges: GraphEdge[] = []
 
   for (const edge of graph.edges) {
     const source = ownerByHiddenNode.get(edge.source) ?? edge.source
@@ -79,11 +128,105 @@ export function applyCollapsedGroups(
     if (source === target || !nodeIds.has(source) || !nodeIds.has(target)) continue
     const id = source === edge.source && target === edge.target
       ? edge.id
-      : `${edge.type}:${source}->${target}`
-    edgeById.set(id, { ...edge, id, source, target })
+      : `${edge.type}:${source}->${target}:${edge.id}`
+    remappedEdges.push({ ...edge, id, source, target })
   }
 
-  return { nodes, edges: [...edgeById.values()] }
+  return { nodes, edges: remappedEdges }
+}
+
+export function buildCollapsedGroupStats(
+  graph: { nodes: GraphNode[]; edges: GraphEdge[] },
+  collapsedGroups: Set<string>,
+  diagnosticsByNode: Map<string, DiagnosticRecord[]> = new Map(),
+) {
+  const hiddenByGroup = hiddenNodesByCollapsedGroup(graph.edges, collapsedGroups)
+  const nodesById = new Map(graph.nodes.map(node => [node.id, node]))
+  const stats = new Map<string, CollapsedGroupStats>()
+
+  hiddenByGroup.forEach((hiddenIds, groupId) => {
+    let hiddenDiagnosticCount = 0
+    const incoming = new Set<EdgeType>()
+    const outgoing = new Set<EdgeType>()
+    for (const hiddenId of hiddenIds) {
+      hiddenDiagnosticCount += diagnosticsByNode.get(hiddenId)?.length ?? 0
+    }
+    for (const edge of graph.edges) {
+      const sourceHidden = hiddenIds.has(edge.source)
+      const targetHidden = hiddenIds.has(edge.target)
+      if (sourceHidden && !targetHidden && edge.target !== groupId) outgoing.add(edge.type)
+      if (!sourceHidden && targetHidden && edge.source !== groupId) incoming.add(edge.type)
+    }
+    stats.set(groupId, {
+      groupId,
+      hiddenNodeCount: hiddenIds.size,
+      hiddenDiagnosticCount,
+      incomingEdgeTypes: [...incoming],
+      outgoingEdgeTypes: [...outgoing],
+      language: nodesById.get(groupId)?.language,
+    })
+  })
+
+  return stats
+}
+
+export function buildRouteFlowGraph(graph: { nodes: GraphNode[]; edges: GraphEdge[] }) {
+  const keepEdges = new Set<string>()
+  const keepNodes = new Set<string>()
+  const nodesById = new Map(graph.nodes.map(node => [node.id, node]))
+  const outgoing = edgesBySource(graph.edges)
+
+  for (const edge of graph.edges) {
+    if (edge.type !== 'ApiCall') continue
+    keepEdges.add(edge.id)
+    keepNodes.add(edge.source)
+    keepNodes.add(edge.target)
+    for (const handler of outgoing.get(edge.target) ?? []) {
+      if (handler.type !== 'EndpointHandler') continue
+      keepEdges.add(handler.id)
+      keepNodes.add(handler.target)
+      for (const call of outgoing.get(handler.target) ?? []) {
+        if (call.type === 'Calls') {
+          keepEdges.add(call.id)
+          keepNodes.add(call.target)
+        }
+      }
+    }
+  }
+
+  return {
+    nodes: graph.nodes.filter(node => keepNodes.has(node.id) || (node.type === 'Endpoint' && hasApiEdge(graph.edges, node.id))),
+    edges: graph.edges.filter(edge =>
+      keepEdges.has(edge.id)
+      && nodesById.has(edge.source)
+      && nodesById.has(edge.target)
+    ),
+  }
+}
+
+export function buildNeighborhoodGraph(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, selectedNodeId: string | null) {
+  if (!selectedNodeId) return graph
+  const keepNodes = new Set([selectedNodeId])
+  const keepEdges = new Set<string>()
+  const meaningful = new Set<EdgeType>(['Contains', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Uses', 'Imports', 'DataFlow', 'TypeReference'])
+  for (const edge of graph.edges) {
+    if (edge.source !== selectedNodeId && edge.target !== selectedNodeId) continue
+    if (!meaningful.has(edge.type)) continue
+    keepEdges.add(edge.id)
+    keepNodes.add(edge.source)
+    keepNodes.add(edge.target)
+  }
+  for (const edge of graph.edges) {
+    if ((keepNodes.has(edge.source) || keepNodes.has(edge.target)) && (edge.type === 'ApiCall' || edge.type === 'EndpointHandler')) {
+      keepEdges.add(edge.id)
+      keepNodes.add(edge.source)
+      keepNodes.add(edge.target)
+    }
+  }
+  return {
+    nodes: graph.nodes.filter(node => keepNodes.has(node.id)),
+    edges: graph.edges.filter(edge => keepEdges.has(edge.id) && keepNodes.has(edge.source) && keepNodes.has(edge.target)),
+  }
 }
 
 export function matchesLanguageFilter(node: GraphNode, filters: GraphFilters) {
@@ -126,4 +269,49 @@ function modeVisibility(mode: GraphMode): { nodeTypes: Set<NodeType>; edgeTypes:
     nodeTypes: new Set(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro']),
     edgeTypes: new Set(['Contains', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'TypeReference', 'Implements', 'Imports', 'Uses']),
   }
+}
+
+function isEssentialEdge(edge: GraphEdge) {
+  return edge.type === 'Contains'
+    || edge.type === 'EndpointHandler'
+    || edge.type === 'ApiCall'
+    || edge.type === 'Renders'
+    || (edge.type === 'Calls' && (edge.confidence === 'Exact' || edge.confidence === 'Semantic'))
+}
+
+function hiddenNodesByCollapsedGroup(edges: GraphEdge[], collapsedGroups: Set<string>) {
+  const containsBySource = new Map<string, string[]>()
+  for (const edge of edges) {
+    if (edge.type !== 'Contains') continue
+    const children = containsBySource.get(edge.source) ?? []
+    children.push(edge.target)
+    containsBySource.set(edge.source, children)
+  }
+  const hiddenByGroup = new Map<string, Set<string>>()
+  for (const groupId of collapsedGroups) {
+    const hidden = new Set<string>()
+    const queue = [...(containsBySource.get(groupId) ?? [])]
+    while (queue.length) {
+      const childId = queue.shift()
+      if (!childId || hidden.has(childId) || childId === groupId) continue
+      hidden.add(childId)
+      queue.push(...(containsBySource.get(childId) ?? []))
+    }
+    hiddenByGroup.set(groupId, hidden)
+  }
+  return hiddenByGroup
+}
+
+function edgesBySource(edges: GraphEdge[]) {
+  const bySource = new Map<string, GraphEdge[]>()
+  for (const edge of edges) {
+    const list = bySource.get(edge.source) ?? []
+    list.push(edge)
+    bySource.set(edge.source, list)
+  }
+  return bySource
+}
+
+function hasApiEdge(edges: GraphEdge[], nodeId: string) {
+  return edges.some(edge => edge.type === 'ApiCall' && (edge.source === nodeId || edge.target === nodeId))
 }

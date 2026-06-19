@@ -14,6 +14,8 @@ interface InspectorPanelProps {
   onTogglePin: (id: string) => void
   onToggleCollapse: (id: string) => void
   collapsedGroups: Set<string>
+  onShowNeighborhood: (id: string) => void
+  neighborhoodNodeId: string | null
   onSelectNode: (id: string) => void
   onOpenInEditor: (node: GraphNode) => void
 }
@@ -38,6 +40,8 @@ export function InspectorPanel({
   onTogglePin,
   onToggleCollapse,
   collapsedGroups,
+  onShowNeighborhood,
+  neighborhoodNodeId,
   onSelectNode,
   onOpenInEditor,
 }: InspectorPanelProps) {
@@ -55,7 +59,7 @@ export function InspectorPanel({
       />
     )
   }
-  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
+  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
 }
 
 // ── Project overview (nothing selected) ────────────────────────────────────
@@ -171,8 +175,8 @@ function ProjectOverview({
 }
 
 // ── Node inspector (something selected) ────────────────────────────────────
-function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, collapsedGroups, onSelectNode, onOpenInEditor }: {
-  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
+function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, collapsedGroups, onShowNeighborhood, neighborhoodNodeId, onSelectNode, onOpenInEditor }: {
+  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onShowNeighborhood: (id: string) => void; neighborhoodNodeId: string | null; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
 }) {
   const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
   const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
@@ -214,6 +218,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   const typeColor = NODE_TYPE_COLORS[node.type] ?? '#7D8795'
   const collapsible = node.type === 'File' || node.type === 'Module' || node.type === 'Object'
   const collapsed = collapsedGroups.has(node.id)
+  const showingNeighborhood = neighborhoodNodeId === node.id
 
   return (
     <div
@@ -234,6 +239,12 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{node.type} · {node.crate ?? 'unknown'}</div>
             </div>
           </div>
+
+          {node.description && (
+            <div className="rounded p-2 mb-3" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.4 }}>
+              {node.description}
+            </div>
+          )}
 
           {/* badges row */}
           <div className="flex flex-wrap gap-1.5 mb-3">
@@ -369,6 +380,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
           <ActionBtn icon={<BookMarked size={13} />} label="Bookmark" onClick={() => {}} />
           <ActionBtn icon={<Pin size={13} />} label={node.pinned ? 'Unpin Node' : 'Pin Node'} onClick={() => onTogglePin(node.id)} active={!!node.pinned} />
           <ActionBtn icon={<Layers size={13} />} label={collapsed ? 'Expand Group' : 'Collapse Group'} onClick={() => onToggleCollapse(node.id)} active={collapsed} disabled={!collapsible} />
+          <ActionBtn icon={<GitBranch size={13} />} label={showingNeighborhood ? 'Hide Neighborhood' : 'Show Neighborhood'} onClick={() => onShowNeighborhood(node.id)} active={showingNeighborhood} />
           <ActionBtn icon={<ExternalLink size={13} />} label="Open in Editor" onClick={() => onOpenInEditor(node)} disabled={!node.file} />
         </div>
       </div>

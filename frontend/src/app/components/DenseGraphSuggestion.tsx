@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { AlertCircle, RotateCcw, SlidersHorizontal, Tags, X } from 'lucide-react'
 import type { GraphLabelMode, GraphLayoutSettings } from '../types'
 
-type GraphLens = 'all' | 'architecture' | 'api'
+type GraphLens = 'all' | 'architecture' | 'api' | 'route'
 
 interface DenseGraphSuggestionProps {
   graphLens: GraphLens
@@ -66,10 +66,11 @@ export function DenseGraphSuggestion({
 
       <div className="px-3 py-3">
         <SectionHeader title="Scope" />
-        <div className="grid grid-cols-3 gap-1.5">
+        <div className="grid grid-cols-4 gap-1.5">
           <LensButton label="Full" active={graphLens === 'all'} onClick={() => onLensChange('all')} />
           <LensButton label="Architecture" active={graphLens === 'architecture'} onClick={() => onLensChange('architecture')} />
           <LensButton label="API" active={graphLens === 'api'} onClick={() => onLensChange('api')} />
+          <LensButton label="Route" active={graphLens === 'route'} onClick={() => onLensChange('route')} />
         </div>
 
         <div className="mt-3">

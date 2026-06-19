@@ -38,6 +38,7 @@ export type EdgeConfidence = 'Exact' | 'Semantic' | 'SyntaxFallback' | 'Heuristi
 export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
+export type EdgeVisibilityLevel = 'Essential' | 'Semantic' | 'All'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
 export type AnalyzerStatus = 'Starting' | 'Indexing' | 'Ready' | 'Fallback' | 'Stale' | 'Error'
 export type ThemeMode = 'light' | 'dark'
@@ -88,6 +89,9 @@ export interface GraphEdge {
   target: string
   type: EdgeType
   confidence?: EdgeConfidence
+  bundledCount?: number
+  bundledTypes?: EdgeType[]
+  bundledEdgeIds?: string[]
 }
 
 export interface LspPosition {
@@ -221,6 +225,7 @@ export interface GraphFilters {
   nodeTypes: Set<NodeType>
   edgeTypes: Set<EdgeType>
   languages: Set<LanguageFilter>
+  edgeVisibility: EdgeVisibilityLevel
   showTests: boolean
   showExternal: boolean
   onlyPublicAPI: boolean
