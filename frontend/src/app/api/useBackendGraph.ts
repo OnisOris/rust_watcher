@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { INITIAL_EDGES, INITIAL_NODES, PROJECT_FILES, ANALYSIS_EVENTS } from '../mockData'
 import {
-  applyDiagnosticsCountsToFiles,
+  applyDiagnosticCountsToFiles,
   applyDiagnosticsPatch,
   applyGraphPatchToEdges,
   applyGraphPatchToNodes,
-} from './patchHelpers'
+  diagnosticsByNodeFromFileMap,
+} from './graphPatch'
 import type {
   AnalysisEvent,
   AnalyzerStatus,
@@ -41,6 +42,16 @@ type ServerMessage =
   | { type: 'analysis_event'; payload: AnalysisEvent }
   | { type: 'error'; payload: { message: string } }
 
+interface DiagnosticsResponse {
+  diagnosticsByFile: Record<string, DiagnosticRecord[]>
+  diagnosticsByNode: Record<string, DiagnosticRecord[]>
+  allDiagnostics: DiagnosticRecord[]
+}
+
+function diagnosticsMapFromRecord(record: Record<string, DiagnosticRecord[]>): Map<string, DiagnosticRecord[]> {
+  return new Map(Object.entries(record))
+}
+
 export function useBackendGraph(mode: GraphMode) {
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
@@ -74,6 +85,20 @@ export function useBackendGraph(mode: GraphMode) {
     applyStatus(snapshot.status)
   }, [applyStatus])
 
+  const applyDiagnosticsSnapshot = useCallback((diagnosticsByFileRecord: Record<string, DiagnosticRecord[]>) => {
+    const nextByFile = diagnosticsMapFromRecord(diagnosticsByFileRecord)
+    setDiagnosticsByFile(nextByFile)
+    setDiagnosticsByNode(diagnosticsByNodeFromFileMap(nextByFile))
+    setFiles(files => applyDiagnosticCountsToFiles(files, nextByFile, files.map(file => file.path)))
+  }, [])
+
+  const refreshDiagnostics = useCallback(async () => {
+    const response = await fetch('/api/diagnostics')
+    if (!response.ok) throw new Error(`diagnostics failed: ${response.status}`)
+    const diagnostics = await response.json() as DiagnosticsResponse
+    applyDiagnosticsSnapshot(diagnostics.diagnosticsByFile)
+  }, [applyDiagnosticsSnapshot])
+
   const applyPatch = useCallback((patch: GraphPatch) => {
     setNodes(prev => applyGraphPatchToNodes(prev, patch))
     setEdges(prev => applyGraphPatchToEdges(prev, patch))
@@ -81,7 +106,7 @@ export function useBackendGraph(mode: GraphMode) {
       setDiagnosticsByFile(prev => {
         const next = applyDiagnosticsPatch(prev, patch)
         setDiagnosticsByNode(next.diagnosticsByNode)
-        setFiles(files => applyDiagnosticsCountsToFiles(files, next.diagnosticsByFile, patch.changedFiles ?? []))
+        setFiles(files => applyDiagnosticCountsToFiles(files, next.diagnosticsByFile, patch.changedFiles ?? []))
         return next.diagnosticsByFile
       })
     }
@@ -102,6 +127,8 @@ export function useBackendGraph(mode: GraphMode) {
     setEdges(INITIAL_EDGES)
     setFiles(PROJECT_FILES)
     setEvents(ANALYSIS_EVENTS)
+    setDiagnosticsByFile(new Map())
+    setDiagnosticsByNode(new Map())
     applyStatus(MOCK_STATUS)
   }, [applyStatus])
 
@@ -110,11 +137,12 @@ export function useBackendGraph(mode: GraphMode) {
       const response = await fetch(`/api/graph/snapshot?mode=${encodeURIComponent(nextMode)}`)
       if (!response.ok) throw new Error(`snapshot failed: ${response.status}`)
       applySnapshot(await response.json())
+      await refreshDiagnostics().catch(() => undefined)
       setBackendAvailable(true)
     } catch {
       applyDevFallback()
     }
-  }, [applyDevFallback, applySnapshot, mode])
+  }, [applyDevFallback, applySnapshot, mode, refreshDiagnostics])
 
   useEffect(() => {
     let cancelled = false
@@ -131,6 +159,7 @@ export function useBackendGraph(mode: GraphMode) {
         if (cancelled) return
         applyStatus(await statusResponse.json())
         applySnapshot(await snapshotResponse.json())
+        await refreshDiagnostics().catch(() => undefined)
         setBackendAvailable(true)
       } catch {
         if (!cancelled) applyDevFallback()
@@ -139,7 +168,7 @@ export function useBackendGraph(mode: GraphMode) {
 
     boot()
     return () => { cancelled = true }
-  }, [applyDevFallback, applySnapshot, applyStatus, mode])
+  }, [applyDevFallback, applySnapshot, applyStatus, mode, refreshDiagnostics])
 
   useEffect(() => {
     if (!backendAvailable) return
@@ -169,6 +198,8 @@ export function useBackendGraph(mode: GraphMode) {
   const openProject = useCallback(async (path?: string) => {
     try {
       setAppState('indexing')
+      setDiagnosticsByFile(new Map())
+      setDiagnosticsByNode(new Map())
       const response = await fetch('/api/project/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

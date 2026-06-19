@@ -51,14 +51,14 @@ export function applyDiagnosticsPatch(
   }
 }
 
-export function applyDiagnosticsCountsToFiles(
+export function applyDiagnosticCountsToFiles(
   files: ProjectFile[],
   diagnosticsByFile: Map<string, DiagnosticRecord[]>,
   changedFiles: string[],
 ) {
   const changed = new Set(changedFiles)
   return files.map(file => {
-    if (!changed.has(file.path) && !diagnosticsByFile.has(file.path)) return file
+    if (!changed.has(file.path)) return file
     return { ...file, diagnosticsCount: diagnosticsByFile.get(file.path)?.length ?? 0 }
   })
 }

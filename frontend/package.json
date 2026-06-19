@@ -1,13 +1,13 @@
 {
-  "name": "@figma/my-make-file",
+  "name": "rust-watcher-frontend",
   "private": true,
   "version": "0.0.1",
   "type": "module",
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "test": "pnpm test:patch-helpers",
-    "test:patch-helpers": "vite build --ssr src/app/api/patchHelpers.test.ts --outDir dist-patch-helper-test && node -e \"import('./dist-patch-helper-test/patchHelpers.test.js').then(m => m.runPatchHelperTests())\" && rm -rf dist-patch-helper-test"
+    "test": "vitest",
+    "test:run": "vitest run"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
@@ -71,7 +71,8 @@
     "@tailwindcss/vite": "4.3.1",
     "@vitejs/plugin-react": "6.0.2",
     "tailwindcss": "4.3.1",
-    "vite": "8.0.16"
+    "vite": "8.0.16",
+    "vitest": "^4.1.9"
   },
   "packageManager": "pnpm@11.3.0"
 }
