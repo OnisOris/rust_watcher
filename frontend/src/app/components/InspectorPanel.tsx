@@ -177,6 +177,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
   const apiTargets = outgoing.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const renders = outgoing.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const renderedBy = incoming.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
+  const contained = outgoing.filter(e => e.type === 'Contains').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const typeRefs = details?.relatedTypes.length ? details.relatedTypes : outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const dataFlowTargets = outgoing.filter(e => e.type === 'DataFlow').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
@@ -281,6 +282,12 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
             {renderedBy.length > 0 && (
               <NodeList label="Rendered by" icon={<ArrowDownRight size={11} color="#14B8A6" />} nodes={renderedBy} onSelect={onSelectNode} />
             )}
+          </Card>
+        )}
+
+        {node.language === 'qml' && node.type === 'Object' && contained.length > 0 && (
+          <Card>
+            <NodeList label="Contains" icon={<Layers size={11} color="#38BDF8" />} nodes={contained} onSelect={onSelectNode} />
           </Card>
         )}
 

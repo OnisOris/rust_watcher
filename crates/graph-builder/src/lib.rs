@@ -2265,6 +2265,217 @@ Rectangle {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn qml_language_adapter_edges_returns_only_qml_edges() {
+        let adapter = QmlLanguageAdapter;
+        let main = SourceFile {
+            language: LanguageId::Qml,
+            absolute_path: "/tmp/qml/Main.qml".into(),
+            relative_path: "qml/Main.qml".into(),
+            text: Some(
+                r#"
+import "./components"
+ApplicationWindow {
+    PersonCard {}
+    function loadPerson() { fetch("/api/person") }
+}
+"#
+                .into(),
+            ),
+        };
+        let card = SourceFile {
+            language: LanguageId::Qml,
+            absolute_path: "/tmp/qml/components/PersonCard.qml".into(),
+            relative_path: "qml/components/PersonCard.qml".into(),
+            text: Some("Rectangle { property string name: \"Ada\" }\n".into()),
+        };
+        let endpoint = node(
+            "endpoint:src/main.rs::get:api_person@1".into(),
+            NodeType::Endpoint,
+            "GET /api/person".into(),
+            Some("src/main.rs".into()),
+            Some("main".into()),
+            Some("demo".into()),
+            Some(1),
+            0.0,
+            0.0,
+        );
+        let existing_edge = edge(EdgeType::ExternalDependency, "crate:demo", "external:serde");
+        let files = vec![main, card];
+        let mut symbols = Vec::new();
+        for file in &files {
+            symbols.extend(block_on_ready(adapter.symbols(file)).unwrap());
+        }
+        let context = AnalysisContext {
+            project_root: Path::new("/tmp"),
+            files: &files,
+            symbols: &symbols,
+            graph_nodes: &[endpoint],
+            graph_edges: std::slice::from_ref(&existing_edge),
+        };
+
+        let edges = block_on_ready(adapter.edges(&context)).unwrap();
+        assert!(!edges.iter().any(|edge| edge.id == existing_edge.id));
+        assert!(edges.iter().any(|edge| edge.edge_type == EdgeType::Renders));
+        assert!(edges.iter().any(|edge| edge.edge_type == EdgeType::ApiCall));
+    }
+
+    #[test]
+    fn changed_qml_file_update_preserves_nodes_and_rebuilds_relationships() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-qml-incremental-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("backend")).unwrap();
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::create_dir_all(root.join("qml/components")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"qml_incremental_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn person() {}\nfn main() { app.route(\"/api/person\", get(person)); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("backend/main.py"),
+            "from fastapi import FastAPI\napp = FastAPI()\n@app.get(\"/api/users\")\ndef users():\n    return []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/useUsers.ts"),
+            "export function useUsers() { return fetch('/api/users') }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qml/Main.qml"),
+            "import QtQuick\nApplicationWindow { id: window }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qml/components/PersonCard.qml"),
+            "import QtQuick\nRectangle { property string name: \"Ada\" }\n",
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let mut snapshot = build_fallback_graph(&index, test_status());
+        let rust_id = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "person" && node.language.as_deref() == Some("rust"))
+            .unwrap()
+            .id
+            .clone();
+        let python_id = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "users" && node.language.as_deref() == Some("python"))
+            .unwrap()
+            .id
+            .clone();
+        let ts_id = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "useUsers")
+            .unwrap()
+            .id
+            .clone();
+        let card_root_id = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.label == "Rectangle"
+                    && node.file.as_deref() == Some("qml/components/PersonCard.qml")
+            })
+            .unwrap()
+            .id
+            .clone();
+        if let Some(node) = snapshot
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == card_root_id)
+        {
+            node.x = 333.0;
+            node.y = -222.0;
+        }
+
+        std::fs::write(
+            root.join("qml/Main.qml"),
+            r#"
+import QtQuick
+import "./components"
+
+ApplicationWindow {
+    id: window
+    PersonCard { id: card }
+    Button {
+        onClicked: loadPerson()
+    }
+    function loadPerson() { fetch("/api/person"); xhr.open("GET", "/api/users") }
+}
+"#,
+        )
+        .unwrap();
+        let changed = HashSet::from(["qml/Main.qml".to_string()]);
+        remove_changed_file_nodes_for_test(&mut snapshot, &changed);
+        crate::qml::enrich_qml_graph_for_files(&mut snapshot, &root, &changed);
+
+        assert!(snapshot.nodes.iter().any(|node| node.id == rust_id));
+        assert!(snapshot.nodes.iter().any(|node| node.id == python_id));
+        assert!(snapshot.nodes.iter().any(|node| node.id == ts_id));
+        let card_root = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == card_root_id)
+            .unwrap();
+        assert_eq!((card_root.x, card_root.y), (333.0, -222.0));
+
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Handler && node.label == "onClicked")
+            .unwrap();
+        let function = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "loadPerson")
+            .unwrap();
+        let rust_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/person")
+            .unwrap();
+        let python_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users")
+            .unwrap();
+
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Calls
+                && edge.source == handler.id
+                && edge.target == function.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == function.id
+                && edge.target == rust_endpoint.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == function.id
+                && edge.target == python_endpoint.id
+        }));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Renders && edge.target == card_root_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn remove_changed_file_nodes_for_test(
         snapshot: &mut GraphSnapshot,
         changed_files: &HashSet<String>,

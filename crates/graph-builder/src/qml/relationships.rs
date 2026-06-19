@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use graph_core::{route_key, EdgeConfidence, EdgeType, GraphSnapshot, NodeType};
+use graph_core::{
+    route_key, EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot, NodeType,
+};
 
 use super::api_calls::build_endpoint_route_index;
 use super::imports::{resolve_qml_component, resolve_qml_import};
@@ -14,8 +16,26 @@ pub(super) fn enrich_qml_relationships(
     imports_by_file: &HashMap<String, Vec<QmlImport>>,
     facts_by_file: &HashMap<String, Vec<QmlRelationshipFact>>,
 ) {
-    let existing_edges = snapshot
-        .edges
+    let edges = collect_qml_relationship_edges(
+        &snapshot.nodes,
+        &snapshot.edges,
+        files,
+        symbols_by_file,
+        imports_by_file,
+        facts_by_file,
+    );
+    snapshot.edges.extend(edges);
+}
+
+pub(super) fn collect_qml_relationship_edges(
+    existing_nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    files: &[QmlFile],
+    symbols_by_file: &HashMap<String, Vec<QmlSymbol>>,
+    imports_by_file: &HashMap<String, Vec<QmlImport>>,
+    facts_by_file: &HashMap<String, Vec<QmlRelationshipFact>>,
+) -> Vec<GraphEdge> {
+    let existing_edges = existing_edges
         .iter()
         .map(|edge| edge.id.clone())
         .collect::<HashSet<_>>();
@@ -46,7 +66,7 @@ pub(super) fn enrich_qml_relationships(
         .flatten()
         .map(|symbol| (symbol.label.clone(), symbol.id.clone()))
         .collect::<HashMap<_, _>>();
-    let endpoint_by_route = build_endpoint_route_index(&snapshot.nodes);
+    let endpoint_by_route = build_endpoint_route_index(existing_nodes);
     let mut edges = Vec::new();
 
     for file in files {
@@ -154,5 +174,5 @@ pub(super) fn enrich_qml_relationships(
         }
     }
 
-    snapshot.edges.extend(edges);
+    edges
 }

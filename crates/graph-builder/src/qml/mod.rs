@@ -1,10 +1,10 @@
 use graph_core::{
-    AnalysisContext, AnalysisResult, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
-    EdgeConfidence, EdgeType, GraphNode, GraphSnapshot, LanguageAnalyzer, LanguageId, NodeType,
-    SourceFile, SymbolKindName, SymbolRecord, Visibility,
+    AnalysisContext, AnalysisResult, DiagnosticRecord, EdgeConfidence, EdgeType, GraphNode,
+    GraphSnapshot, LanguageAnalyzer, LanguageId, NodeType, SourceFile, SymbolKindName,
+    SymbolRecord, Visibility,
 };
 use project_indexer::relative_to;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::path::Path;
@@ -17,7 +17,7 @@ pub(crate) mod relationships;
 pub(crate) mod symbols;
 
 use crate::{dedupe_graph, edge_with_confidence, file_id, node, spread_angle};
-use relationships::enrich_qml_relationships;
+use relationships::{collect_qml_relationship_edges, enrich_qml_relationships};
 use symbols::{analyze_qml_file, discover_qml_symbols};
 
 pub struct QmlLanguageAdapter;
@@ -124,17 +124,14 @@ fn adapter_edges(context: &AnalysisContext<'_>) -> Vec<graph_core::GraphEdge> {
         imports_by_file.insert(file.relative_path.clone(), imports);
         facts_by_file.insert(file.relative_path.clone(), facts);
     }
-    let mut snapshot = empty_qml_snapshot();
-    snapshot.nodes.extend(context.graph_nodes.iter().cloned());
-    snapshot.edges.extend(context.graph_edges.iter().cloned());
-    enrich_qml_relationships(
-        &mut snapshot,
+    collect_qml_relationship_edges(
+        context.graph_nodes,
+        context.graph_edges,
         &files,
         &symbols_by_file,
         &imports_by_file,
         &facts_by_file,
-    );
-    snapshot.edges
+    )
 }
 
 fn qml_file_from_source(file: &SourceFile) -> Option<QmlFile> {
@@ -192,24 +189,6 @@ pub(crate) enum QmlRelationshipFact {
         method: String,
         path: String,
     },
-}
-
-fn empty_qml_snapshot() -> GraphSnapshot {
-    GraphSnapshot {
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        files: Vec::new(),
-        events: Vec::new(),
-        status: AppStatus {
-            app_state: AppState::Normal,
-            analyzer_status: AnalyzerStatus::Ready,
-            project_name: None,
-            project_path: None,
-            last_updated: None,
-            message: None,
-            progress: None,
-        },
-    }
 }
 
 fn ensure_qml_module(snapshot: &mut GraphSnapshot) {
@@ -303,6 +282,132 @@ fn enrich_qml_graph_impl(snapshot: &mut GraphSnapshot, project_root: &Path) -> u
     );
     dedupe_graph(snapshot);
     symbol_count
+}
+
+pub fn enrich_qml_graph_for_files(
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+    changed_files: &HashSet<String>,
+) -> usize {
+    let mut files = Vec::new();
+    collect_qml_files(project_root, project_root, &mut files);
+    if files.is_empty() {
+        return 0;
+    }
+    ensure_qml_module(snapshot);
+    let changed_qml_files = files
+        .iter()
+        .filter(|file| changed_files.contains(&file.relative_path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if changed_qml_files.is_empty() {
+        return 0;
+    }
+
+    for file in &changed_qml_files {
+        ensure_qml_file_node(snapshot, file, files.len());
+    }
+    remove_changed_qml_relationship_edges(snapshot, changed_files);
+
+    let mut symbol_count = 0usize;
+    let mut symbols_by_file = HashMap::new();
+    let mut imports_by_file = HashMap::new();
+    let mut facts_by_file = HashMap::new();
+    for file in &files {
+        let (symbols, imports, facts) = analyze_qml_file(file);
+        if changed_files.contains(&file.relative_path) {
+            let file_node_id = file_id(&file.relative_path);
+            symbol_count += symbols.len();
+            for symbol in &symbols {
+                snapshot.nodes.push(qml_graph_node(file, symbol));
+                let parent_id = symbol.parent_id.as_deref().unwrap_or(&file_node_id);
+                snapshot.edges.push(edge_with_confidence(
+                    EdgeType::Contains,
+                    parent_id,
+                    &symbol.id,
+                    EdgeConfidence::Semantic,
+                ));
+            }
+        }
+        symbols_by_file.insert(file.relative_path.clone(), symbols);
+        imports_by_file.insert(file.relative_path.clone(), imports);
+        facts_by_file.insert(file.relative_path.clone(), facts);
+    }
+
+    enrich_qml_relationships(
+        snapshot,
+        &files,
+        &symbols_by_file,
+        &imports_by_file,
+        &facts_by_file,
+    );
+    dedupe_graph(snapshot);
+    symbol_count
+}
+
+fn ensure_qml_file_node(snapshot: &mut GraphSnapshot, file: &QmlFile, total: usize) {
+    let file_node_id = file_id(&file.relative_path);
+    if snapshot.nodes.iter().any(|node| node.id == file_node_id) {
+        return;
+    }
+    let idx = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == NodeType::File)
+        .count();
+    let angle = spread_angle(idx, total.max(1));
+    snapshot.nodes.push(node(
+        file_node_id.clone(),
+        NodeType::File,
+        Path::new(&file.relative_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&file.relative_path)
+            .to_string(),
+        Some(file.relative_path.clone()),
+        Some(file.module_path.clone()),
+        Some("qml".to_string()),
+        None,
+        880.0 + angle.cos() * 320.0,
+        angle.sin() * 320.0,
+    ));
+    snapshot.edges.push(edge_with_confidence(
+        EdgeType::Contains,
+        "ui:qml",
+        &file_node_id,
+        EdgeConfidence::Exact,
+    ));
+}
+
+fn remove_changed_qml_relationship_edges(
+    snapshot: &mut GraphSnapshot,
+    changed_files: &HashSet<String>,
+) {
+    let changed_file_ids = changed_files
+        .iter()
+        .map(|file| file_id(file))
+        .collect::<HashSet<_>>();
+    let changed_node_ids = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.file
+                .as_ref()
+                .is_some_and(|file| changed_files.contains(file))
+                && node.node_type != NodeType::File
+        })
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    snapshot.edges.retain(|edge| {
+        if matches!(edge.edge_type, EdgeType::Contains) {
+            return true;
+        }
+        let touches_changed_file =
+            changed_file_ids.contains(&edge.source) || changed_file_ids.contains(&edge.target);
+        let touches_changed_node =
+            changed_node_ids.contains(&edge.source) || changed_node_ids.contains(&edge.target);
+        !(touches_changed_file || touches_changed_node)
+    });
 }
 
 fn qml_graph_node(file: &QmlFile, symbol: &QmlSymbol) -> GraphNode {

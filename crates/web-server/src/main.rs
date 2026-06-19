@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use graph_builder::{
     build_fallback_graph, enrich_api_routes_for_files, enrich_file_symbols,
     enrich_syntax_relationships_for_files, filter_snapshot, focus_subgraph,
-    push_unique_edge_with_confidence, python, typescript,
+    push_unique_edge_with_confidence, python, qml, typescript,
 };
 use graph_core::{
     AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
@@ -1271,6 +1271,12 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         && changed_files
             .iter()
             .all(|file| python::is_python_path(file));
+    let qml_files = changed_files
+        .iter()
+        .filter(|file| qml::is_qml_path(file))
+        .cloned()
+        .collect::<Vec<_>>();
+    let only_qml = !qml_files.is_empty() && changed_files.iter().all(|file| qml::is_qml_path(file));
 
     if only_rust {
         match index_changed_rust_files(&state, &project_root, rust_files, changed_files.clone())
@@ -1309,6 +1315,18 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
             Err(error) => warn!(
                 ?error,
                 "incremental Python patch failed; falling back to rebuild patch"
+            ),
+        }
+    }
+    if only_qml {
+        match index_changed_qml_files(&state, &project_root, qml_files, changed_files.clone()) {
+            Ok(()) => {
+                state.is_indexing.store(false, Ordering::SeqCst);
+                return;
+            }
+            Err(error) => warn!(
+                ?error,
+                "incremental QML patch failed; falling back to rebuild patch"
             ),
         }
     }
@@ -1483,6 +1501,39 @@ fn index_changed_python_files(
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
     graph_builder::python::enrich_python_graph_for_files(&mut snapshot, project_root, &changed_set);
+    restore_existing_positions(&mut snapshot, &old_positions);
+    snapshot.status = ready_status(state, "Ready");
+    let diagnostics = state
+        .diagnostics_by_file
+        .read()
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    apply_diagnostics_to_files(&mut snapshot, &diagnostics);
+    let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
+    *state.graph.write() = snapshot;
+    let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
+    Ok(())
+}
+
+fn index_changed_qml_files(
+    state: &AppStateHandle,
+    project_root: &Path,
+    files: Vec<String>,
+    changed_files: Vec<String>,
+) -> Result<()> {
+    let old_snapshot = state.graph.read().clone();
+    let mut snapshot = old_snapshot.clone();
+    let changed_set = files.into_iter().collect::<HashSet<_>>();
+    let old_positions = old_snapshot
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .collect::<HashMap<_, _>>();
+
+    remove_file_symbols_and_edges(&mut snapshot, &changed_set);
+    graph_builder::qml::enrich_qml_graph_for_files(&mut snapshot, project_root, &changed_set);
     restore_existing_positions(&mut snapshot, &old_positions);
     snapshot.status = ready_status(state, "Ready");
     let diagnostics = state
