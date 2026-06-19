@@ -29,6 +29,7 @@ export type EdgeType =
 
 export type EdgeConfidence = 'Exact' | 'Semantic' | 'SyntaxFallback' | 'Heuristic'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
+export type GraphLabelMode = 'auto' | 'key' | 'all'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
 export type AnalyzerStatus = 'Starting' | 'Indexing' | 'Ready' | 'Fallback' | 'Stale' | 'Error'
 export type ThemeMode = 'light' | 'dark'

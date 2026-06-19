@@ -10,7 +10,7 @@ import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { useBackendGraph } from './api/useBackendGraph'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Uses', 'Calls', 'Renders', 'ApiCall', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
@@ -47,6 +47,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarityOpen, setClarityOpen] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
+  const [labelMode, setLabelMode] = useState<GraphLabelMode>('auto')
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
   const [pinnedNodeIds, setPinnedNodeIds] = useState<Set<string>>(new Set())
@@ -76,6 +77,10 @@ export default function App() {
     [nodes, pinnedNodeIds],
   )
   const selectedNode = selectedNodeId ? graphNodes.find(n => n.id === selectedNodeId) ?? null : null
+  const layoutTuned = layoutSettings.spacing !== DEFAULT_GRAPH_LAYOUT_SETTINGS.spacing
+    || layoutSettings.repulsion !== DEFAULT_GRAPH_LAYOUT_SETTINGS.repulsion
+    || layoutSettings.linkLength !== DEFAULT_GRAPH_LAYOUT_SETTINGS.linkLength
+    || layoutSettings.damping !== DEFAULT_GRAPH_LAYOUT_SETTINGS.damping
   const { nodes: visibleGraphNodes, edges: visibleGraphEdges } = useMemo(
     () => applyGraphLens(graphNodes, edges, graphLens),
     [graphNodes, edges, graphLens],
@@ -173,7 +178,7 @@ export default function App() {
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         onClarityToggle={() => setClarityOpen(open => !open)}
         clarityOpen={clarityOpen}
-        clarityActive={graphLens !== 'all' || filters.depth !== 'full' || !filters.showExternal || !filters.showTests}
+        clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned}
         theme={theme}
       />
 
@@ -199,6 +204,7 @@ export default function App() {
             recenterKey={recenterKey}
             theme={theme}
             layoutSettings={layoutSettings}
+            labelMode={labelMode}
             onSelectNode={handleSelectNode}
             onUpdateNodes={() => {}}
           />
@@ -221,27 +227,13 @@ export default function App() {
               visibleNodes={visibleGraphNodes.length}
               totalEdges={edges.length}
               visibleEdges={visibleGraphEdges.length}
-              depth={filters.depth}
-              externalHidden={!filters.showExternal || !filters.nodeTypes.has('ExternalCrate')}
-              testsHidden={!filters.showTests}
+              labelMode={labelMode}
               layoutSettings={layoutSettings}
               onDismiss={() => setClarityOpen(false)}
               onLensChange={setGraphLens}
+              onLabelModeChange={setLabelMode}
               onLayoutSettingsChange={setLayoutSettings}
               onResetLayoutSettings={() => setLayoutSettings(DEFAULT_GRAPH_LAYOUT_SETTINGS)}
-              onHideExternal={() => {
-                setFilters(f => {
-                  const next = new Set(f.nodeTypes)
-                  if (next.has('ExternalCrate')) {
-                    next.delete('ExternalCrate')
-                    return { ...f, nodeTypes: next, showExternal: false }
-                  }
-                  next.add('ExternalCrate')
-                  return { ...f, nodeTypes: next, showExternal: true }
-                })
-              }}
-              onHideTests={() => setFilters(f => ({ ...f, showTests: !f.showTests }))}
-              onDepth2={() => setFilters(f => ({ ...f, depth: f.depth === 2 ? 'full' : 2 }))}
             />
           </div>
 

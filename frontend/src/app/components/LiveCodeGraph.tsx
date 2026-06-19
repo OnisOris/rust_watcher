@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
-import type { GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings } from '../types'
+import type { GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode } from '../types'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
@@ -10,6 +10,7 @@ interface LiveCodeGraphProps {
   recenterKey: number
   theme: ThemeMode
   layoutSettings: GraphLayoutSettings
+  labelMode: GraphLabelMode
   onSelectNode: (id: string | null) => void
   onUpdateNodes: (nodes: GraphNode[]) => void
 }
@@ -914,25 +915,39 @@ function labelBudget(visibleCount: number, zoom: number) {
   return Math.round(Math.min(visibleCount, Math.max(24, Math.sqrt(visibleCount) * 7.5 * zoomScale)))
 }
 
+function isKeyLabel(node: GraphNode, degree: number) {
+  return node.pinned
+    || degree >= 5
+    || node.type === 'Module'
+    || node.type === 'File'
+    || node.type === 'Endpoint'
+    || node.type === 'Struct'
+    || node.type === 'Trait'
+}
+
 function drawLabels(
   ctx: CanvasRenderingContext2D,
   candidates: LabelCandidate[],
   visibleCount: number,
   zoom: number,
+  labelMode: GraphLabelMode,
   theme: CanvasTheme,
 ) {
   const occupied: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
   const sorted = [...candidates].sort((a, b) => b.priority - a.priority)
-  const budget = labelBudget(visibleCount, zoom)
+  const budget = labelMode === 'key'
+    ? Math.round(Math.max(12, Math.sqrt(visibleCount) * 3.8))
+    : labelBudget(visibleCount, zoom)
   let drawn = 0
 
   for (const candidate of sorted) {
     const force = candidate.isSelected || candidate.isHovered || candidate.node.pinned
-    if (!force && drawn >= budget) continue
-    if (!force && visibleCount > 70 && zoom < 0.62 && candidate.degree < 3) continue
+    if (labelMode === 'key' && !force && !isKeyLabel(candidate.node, candidate.degree)) continue
+    if (labelMode !== 'all' && !force && drawn >= budget) continue
+    if (labelMode !== 'all' && !force && visibleCount > 70 && zoom < 0.62 && candidate.degree < 3) continue
 
     const box = labelBounds(ctx, candidate.node, candidate.isSelected, candidate.isHovered)
-    if (!force && occupied.some(existing => boxesOverlap(existing, box))) continue
+    if (labelMode !== 'all' && !force && occupied.some(existing => boxesOverlap(existing, box))) continue
 
     drawLabel(ctx, candidate.node, candidate.isSelected, candidate.isHovered, theme, box.label)
     occupied.push(box)
@@ -1030,7 +1045,7 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
   const animFrameRef = useRef<number>(0)
@@ -1340,7 +1355,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
           ctx.restore()
         }
       }
-      drawLabels(ctx, labelCandidates, labelCandidates.length, zoomRef.current, canvasColors)
+      drawLabels(ctx, labelCandidates, labelCandidates.length, zoomRef.current, labelMode, canvasColors)
 
       ctx.restore()
 
@@ -1375,7 +1390,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       cancelAnimationFrame(animFrameRef.current)
       ro.disconnect()
     }
-  }, [edges, filters, getVisibleNodeIds, theme])
+  }, [edges, filters, getVisibleNodeIds, labelMode, theme])
 
   // mouse events
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

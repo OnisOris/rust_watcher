@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { AlertCircle, Check, EyeOff, Layers, Minimize2, RotateCcw, SlidersHorizontal, Waypoints, X } from 'lucide-react'
-import type { GraphLayoutSettings } from '../types'
+import { AlertCircle, RotateCcw, SlidersHorizontal, Tags, X } from 'lucide-react'
+import type { GraphLabelMode, GraphLayoutSettings } from '../types'
 
 type GraphLens = 'all' | 'architecture' | 'api'
 
@@ -10,17 +10,13 @@ interface DenseGraphSuggestionProps {
   visibleNodes: number
   totalEdges: number
   visibleEdges: number
-  depth: 1 | 2 | 3 | 'full'
-  externalHidden: boolean
-  testsHidden: boolean
+  labelMode: GraphLabelMode
   layoutSettings: GraphLayoutSettings
   onDismiss: () => void
   onLensChange: (lens: GraphLens) => void
+  onLabelModeChange: (mode: GraphLabelMode) => void
   onLayoutSettingsChange: (settings: GraphLayoutSettings) => void
   onResetLayoutSettings: () => void
-  onHideExternal: () => void
-  onHideTests: () => void
-  onDepth2: () => void
 }
 
 export function DenseGraphSuggestion({
@@ -29,17 +25,13 @@ export function DenseGraphSuggestion({
   visibleNodes,
   totalEdges,
   visibleEdges,
-  depth,
-  externalHidden,
-  testsHidden,
+  labelMode,
   layoutSettings,
   onDismiss,
   onLensChange,
+  onLabelModeChange,
   onLayoutSettingsChange,
   onResetLayoutSettings,
-  onHideExternal,
-  onHideTests,
-  onDepth2,
 }: DenseGraphSuggestionProps) {
   return (
     <div
@@ -73,48 +65,20 @@ export function DenseGraphSuggestion({
       </div>
 
       <div className="px-3 py-3">
+        <SectionHeader title="Scope" />
         <div className="grid grid-cols-3 gap-1.5">
           <LensButton label="Full" active={graphLens === 'all'} onClick={() => onLensChange('all')} />
           <LensButton label="Architecture" active={graphLens === 'architecture'} onClick={() => onLensChange('architecture')} />
           <LensButton label="API" active={graphLens === 'api'} onClick={() => onLensChange('api')} />
         </div>
 
-        <div className="mt-3 flex flex-col gap-1.5">
-          <SuggestionAction
-            icon={<Minimize2 size={12} />}
-            label="Architecture map"
-            detail="Files, crates, endpoints"
-            active={graphLens === 'architecture'}
-            onClick={() => onLensChange('architecture')}
-          />
-          <SuggestionAction
-            icon={<Waypoints size={12} />}
-            label="API bridge only"
-            detail="Frontend calls to Rust routes"
-            active={graphLens === 'api'}
-            onClick={() => onLensChange('api')}
-          />
-          <SuggestionAction
-            icon={<EyeOff size={12} />}
-            label="External crates"
-            detail={externalHidden ? 'Hidden' : 'Visible'}
-            active={externalHidden}
-            onClick={onHideExternal}
-          />
-          <SuggestionAction
-            icon={<EyeOff size={12} />}
-            label="Tests"
-            detail={testsHidden ? 'Hidden' : 'Visible'}
-            active={testsHidden}
-            onClick={onHideTests}
-          />
-          <SuggestionAction
-            icon={<Layers size={12} />}
-            label="Depth 2"
-            detail={depth === 2 ? 'Active' : 'Show main/hub neighborhood'}
-            active={depth === 2}
-            onClick={onDepth2}
-          />
+        <div className="mt-3">
+          <SectionHeader title="Labels" icon={<Tags size={12} color="#06B6D4" />} />
+          <div className="grid grid-cols-3 gap-1.5">
+            <LensButton label="Auto" active={labelMode === 'auto'} onClick={() => onLabelModeChange('auto')} />
+            <LensButton label="Key" active={labelMode === 'key'} onClick={() => onLabelModeChange('key')} />
+            <LensButton label="All" active={labelMode === 'all'} onClick={() => onLabelModeChange('all')} />
+          </div>
         </div>
 
         <div
@@ -173,6 +137,17 @@ export function DenseGraphSuggestion({
   )
 }
 
+function SectionHeader({ title, icon }: { title: string; icon?: ReactNode }) {
+  return (
+    <div className="mb-2 flex items-center gap-1.5">
+      {icon}
+      <span style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase' }}>
+        {title}
+      </span>
+    </div>
+  )
+}
+
 function LayoutSlider({
   label,
   value,
@@ -226,43 +201,6 @@ function LensButton({ label, active, onClick }: { label: string; active: boolean
       }}
     >
       {label}
-    </button>
-  )
-}
-
-function SuggestionAction({
-  icon,
-  label,
-  detail,
-  active,
-  disabled,
-  onClick,
-}: {
-  icon: ReactNode
-  label: string
-  detail: string
-  active?: boolean
-  disabled?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className="flex items-center gap-2 rounded-lg px-3 py-2 w-full transition-all text-left"
-      style={{
-        background: active ? 'rgba(6,182,212,0.12)' : 'var(--cc-card)',
-        border: active ? '1px solid rgba(6,182,212,0.35)' : '1px solid var(--cc-border)',
-        color: disabled ? 'var(--cc-text-faint)' : active ? '#06B6D4' : 'var(--cc-text-muted)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.6 : 1,
-      }}
-    >
-      <span className="flex items-center justify-center shrink-0" style={{ width: 18 }}>{active ? <Check size={12} /> : icon}</span>
-      <span className="min-w-0 flex-1">
-        <span style={{ display: 'block', fontSize: 12, fontWeight: 550 }}>{label}</span>
-        <span style={{ display: 'block', fontSize: 10, color: active ? '#0891B2' : 'var(--cc-text-subtle)', marginTop: 1 }}>{detail}</span>
-      </span>
     </button>
   )
 }
