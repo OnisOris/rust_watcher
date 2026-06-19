@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { INITIAL_EDGES, INITIAL_NODES, PROJECT_FILES, ANALYSIS_EVENTS } from '../mockData'
 import {
   applyDiagnosticCountsToFiles,
@@ -67,6 +67,7 @@ export function useBackendGraph(mode: GraphMode) {
   const [diagnosticsByNode, setDiagnosticsByNode] = useState<Map<string, DiagnosticRecord[]>>(new Map())
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [backendAvailable, setBackendAvailable] = useState(true)
+  const snapshotRequestSeq = useRef(0)
 
   const applyStatus = useCallback((status: AppStatus) => {
     setAppState(status.appState)
@@ -133,10 +134,13 @@ export function useBackendGraph(mode: GraphMode) {
   }, [applyStatus])
 
   const refreshSnapshot = useCallback(async (nextMode: GraphMode = mode) => {
+    const requestSeq = ++snapshotRequestSeq.current
     try {
       const response = await fetch(`/api/graph/snapshot?mode=${encodeURIComponent(nextMode)}`)
       if (!response.ok) throw new Error(`snapshot failed: ${response.status}`)
-      applySnapshot(await response.json())
+      const snapshot = await response.json()
+      if (requestSeq !== snapshotRequestSeq.current) return
+      applySnapshot(snapshot)
       await refreshDiagnostics().catch(() => undefined)
       setBackendAvailable(true)
     } catch {
@@ -149,18 +153,13 @@ export function useBackendGraph(mode: GraphMode) {
 
     async function boot() {
       try {
-        const [statusResponse, snapshotResponse] = await Promise.all([
-          fetch('/api/status'),
-          fetch(`/api/graph/snapshot?mode=${encodeURIComponent(mode)}`),
-        ])
-        if (!statusResponse.ok || !snapshotResponse.ok) {
+        const statusResponse = await fetch('/api/status')
+        if (!statusResponse.ok) {
           throw new Error('backend unavailable')
         }
         if (cancelled) return
         applyStatus(await statusResponse.json())
-        applySnapshot(await snapshotResponse.json())
-        await refreshDiagnostics().catch(() => undefined)
-        setBackendAvailable(true)
+        await refreshSnapshot(mode)
       } catch {
         if (!cancelled) applyDevFallback()
       }
@@ -168,7 +167,7 @@ export function useBackendGraph(mode: GraphMode) {
 
     boot()
     return () => { cancelled = true }
-  }, [applyDevFallback, applySnapshot, applyStatus, mode, refreshDiagnostics])
+  }, [applyDevFallback, applyStatus, mode, refreshSnapshot])
 
   useEffect(() => {
     if (!backendAvailable) return
@@ -178,9 +177,10 @@ export function useBackendGraph(mode: GraphMode) {
     socket.onmessage = event => {
       const message = JSON.parse(event.data) as ServerMessage
       if (message.type === 'graph_snapshot') {
-        applySnapshot(message.payload)
+        void refreshSnapshot(mode)
       } else if (message.type === 'graph_patch') {
-        applyPatch(message.payload)
+        void refreshSnapshot(mode)
+        applyPatch({ ...message.payload, addedNodes: [], updatedNodes: [], removedNodeIds: [], addedEdges: [], updatedEdges: [], removedEdgeIds: [] })
       } else if (message.type === 'analyzer_status') {
         applyStatus(message.payload)
       } else if (message.type === 'analysis_event') {
@@ -193,7 +193,7 @@ export function useBackendGraph(mode: GraphMode) {
       if (DEV_FALLBACK) applyDevFallback()
     }
     return () => socket.close()
-  }, [applyDevFallback, applyPatch, applySnapshot, applyStatus, backendAvailable])
+  }, [applyDevFallback, applyPatch, applyStatus, backendAvailable, mode, refreshSnapshot])
 
   const openProject = useCallback(async (path?: string) => {
     try {
@@ -242,6 +242,30 @@ export function useBackendGraph(mode: GraphMode) {
     }
   }, [])
 
+  const saveNodeLayout = useCallback(async (node: GraphNode) => {
+    if (!backendAvailable) return
+    try {
+      const response = await fetch('/api/layout/node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          node: {
+            nodeId: node.id,
+            x: node.x,
+            y: node.y,
+            vx: node.vx ?? 0,
+            vy: node.vy ?? 0,
+            pinned: node.pinned ?? false,
+          },
+        }),
+      })
+      if (!response.ok) throw new Error(await response.text())
+      setBackendAvailable(true)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to save layout.')
+    }
+  }, [backendAvailable])
+
   const search = useCallback(async (query: string): Promise<SearchResult[]> => {
     if (!backendAvailable) return localSearch(nodes, query)
     try {
@@ -277,6 +301,7 @@ export function useBackendGraph(mode: GraphMode) {
     setSelectedNodeId,
     openProject,
     openInEditor,
+    saveNodeLayout,
     requestFocusBubble,
     search,
     refreshSnapshot,

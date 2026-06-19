@@ -1308,9 +1308,6 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
           const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
           fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, W, H, panRef.current, zoomRef)
         }
-        if (physicsTicksRef.current % 60 === 0) {
-          onUpdateNodesRef.current([...nodesRef.current])
-        }
       } else if (!settledRef.current) {
         const fadeProgress = Math.min(1, (settleElapsed - VISIBLE_SETTLE_MS) / SETTLE_FADE_MS)
         const dampingScale = 2.4 + fadeProgress * 4.6
@@ -1330,7 +1327,6 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         physicsTicksRef.current++
         if (averageSpeed(nodesRef.current) < 0.012 || fadeProgress >= 1) {
           settledRef.current = true
-          onUpdateNodesRef.current([...nodesRef.current])
         }
       }
 
@@ -1506,7 +1502,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       }
       const { x, y } = toWorld(e.clientX, e.clientY)
       nodesRef.current = nodesRef.current.map(n =>
-        n.id === dragNodeRef.current ? { ...n, x, y, vx: 0, vy: 0 } : n
+        n.id === dragNodeRef.current ? { ...n, x, y, vx: 0, vy: 0, pinned: true } : n
       )
     } else if (isDraggingRef.current) {
       panRef.current.x = dragStartRef.current.panX + (e.clientX - dragStartRef.current.x)
@@ -1515,6 +1511,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   }, [hitTest, toWorld])
 
   const handleMouseUp = useCallback(() => {
+    if (dragNodeRef.current) {
+      onUpdateNodesRef.current([...nodesRef.current])
+    }
     dragNodeRef.current = null
     isDraggingRef.current = false
   }, [])

@@ -24,6 +24,52 @@ pub use qml::QmlLanguageAdapter;
 pub use rust::RustLanguageAdapter;
 pub use typescript::TypeScriptLanguageAdapter;
 
+pub fn build_language_graph(project_root: &Path, mut status: AppStatus) -> GraphSnapshot {
+    let project_name = project_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+    status.project_name = Some(project_name.clone());
+    status.project_path = Some(project_root.display().to_string());
+    let mut snapshot = GraphSnapshot {
+        nodes: vec![node(
+            format!("workspace:{project_name}"),
+            NodeType::Module,
+            project_name,
+            None,
+            Some("workspace".into()),
+            None,
+            None,
+            0.0,
+            0.0,
+        )],
+        edges: Vec::new(),
+        files: Vec::new(),
+        events: Vec::new(),
+        status,
+    };
+    let python_count = python::enrich_python_graph(&mut snapshot, project_root);
+    let qml_count = qml::enrich_qml_graph(&mut snapshot, project_root);
+    let frontend_count = typescript::enrich_typescript_graph(&mut snapshot, project_root);
+    update_connections(&mut snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
+    snapshot.events = vec![event(
+        AnalysisEventType::Graph,
+        format!(
+            "Language graph built: {} files, {} frontend symbols, {} python symbols, {} qml symbols, {} nodes, {} edges",
+            snapshot.files.len(),
+            frontend_count,
+            python_count,
+            qml_count,
+            snapshot.nodes.len(),
+            snapshot.edges.len()
+        ),
+        None,
+    )];
+    snapshot
+}
+
 pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> GraphSnapshot {
     status.project_name = Some(index.name.clone());
     status.project_path = Some(index.root.display().to_string());
@@ -2318,6 +2364,28 @@ ApplicationWindow {
         assert!(!edges.iter().any(|edge| edge.id == existing_edge.id));
         assert!(edges.iter().any(|edge| edge.edge_type == EdgeType::Renders));
         assert!(edges.iter().any(|edge| edge.edge_type == EdgeType::ApiCall));
+    }
+
+    #[test]
+    fn language_graph_builds_qml_project_without_cargo_manifest() {
+        let root = std::env::temp_dir().join(format!("rust-watcher-qml-only-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("qml")).unwrap();
+        std::fs::write(
+            root.join("qml/Main.qml"),
+            "import QtQuick\nApplicationWindow { property string titleText: \"Pion\" }\n",
+        )
+        .unwrap();
+
+        let snapshot = build_language_graph(&root, test_status());
+        assert!(snapshot.nodes.iter().any(|node| {
+            node.language.as_deref() == Some("qml")
+                && node.node_type == NodeType::Object
+                && node.label == "ApplicationWindow"
+        }));
+        assert!(!snapshot.nodes.is_empty());
+        assert_eq!(snapshot.status.project_path.as_deref(), root.to_str());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

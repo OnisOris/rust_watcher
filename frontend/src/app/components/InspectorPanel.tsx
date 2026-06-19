@@ -12,6 +12,8 @@ interface InspectorPanelProps {
   filesCount?: number
   message?: string | null
   onTogglePin: (id: string) => void
+  onToggleCollapse: (id: string) => void
+  collapsedGroups: Set<string>
   onSelectNode: (id: string) => void
   onOpenInEditor: (node: GraphNode) => void
 }
@@ -34,6 +36,8 @@ export function InspectorPanel({
   filesCount = 0,
   message,
   onTogglePin,
+  onToggleCollapse,
+  collapsedGroups,
   onSelectNode,
   onOpenInEditor,
 }: InspectorPanelProps) {
@@ -51,7 +55,7 @@ export function InspectorPanel({
       />
     )
   }
-  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
+  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
 }
 
 // ── Project overview (nothing selected) ────────────────────────────────────
@@ -77,6 +81,13 @@ function ProjectOverview({
   const visibleCrates = new Set(nodes.map(n => n.crate).filter((crateName): crateName is string => !!crateName && crateName !== 'external'))
   const crateCount = visibleCrates.size || nodes.filter(n => n.id.startsWith('crate:')).length
   const analyzerColor = analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' || analyzerStatus === 'Starting' || analyzerStatus === 'Fallback' ? '#F59E0B' : '#34D399'
+  const languageCounts = {
+    Rust: nodes.filter(node => node.language === 'rust').length,
+    TS: nodes.filter(node => node.language === 'typescript' || node.language === 'javascript').length,
+    Python: nodes.filter(node => node.language === 'python').length,
+    QML: nodes.filter(node => node.language === 'qml').length,
+    Endpoints: nodes.filter(node => node.type === 'Endpoint').length,
+  }
 
   const topConnected = [...nodes]
     .map(n => ({
@@ -101,6 +112,18 @@ function ProjectOverview({
           <StatCard label="Edges" value={edges.length} color="#8B5CF6" />
           <StatCard label="Crates" value={crateCount} color="#10B981" />
         </div>
+
+        <Card>
+          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Languages</p>
+          <div className="grid grid-cols-5 gap-1.5">
+            {Object.entries(languageCounts).map(([label, value]) => (
+              <div key={label} className="rounded px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+                <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 650 }}>{value}</div>
+                <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
 
         {/* analyzer status */}
         <Card>
@@ -148,8 +171,8 @@ function ProjectOverview({
 }
 
 // ── Node inspector (something selected) ────────────────────────────────────
-function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenInEditor }: {
-  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
+function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, collapsedGroups, onSelectNode, onOpenInEditor }: {
+  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
 }) {
   const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
   const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
@@ -189,6 +212,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
   const calleeConfidence = confidenceByNode(outgoing, 'target')
 
   const typeColor = NODE_TYPE_COLORS[node.type] ?? '#7D8795'
+  const collapsible = node.type === 'File' || node.type === 'Module' || node.type === 'Object'
+  const collapsed = collapsedGroups.has(node.id)
 
   return (
     <div
@@ -343,6 +368,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenIn
         <div className="grid grid-cols-2 gap-2">
           <ActionBtn icon={<BookMarked size={13} />} label="Bookmark" onClick={() => {}} />
           <ActionBtn icon={<Pin size={13} />} label={node.pinned ? 'Unpin Node' : 'Pin Node'} onClick={() => onTogglePin(node.id)} active={!!node.pinned} />
+          <ActionBtn icon={<Layers size={13} />} label={collapsed ? 'Expand Group' : 'Collapse Group'} onClick={() => onToggleCollapse(node.id)} active={collapsed} disabled={!collapsible} />
           <ActionBtn icon={<ExternalLink size={13} />} label="Open in Editor" onClick={() => onOpenInEditor(node)} disabled={!node.file} />
         </div>
       </div>

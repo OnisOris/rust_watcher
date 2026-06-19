@@ -219,9 +219,23 @@ export interface SourceLocation {
 export interface GraphFilters {
   nodeTypes: Set<NodeType>
   edgeTypes: Set<EdgeType>
+  languages: Set<LanguageFilter>
   showTests: boolean
   showExternal: boolean
   onlyPublicAPI: boolean
   depth: 1 | 2 | 3 | 'full'
   onlyCurrentFile: boolean
+}
+
+export type LanguageFilter = 'rust' | 'typescript' | 'python' | 'qml' | 'external' | 'endpoints'
+
+export interface SavedView {
+  id: string
+  name: string
+  filters: Partial<GraphFilters>
+  focusedNodeId?: string | null
+  collapsedGroups: string[]
+  layoutOverrides?: Record<string, unknown>
+  createdAt?: string
+  updatedAt?: string
 }

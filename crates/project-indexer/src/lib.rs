@@ -116,7 +116,10 @@ where
                 let interesting = event.paths.iter().any(|path| {
                     let extension = path.extension().and_then(|e| e.to_str());
                     path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
-                        || matches!(extension, Some("rs" | "ts" | "tsx" | "js" | "jsx"))
+                        || matches!(
+                            extension,
+                            Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "qml")
+                        )
                 });
                 if interesting {
                     on_event(event);

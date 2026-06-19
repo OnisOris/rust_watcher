@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { TopToolbar } from './components/TopToolbar'
 import { ProjectExplorer } from './components/ProjectExplorer'
 import { LiveCodeGraph } from './components/LiveCodeGraph'
@@ -9,15 +9,18 @@ import { SearchCommandPalette } from './components/SearchCommandPalette'
 import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { useBackendGraph } from './api/useBackendGraph'
+import { applyCollapsedGroups, applyGraphFilters } from './api/graphView'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Imports', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
+const ALL_LANGUAGES = new Set<LanguageFilter>(['rust', 'typescript', 'python', 'qml', 'external', 'endpoints'])
 
 const DEFAULT_FILTERS: GraphFilters = {
   nodeTypes: ALL_NODE_TYPES,
   edgeTypes: ALL_EDGE_TYPES,
+  languages: ALL_LANGUAGES,
   showTests: true,
   showExternal: true,
   onlyPublicAPI: false,
@@ -26,6 +29,15 @@ const DEFAULT_FILTERS: GraphFilters = {
 }
 
 type GraphLens = 'all' | 'architecture' | 'api'
+
+const DEFAULT_VIEWS: SavedView[] = [
+  { id: 'default-full', name: 'Full graph', filters: {}, focusedNodeId: null, collapsedGroups: [] },
+  { id: 'default-api', name: 'Frontend API bridge', filters: { languages: new Set<LanguageFilter>(['typescript', 'qml', 'endpoints', 'rust', 'python']) }, focusedNodeId: null, collapsedGroups: [] },
+  { id: 'default-rust', name: 'Rust backend', filters: { languages: new Set<LanguageFilter>(['rust', 'endpoints']) }, focusedNodeId: null, collapsedGroups: [] },
+  { id: 'default-python', name: 'Python backend', filters: { languages: new Set<LanguageFilter>(['python', 'endpoints']) }, focusedNodeId: null, collapsedGroups: [] },
+  { id: 'default-qml', name: 'QML UI', filters: { languages: new Set<LanguageFilter>(['qml', 'endpoints']) }, focusedNodeId: null, collapsedGroups: [] },
+  { id: 'default-diagnostics', name: 'Diagnostics', filters: {}, focusedNodeId: null, collapsedGroups: [] },
+]
 
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false
@@ -51,6 +63,8 @@ export default function App() {
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
   const [pinnedNodeIds, setPinnedNodeIds] = useState<Set<string>>(new Set())
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [userSavedViews, setUserSavedViews] = useState<SavedView[]>([])
   const {
     appState,
     analyzerStatus,
@@ -66,9 +80,11 @@ export default function App() {
     setSelectedNodeId,
     openProject,
     openInEditor,
+    saveNodeLayout,
     search,
     refreshSnapshot,
   } = useBackendGraph(mode)
+  const savedLayoutRef = useRef<Map<string, string>>(new Map())
 
   const graphNodes = useMemo(
     () => nodes.map(node => ({
@@ -83,16 +99,110 @@ export default function App() {
     || layoutSettings.linkLength !== DEFAULT_GRAPH_LAYOUT_SETTINGS.linkLength
     || layoutSettings.damping !== DEFAULT_GRAPH_LAYOUT_SETTINGS.damping
   const { nodes: visibleGraphNodes, edges: visibleGraphEdges } = useMemo(
-    () => applyGraphLens(graphNodes, edges, graphLens),
-    [graphNodes, edges, graphLens],
+    () => applyCollapsedGroups(applyGraphFilters(applyGraphLens(graphNodes, edges, graphLens), filters), collapsedGroups),
+    [graphNodes, edges, graphLens, filters, collapsedGroups],
   )
   const togglePinNode = useCallback((id: string) => {
+    const node = graphNodes.find(node => node.id === id)
+    const nextPinned = !(node?.pinned ?? pinnedNodeIds.has(id))
     setPinnedNodeIds(prev => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
     })
+    if (node) {
+      saveNodeLayout({ ...node, pinned: nextPinned, vx: 0, vy: 0 })
+    }
+  }, [graphNodes, pinnedNodeIds, saveNodeLayout])
+
+  const unpinAll = useCallback(() => {
+    setPinnedNodeIds(new Set())
+    graphNodes.filter(node => node.pinned).forEach(node => {
+      saveNodeLayout({ ...node, pinned: false, vx: 0, vy: 0 })
+    })
+  }, [graphNodes, saveNodeLayout])
+
+  const toggleCollapseGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
   }, [])
+
+  const handleUpdateNodes = useCallback((updatedNodes: GraphNode[]) => {
+    const changedPinned = updatedNodes.filter(node => node.pinned)
+    if (!changedPinned.length) return
+    setPinnedNodeIds(prev => {
+      let changed = false
+      const next = new Set(prev)
+      changedPinned.forEach(node => {
+        if (!next.has(node.id)) {
+          next.add(node.id)
+          changed = true
+        }
+      })
+      if (!changed) return prev
+      return next
+    })
+    for (const node of changedPinned) {
+      const signature = `${Math.round(node.x * 10) / 10}:${Math.round(node.y * 10) / 10}:${node.pinned ? 1 : 0}`
+      if (savedLayoutRef.current.get(node.id) === signature) continue
+      savedLayoutRef.current.set(node.id, signature)
+      saveNodeLayout({ ...node, vx: 0, vy: 0, pinned: true })
+    }
+  }, [saveNodeLayout])
+
+  const applySavedView = useCallback((view: SavedView) => {
+    setFilters(current => ({
+      ...current,
+      ...view.filters,
+      nodeTypes: view.filters.nodeTypes instanceof Set ? view.filters.nodeTypes : current.nodeTypes,
+      edgeTypes: view.filters.edgeTypes instanceof Set ? view.filters.edgeTypes : current.edgeTypes,
+      languages: view.filters.languages instanceof Set ? view.filters.languages : current.languages,
+    }))
+    if (view.focusedNodeId) {
+      setSelectedNodeId(view.focusedNodeId)
+    }
+  }, [setSelectedNodeId])
+
+  const loadSavedViews = useCallback(async () => {
+    try {
+      const response = await fetch('/api/views')
+      if (!response.ok) return
+      const payload = await response.json() as { views: SavedView[] }
+      setUserSavedViews((payload.views ?? []).map(normalizeSavedView))
+    } catch {
+      setUserSavedViews([])
+    }
+  }, [])
+
+  useEffect(() => {
+    loadSavedViews()
+  }, [loadSavedViews, projectName])
+
+  const saveCurrentView = useCallback(async () => {
+    const name = window.prompt('Save graph view as')
+    if (!name?.trim()) return
+    try {
+      const response = await fetch('/api/views', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          filters: serializableFilters(filters),
+          focusedNodeId: selectedNodeId,
+          collapsedGroups: [...collapsedGroups],
+          layoutOverrides: {},
+        }),
+      })
+      if (response.ok) {
+        await loadSavedViews()
+      }
+    } catch {
+      // Saved views are convenience state; graph operation should keep going if storage fails.
+    }
+  }, [collapsedGroups, filters, loadSavedViews, selectedNodeId])
 
   // keyboard shortcuts
   useEffect(() => {
@@ -208,11 +318,18 @@ export default function App() {
             labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
             onSelectNode={handleSelectNode}
-            onUpdateNodes={() => {}}
+            onUpdateNodes={handleUpdateNodes}
           />
 
           {/* floating filter bar */}
-          <FilterBar filters={filters} onFiltersChange={setFilters} />
+          <FilterBar
+            filters={filters}
+            onFiltersChange={setFilters}
+            savedViews={[...DEFAULT_VIEWS, ...userSavedViews]}
+            onApplyView={applySavedView}
+            onSaveView={saveCurrentView}
+            onUnpinAll={unpinAll}
+          />
 
           <div
             className="absolute top-3 right-5 z-20 transition-all duration-200 ease-out"
@@ -277,6 +394,8 @@ export default function App() {
           filesCount={files.length}
           message={message}
           onTogglePin={togglePinNode}
+          onToggleCollapse={toggleCollapseGroup}
+          collapsedGroups={collapsedGroups}
           onSelectNode={handleSelectNode}
           onOpenInEditor={openInEditor}
         />
@@ -385,6 +504,38 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
   )
 
   return { nodes: filteredNodes, edges: filteredEdges }
+}
+
+function serializableFilters(filters: GraphFilters) {
+  return {
+    ...filters,
+    nodeTypes: [...filters.nodeTypes],
+    edgeTypes: [...filters.edgeTypes],
+    languages: [...filters.languages],
+  }
+}
+
+function normalizeSavedView(view: SavedView): SavedView {
+  const rawFilters = view.filters as Partial<GraphFilters> & {
+    nodeTypes?: NodeType[] | Set<NodeType>
+    edgeTypes?: EdgeType[] | Set<EdgeType>
+    languages?: LanguageFilter[] | Set<LanguageFilter>
+  }
+  return {
+    ...view,
+    filters: {
+      ...view.filters,
+      nodeTypes: rawFilters.nodeTypes
+        ? rawFilters.nodeTypes instanceof Set ? rawFilters.nodeTypes : new Set(rawFilters.nodeTypes)
+        : undefined,
+      edgeTypes: rawFilters.edgeTypes
+        ? rawFilters.edgeTypes instanceof Set ? rawFilters.edgeTypes : new Set(rawFilters.edgeTypes)
+        : undefined,
+      languages: rawFilters.languages
+        ? rawFilters.languages instanceof Set ? rawFilters.languages : new Set(rawFilters.languages)
+        : undefined,
+    },
+  }
 }
 
 // ── Indexing screen ─────────────────────────────────────────────────────────

@@ -3,12 +3,12 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path as AxumPath, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use graph_builder::{
-    build_fallback_graph, enrich_api_routes_for_files, enrich_file_symbols,
+    build_fallback_graph, build_language_graph, enrich_api_routes_for_files, enrich_file_symbols,
     enrich_syntax_relationships_for_files, filter_snapshot, focus_subgraph,
     push_unique_edge_with_confidence, python, qml, typescript,
 };
@@ -22,7 +22,9 @@ use graph_core::{
 use parking_lot::RwLock;
 use project_indexer::{index_project, start_watcher};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,9 +36,11 @@ use tokio::time::{sleep, timeout, Duration};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use url::Url;
 use uuid::Uuid;
+
+type NodeLayoutState = (f64, f64, f64, f64, Option<bool>);
 
 #[derive(Parser)]
 #[command(name = "rust-code-command-center")]
@@ -346,6 +350,79 @@ struct DiagnosticsResponse {
     all_diagnostics: Vec<DiagnosticRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct LayoutStore {
+    nodes: HashMap<String, LayoutNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LayoutNode {
+    node_id: String,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    pinned: Option<bool>,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LayoutNodeInput {
+    node_id: String,
+    x: f64,
+    y: f64,
+    vx: Option<f64>,
+    vy: Option<f64>,
+    pinned: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveLayoutRequest {
+    nodes: Vec<LayoutNodeInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveNodeLayoutRequest {
+    node: LayoutNodeInput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedView {
+    id: String,
+    name: String,
+    filters: serde_json::Value,
+    focused_node_id: Option<String>,
+    collapsed_groups: Vec<String>,
+    layout_overrides: serde_json::Value,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SavedViewsStore {
+    views: Vec<SavedView>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedViewRequest {
+    name: String,
+    #[serde(default)]
+    filters: serde_json::Value,
+    focused_node_id: Option<String>,
+    #[serde(default)]
+    collapsed_groups: Vec<String>,
+    #[serde(default)]
+    layout_overrides: serde_json::Value,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -426,6 +503,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/status", get(status))
         .route("/api/graph/snapshot", get(snapshot))
         .route("/api/diagnostics", get(diagnostics))
+        .route(
+            "/api/layout",
+            get(layout_get).post(layout_save).delete(layout_clear),
+        )
+        .route("/api/layout/node", post(layout_save_node))
+        .route("/api/views", get(views_get).post(views_create))
+        .route("/api/views/{id}", put(views_update).delete(views_delete))
         .route("/api/node/{id}", get(node))
         .route("/api/node/{id}/details", get(node_details))
         .route("/api/search", get(search))
@@ -494,6 +578,197 @@ async fn diagnostics(State(state): State<AppStateHandle>) -> Json<DiagnosticsRes
         diagnostics_by_node,
         all_diagnostics,
     })
+}
+
+async fn layout_get(State(state): State<AppStateHandle>) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    match load_layout(&project_root) {
+        Ok(layout) => (StatusCode::OK, Json(layout)).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load layout: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn layout_save(
+    State(state): State<AppStateHandle>,
+    Json(request): Json<SaveLayoutRequest>,
+) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    let updated_at = timestamp();
+    let mut layout = LayoutStore::default();
+    for node in request.nodes {
+        layout.nodes.insert(
+            node.node_id.clone(),
+            layout_node_from_input(node, updated_at.clone()),
+        );
+    }
+    if let Err(error) = save_layout(&project_root, &layout) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save layout: {error}"),
+        )
+            .into_response();
+    }
+    apply_layout_store_to_snapshot(&mut state.graph.write(), &layout);
+    (StatusCode::OK, Json(layout)).into_response()
+}
+
+async fn layout_save_node(
+    State(state): State<AppStateHandle>,
+    Json(request): Json<SaveNodeLayoutRequest>,
+) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    let mut layout = match load_layout(&project_root) {
+        Ok(layout) => layout,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load layout: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let node = layout_node_from_input(request.node, timestamp());
+    layout.nodes.insert(node.node_id.clone(), node.clone());
+    if let Err(error) = save_layout(&project_root, &layout) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save layout: {error}"),
+        )
+            .into_response();
+    }
+    apply_layout_node_to_snapshot(&mut state.graph.write(), &node);
+    (StatusCode::OK, Json(node)).into_response()
+}
+
+async fn layout_clear(State(state): State<AppStateHandle>) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    match clear_layout(&project_root) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to clear layout: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn views_get(State(state): State<AppStateHandle>) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    match load_views(&project_root) {
+        Ok(views) => (StatusCode::OK, Json(views)).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load views: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn views_create(
+    State(state): State<AppStateHandle>,
+    Json(request): Json<SavedViewRequest>,
+) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    let mut store = match load_views(&project_root) {
+        Ok(store) => store,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load views: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let now = timestamp();
+    let view = SavedView {
+        id: Uuid::new_v4().to_string(),
+        name: request.name,
+        filters: request.filters,
+        focused_node_id: request.focused_node_id,
+        collapsed_groups: request.collapsed_groups,
+        layout_overrides: request.layout_overrides,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    store.views.push(view.clone());
+    if let Err(error) = save_views(&project_root, &store) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save views: {error}"),
+        )
+            .into_response();
+    }
+    (StatusCode::CREATED, Json(view)).into_response()
+}
+
+async fn views_update(
+    State(state): State<AppStateHandle>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<SavedViewRequest>,
+) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    let mut store = match load_views(&project_root) {
+        Ok(store) => store,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load views: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let Some(view) = store.views.iter_mut().find(|view| view.id == id) else {
+        return (StatusCode::NOT_FOUND, "view not found").into_response();
+    };
+    view.name = request.name;
+    view.filters = request.filters;
+    view.focused_node_id = request.focused_node_id;
+    view.collapsed_groups = request.collapsed_groups;
+    view.layout_overrides = request.layout_overrides;
+    view.updated_at = timestamp();
+    let response = view.clone();
+    if let Err(error) = save_views(&project_root, &store) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save views: {error}"),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn views_delete(
+    State(state): State<AppStateHandle>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let project_root = state.project_root.read().clone();
+    let mut store = match load_views(&project_root) {
+        Ok(store) => store,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load views: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let old_len = store.views.len();
+    store.views.retain(|view| view.id != id);
+    if old_len == store.views.len() {
+        return (StatusCode::NOT_FOUND, "view not found").into_response();
+    }
+    if let Err(error) = save_views(&project_root, &store) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save views: {error}"),
+        )
+            .into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn node(
@@ -1131,15 +1406,19 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
     let index = match index_project(&project_root) {
         Ok(index) => index,
         Err(error) => {
-            error!(?error, "failed to index project");
-            let mut status = state.status.read().clone();
-            status.app_state = AppState::Error;
-            status.analyzer_status = AnalyzerStatus::Error;
-            status.message = Some("No Cargo.toml found in project root.".into());
-            status.progress = None;
-            *state.status.write() = status.clone();
-            state.graph.write().status = status.clone();
-            let _ = state.ws_tx.send(ServerMessage::AnalyzerStatus(status));
+            warn!(
+                ?error,
+                "cargo project index unavailable; building language graph"
+            );
+            update_status(&state, |status| {
+                status.app_state = AppState::Normal;
+                status.analyzer_status = AnalyzerStatus::Fallback;
+                status.message = Some("No Cargo.toml found; Rust analysis disabled".into());
+                status.progress = Some(80);
+            });
+            let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
+            snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
+            publish_snapshot(&state, snapshot);
             state.is_indexing.store(false, Ordering::SeqCst);
             return;
         }
@@ -1229,30 +1508,6 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         status.progress = Some(20);
     });
 
-    let index = match index_project(&project_root) {
-        Ok(index) => index,
-        Err(error) => {
-            warn!(?error, "incremental index failed; keeping current graph");
-            state.is_indexing.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-
-    let rust_files = changed_files
-        .iter()
-        .filter(|file| file.ends_with(".rs"))
-        .filter_map(|file| {
-            index
-                .files
-                .iter()
-                .find(|indexed| indexed.relative_path == *file)
-                .cloned()
-        })
-        .collect::<Vec<_>>();
-    let only_rust = !rust_files.is_empty()
-        && changed_files
-            .iter()
-            .all(|file| file.ends_with(".rs") || file.ends_with("Cargo.toml"));
     let ts_files = changed_files
         .iter()
         .filter(|file| typescript::is_typescript_path(file))
@@ -1277,6 +1532,33 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         .cloned()
         .collect::<Vec<_>>();
     let only_qml = !qml_files.is_empty() && changed_files.iter().all(|file| qml::is_qml_path(file));
+    let index = match index_project(&project_root) {
+        Ok(index) => Some(index),
+        Err(error) => {
+            warn!(?error, "cargo project index unavailable during patch");
+            None
+        }
+    };
+    let rust_files = index
+        .as_ref()
+        .map(|index| {
+            changed_files
+                .iter()
+                .filter(|file| file.ends_with(".rs"))
+                .filter_map(|file| {
+                    index
+                        .files
+                        .iter()
+                        .find(|indexed| indexed.relative_path == *file)
+                        .cloned()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let only_rust = !rust_files.is_empty()
+        && changed_files
+            .iter()
+            .all(|file| file.ends_with(".rs") || file.ends_with("Cargo.toml"));
 
     if only_rust {
         match index_changed_rust_files(&state, &project_root, rust_files, changed_files.clone())
@@ -1331,7 +1613,11 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         }
     }
 
-    rebuild_patch_snapshot(state, project_root, index, changed_files).await;
+    if let Some(index) = index {
+        rebuild_patch_snapshot(state, project_root, index, changed_files).await;
+    } else {
+        rebuild_language_patch_snapshot(state, project_root, changed_files).await;
+    }
 }
 
 async fn rebuild_patch_snapshot(
@@ -1377,6 +1663,28 @@ async fn rebuild_patch_snapshot(
     state.is_indexing.store(false, Ordering::SeqCst);
 }
 
+async fn rebuild_language_patch_snapshot(
+    state: AppStateHandle,
+    project_root: PathBuf,
+    changed_files: Vec<String>,
+) {
+    let old_snapshot = state.graph.read().clone();
+    let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
+    snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
+    let diagnostics = state
+        .diagnostics_by_file
+        .read()
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    apply_diagnostics_to_files(&mut snapshot, &diagnostics);
+    let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
+    *state.graph.write() = snapshot;
+    let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
+    state.is_indexing.store(false, Ordering::SeqCst);
+}
+
 async fn index_changed_rust_files(
     state: &AppStateHandle,
     project_root: &Path,
@@ -1392,7 +1700,7 @@ async fn index_changed_rust_files(
     let old_positions = old_snapshot
         .nodes
         .iter()
-        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .map(|node| (node.id.clone(), node_layout_state(node)))
         .collect::<HashMap<_, _>>();
 
     for file in &files {
@@ -1459,7 +1767,7 @@ fn index_changed_typescript_files(
     let old_positions = old_snapshot
         .nodes
         .iter()
-        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .map(|node| (node.id.clone(), node_layout_state(node)))
         .collect::<HashMap<_, _>>();
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
@@ -1496,7 +1804,7 @@ fn index_changed_python_files(
     let old_positions = old_snapshot
         .nodes
         .iter()
-        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .map(|node| (node.id.clone(), node_layout_state(node)))
         .collect::<HashMap<_, _>>();
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
@@ -1529,7 +1837,7 @@ fn index_changed_qml_files(
     let old_positions = old_snapshot
         .nodes
         .iter()
-        .map(|node| (node.id.clone(), (node.x, node.y, node.vx, node.vy)))
+        .map(|node| (node.id.clone(), node_layout_state(node)))
         .collect::<HashMap<_, _>>();
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
@@ -1570,16 +1878,21 @@ fn remove_file_symbols_and_edges(snapshot: &mut GraphSnapshot, changed_files: &H
 
 fn restore_existing_positions(
     snapshot: &mut GraphSnapshot,
-    old_positions: &HashMap<String, (f64, f64, f64, f64)>,
+    old_positions: &HashMap<String, NodeLayoutState>,
 ) {
     for node in &mut snapshot.nodes {
-        if let Some((x, y, vx, vy)) = old_positions.get(&node.id) {
+        if let Some((x, y, vx, vy, pinned)) = old_positions.get(&node.id) {
             node.x = *x;
             node.y = *y;
             node.vx = *vx;
             node.vy = *vy;
+            node.pinned = *pinned;
         }
     }
+}
+
+fn node_layout_state(node: &GraphNode) -> NodeLayoutState {
+    (node.x, node.y, node.vx, node.vy, node.pinned)
 }
 
 fn diff_snapshots(
@@ -2189,6 +2502,8 @@ where
 }
 
 fn publish_snapshot(state: &AppStateHandle, mut snapshot: GraphSnapshot) {
+    let project_root = state.project_root.read().clone();
+    apply_saved_layout(&mut snapshot, &project_root);
     snapshot.status.last_updated = Some(timestamp());
     *state.status.write() = snapshot.status.clone();
     *state.graph.write() = snapshot.clone();
@@ -2235,6 +2550,121 @@ fn analysis_event(
         timestamp: timestamp(),
         file,
     }
+}
+
+fn layout_node_from_input(input: LayoutNodeInput, updated_at: String) -> LayoutNode {
+    LayoutNode {
+        node_id: input.node_id,
+        x: input.x,
+        y: input.y,
+        vx: input.vx.unwrap_or_default(),
+        vy: input.vy.unwrap_or_default(),
+        pinned: input.pinned,
+        updated_at,
+    }
+}
+
+fn storage_dir_for_project(project_root: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    project_root.display().to_string().hash(&mut hasher);
+    let project_hash = format!("{:016x}", hasher.finish());
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("rust-watcher").join(project_hash)
+}
+
+fn layout_path(project_root: &Path) -> PathBuf {
+    storage_dir_for_project(project_root).join("layout.json")
+}
+
+fn views_path(project_root: &Path) -> PathBuf {
+    storage_dir_for_project(project_root).join("views.json")
+}
+
+fn load_layout(project_root: &Path) -> Result<LayoutStore> {
+    let path = layout_path(project_root);
+    if !path.exists() {
+        return Ok(LayoutStore::default());
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn save_layout(project_root: &Path, layout: &LayoutStore) -> Result<()> {
+    let path = layout_path(project_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(layout).context("failed to serialize layout")?;
+    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn clear_layout(project_root: &Path) -> Result<()> {
+    let path = layout_path(project_root);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn apply_saved_layout(snapshot: &mut GraphSnapshot, project_root: &Path) {
+    match load_layout(project_root) {
+        Ok(layout) => apply_layout_store_to_snapshot(snapshot, &layout),
+        Err(error) => warn!(?error, "failed to load saved layout"),
+    }
+}
+
+fn apply_layout_store_to_snapshot(snapshot: &mut GraphSnapshot, layout: &LayoutStore) {
+    for node in &mut snapshot.nodes {
+        if let Some(layout_node) = layout.nodes.get(&node.id) {
+            apply_layout_node(node, layout_node);
+        }
+    }
+}
+
+fn apply_layout_node_to_snapshot(snapshot: &mut GraphSnapshot, layout_node: &LayoutNode) {
+    if let Some(node) = snapshot
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == layout_node.node_id)
+    {
+        apply_layout_node(node, layout_node);
+    }
+}
+
+fn apply_layout_node(node: &mut GraphNode, layout_node: &LayoutNode) {
+    node.x = layout_node.x;
+    node.y = layout_node.y;
+    node.vx = layout_node.vx;
+    node.vy = layout_node.vy;
+    if layout_node.pinned.is_some() {
+        node.pinned = layout_node.pinned;
+    }
+}
+
+fn load_views(project_root: &Path) -> Result<SavedViewsStore> {
+    let path = views_path(project_root);
+    if !path.exists() {
+        return Ok(SavedViewsStore::default());
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn save_views(project_root: &Path, views: &SavedViewsStore) -> Result<()> {
+    let path = views_path(project_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(views).context("failed to serialize views")?;
+    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn timestamp() -> String {
@@ -2543,7 +2973,7 @@ mod tests {
         node.y = -7.0;
         node.vx = 1.0;
         node.vy = 2.0;
-        let positions = HashMap::from([(node.id.clone(), (node.x, node.y, node.vx, node.vy))]);
+        let positions = HashMap::from([(node.id.clone(), node_layout_state(&node))]);
         let mut updated = test_node("main", Some("src/main.rs"), Some("app"));
         let mut snapshot = GraphSnapshot {
             nodes: vec![updated.clone()],
@@ -2592,5 +3022,116 @@ mod tests {
         let file = Path::new("/tmp/project/src/main.rs");
         assert_eq!(analyzer.increment_file_version(file), 2);
         assert_eq!(analyzer.increment_file_version(file), 3);
+    }
+
+    fn temp_project_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rust-watcher-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn missing_layout_file_is_not_an_error() {
+        let root = temp_project_root("missing-layout");
+        let layout = load_layout(&root).unwrap();
+        assert!(layout.nodes.is_empty());
+        let _ = std::fs::remove_dir_all(storage_dir_for_project(&root));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn layout_save_load_roundtrip_and_clear() {
+        let root = temp_project_root("layout-roundtrip");
+        let layout = LayoutStore {
+            nodes: HashMap::from([(
+                "node:a".into(),
+                LayoutNode {
+                    node_id: "node:a".into(),
+                    x: 12.0,
+                    y: -8.0,
+                    vx: 0.5,
+                    vy: -0.25,
+                    pinned: Some(true),
+                    updated_at: "1".into(),
+                },
+            )]),
+        };
+        save_layout(&root, &layout).unwrap();
+        let loaded = load_layout(&root).unwrap();
+        assert_eq!(loaded.nodes["node:a"].x, 12.0);
+        assert_eq!(loaded.nodes["node:a"].pinned, Some(true));
+        clear_layout(&root).unwrap();
+        assert!(load_layout(&root).unwrap().nodes.is_empty());
+        let _ = std::fs::remove_dir_all(storage_dir_for_project(&root));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn layout_applies_to_snapshot_and_ignores_stale_nodes() {
+        let mut node = test_node("main", Some("src/main.rs"), Some("app"));
+        node.id = "node:live".into();
+        let mut snapshot = GraphSnapshot {
+            nodes: vec![node],
+            edges: Vec::new(),
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        };
+        let layout = LayoutStore {
+            nodes: HashMap::from([
+                (
+                    "node:live".into(),
+                    LayoutNode {
+                        node_id: "node:live".into(),
+                        x: 42.0,
+                        y: 9.0,
+                        vx: 0.0,
+                        vy: 0.0,
+                        pinned: Some(true),
+                        updated_at: "1".into(),
+                    },
+                ),
+                (
+                    "node:stale".into(),
+                    LayoutNode {
+                        node_id: "node:stale".into(),
+                        x: 1.0,
+                        y: 1.0,
+                        vx: 1.0,
+                        vy: 1.0,
+                        pinned: Some(true),
+                        updated_at: "1".into(),
+                    },
+                ),
+            ]),
+        };
+        apply_layout_store_to_snapshot(&mut snapshot, &layout);
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.nodes[0].x, 42.0);
+        assert_eq!(snapshot.nodes[0].pinned, Some(true));
+    }
+
+    #[test]
+    fn saved_views_roundtrip() {
+        let root = temp_project_root("views-roundtrip");
+        let views = SavedViewsStore {
+            views: vec![SavedView {
+                id: "view:1".into(),
+                name: "Backend".into(),
+                filters: serde_json::json!({ "languages": ["rust"] }),
+                focused_node_id: Some("node:a".into()),
+                collapsed_groups: vec!["file:src/main.rs".into()],
+                layout_overrides: serde_json::json!({}),
+                created_at: "1".into(),
+                updated_at: "2".into(),
+            }],
+        };
+        save_views(&root, &views).unwrap();
+        let loaded = load_views(&root).unwrap();
+        assert_eq!(loaded.views.len(), 1);
+        assert_eq!(loaded.views[0].name, "Backend");
+        assert_eq!(loaded.views[0].collapsed_groups, vec!["file:src/main.rs"]);
+        let _ = std::fs::remove_dir_all(storage_dir_for_project(&root));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

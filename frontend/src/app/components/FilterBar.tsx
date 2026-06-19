@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { Filter, X, ChevronDown } from 'lucide-react'
-import type { GraphFilters, NodeType, EdgeType } from '../types'
+import type { GraphFilters, NodeType, EdgeType, LanguageFilter, SavedView } from '../types'
 
 interface FilterBarProps {
   filters: GraphFilters
   onFiltersChange: (f: GraphFilters) => void
+  savedViews?: SavedView[]
+  onApplyView?: (view: SavedView) => void
+  onSaveView?: () => void
+  onUnpinAll?: () => void
 }
 
 const ALL_NODE_TYPES: NodeType[] = ['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate']
@@ -19,8 +23,16 @@ const NODE_COLORS: Record<NodeType, string> = {
 }
 
 const DEPTH_OPTIONS: Array<1 | 2 | 3 | 'full'> = [1, 2, 3, 'full']
+const LANGUAGE_FILTERS: Array<{ id: LanguageFilter; label: string; color: string }> = [
+  { id: 'rust', label: 'Rust', color: '#EC4899' },
+  { id: 'typescript', label: 'TS/JS', color: '#14B8A6' },
+  { id: 'python', label: 'Python', color: '#0EA5E9' },
+  { id: 'qml', label: 'QML', color: '#38BDF8' },
+  { id: 'endpoints', label: 'Endpoints', color: '#E11D48' },
+  { id: 'external', label: 'External', color: '#7D8795' },
+]
 
-export function FilterBar({ filters, onFiltersChange }: FilterBarProps) {
+export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyView, onSaveView, onUnpinAll }: FilterBarProps) {
   const [expanded, setExpanded] = useState(false)
 
   const toggleNodeType = (t: NodeType) => {
@@ -35,7 +47,15 @@ export function FilterBar({ filters, onFiltersChange }: FilterBarProps) {
     onFiltersChange({ ...filters, edgeTypes: next })
   }
 
-  const activeFilterCount = (ALL_NODE_TYPES.length - filters.nodeTypes.size) + (ALL_EDGE_TYPES.length - filters.edgeTypes.size)
+  const toggleLanguage = (language: LanguageFilter) => {
+    const next = new Set(filters.languages)
+    next.has(language) ? next.delete(language) : next.add(language)
+    onFiltersChange({ ...filters, languages: next })
+  }
+
+  const activeFilterCount = (ALL_NODE_TYPES.length - filters.nodeTypes.size)
+    + (ALL_EDGE_TYPES.length - filters.edgeTypes.size)
+    + (LANGUAGE_FILTERS.length - filters.languages.size)
 
   return (
     <div
@@ -107,6 +127,20 @@ export function FilterBar({ filters, onFiltersChange }: FilterBarProps) {
               active={filters.onlyPublicAPI}
               onToggle={() => onFiltersChange({ ...filters, onlyPublicAPI: !filters.onlyPublicAPI })}
             />
+            {onUnpinAll && (
+              <QuickToggle
+                label="Unpin"
+                active={false}
+                onToggle={onUnpinAll}
+              />
+            )}
+            {onSaveView && (
+              <QuickToggle
+                label="Save"
+                active={false}
+                onToggle={onSaveView}
+              />
+            )}
           </div>
 
           <ChevronDown size={13} color="var(--cc-text-subtle)" style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
@@ -116,6 +150,38 @@ export function FilterBar({ filters, onFiltersChange }: FilterBarProps) {
         {expanded && (
           <div style={{ borderTop: '1px solid var(--cc-border)', padding: '10px 12px' }}>
             <div className="flex gap-6">
+              {/* languages */}
+              <div style={{ maxWidth: 170 }}>
+                <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Languages</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {LANGUAGE_FILTERS.map(language => (
+                    <FilterChip
+                      key={language.id}
+                      label={language.label}
+                      active={filters.languages.has(language.id)}
+                      color={language.color}
+                      onToggle={() => toggleLanguage(language.id)}
+                    />
+                  ))}
+                </div>
+                {!!savedViews.length && onApplyView && (
+                  <div style={{ marginTop: 10 }}>
+                    <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Views</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {savedViews.map(view => (
+                        <FilterChip
+                          key={view.id}
+                          label={view.name}
+                          active
+                          color="#64748B"
+                          onToggle={() => onApplyView(view)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* node types */}
               <div>
                 <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Node Types</p>
