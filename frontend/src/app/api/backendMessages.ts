@@ -10,3 +10,8 @@ export function shouldRefreshSnapshotForPatch(patch: GraphPatch, localNodeCount:
     || patch.removedEdgeIds.length
   )
 }
+
+export function nextLocalNodeCountAfterPatch(localNodeCount: number, patch: GraphPatch) {
+  if (shouldRefreshSnapshotForPatch(patch, localNodeCount)) return localNodeCount
+  return Math.max(0, localNodeCount + patch.addedNodes.length - patch.removedNodeIds.length)
+}

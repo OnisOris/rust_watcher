@@ -69,6 +69,16 @@ export function useBackendGraph(mode: GraphMode) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [backendAvailable, setBackendAvailable] = useState(true)
   const snapshotRequestSeq = useRef(0)
+  const localNodeCountRef = useRef(0)
+  const applyPatchRef = useRef<(patch: GraphPatch) => boolean>(() => false)
+  const applySnapshotRef = useRef<(snapshot: GraphSnapshot) => void>(() => {})
+  const applyStatusRef = useRef<(status: AppStatus) => void>(() => {})
+  const refreshSnapshotRef = useRef<() => Promise<void>>(async () => {})
+  const applyDevFallbackRef = useRef<() => void>(() => {})
+
+  useEffect(() => {
+    localNodeCountRef.current = nodes.length
+  }, [nodes.length])
 
   const applyStatus = useCallback((status: AppStatus) => {
     setAppState(status.appState)
@@ -80,12 +90,17 @@ export function useBackendGraph(mode: GraphMode) {
   }, [])
 
   const applySnapshot = useCallback((snapshot: GraphSnapshot) => {
+    localNodeCountRef.current = snapshot.nodes.length
     setNodes(snapshot.nodes)
     setEdges(snapshot.edges)
     setFiles(snapshot.files)
     setEvents(snapshot.events)
     applyStatus(snapshot.status)
   }, [applyStatus])
+
+  useEffect(() => {
+    applySnapshotRef.current = applySnapshot
+  }, [applySnapshot])
 
   const applyDiagnosticsSnapshot = useCallback((diagnosticsByFileRecord: Record<string, DiagnosticRecord[]>) => {
     const nextByFile = diagnosticsMapFromRecord(diagnosticsByFileRecord)
@@ -102,9 +117,13 @@ export function useBackendGraph(mode: GraphMode) {
   }, [applyDiagnosticsSnapshot])
 
   const applyPatch = useCallback((patch: GraphPatch) => {
-    const needsSnapshot = shouldRefreshSnapshotForPatch(patch, nodes.length)
+    const needsSnapshot = shouldRefreshSnapshotForPatch(patch, localNodeCountRef.current)
     if (!needsSnapshot) {
-      setNodes(prev => applyGraphPatchToNodes(prev, patch))
+      setNodes(prev => {
+        const next = applyGraphPatchToNodes(prev, patch)
+        localNodeCountRef.current = next.length
+        return next
+      })
       setEdges(prev => applyGraphPatchToEdges(prev, patch))
     }
     if (patch.diagnostics?.length || patch.changedFiles?.length) {
@@ -116,7 +135,11 @@ export function useBackendGraph(mode: GraphMode) {
       })
     }
     return needsSnapshot
-  }, [nodes.length])
+  }, [])
+
+  useEffect(() => {
+    applyPatchRef.current = applyPatch
+  }, [applyPatch])
 
   const applyDevFallback = useCallback(() => {
     setBackendAvailable(false)
@@ -129,6 +152,7 @@ export function useBackendGraph(mode: GraphMode) {
       })
       return
     }
+    localNodeCountRef.current = INITIAL_NODES.length
     setNodes(INITIAL_NODES)
     setEdges(INITIAL_EDGES)
     setFiles(PROJECT_FILES)
@@ -137,6 +161,11 @@ export function useBackendGraph(mode: GraphMode) {
     setDiagnosticsByNode(new Map())
     applyStatus(MOCK_STATUS)
   }, [applyStatus])
+
+  useEffect(() => {
+    applyStatusRef.current = applyStatus
+    applyDevFallbackRef.current = applyDevFallback
+  }, [applyDevFallback, applyStatus])
 
   const refreshSnapshot = useCallback(async (_nextMode?: GraphMode) => {
     const requestSeq = ++snapshotRequestSeq.current
@@ -152,6 +181,12 @@ export function useBackendGraph(mode: GraphMode) {
       applyDevFallback()
     }
   }, [applyDevFallback, applySnapshot, refreshDiagnostics])
+
+  useEffect(() => {
+    refreshSnapshotRef.current = async () => {
+      await refreshSnapshot()
+    }
+  }, [refreshSnapshot])
 
   useEffect(() => {
     let cancelled = false
@@ -182,16 +217,16 @@ export function useBackendGraph(mode: GraphMode) {
     socket.onmessage = event => {
       const message = JSON.parse(event.data) as ServerMessage
       if (message.type === 'graph_snapshot') {
-        applySnapshot(message.payload)
+        applySnapshotRef.current(message.payload)
       } else if (message.type === 'graph_patch') {
         if (message.payload.fullRebuild) {
-          void refreshSnapshot()
+          void refreshSnapshotRef.current()
         } else {
-          const needsSnapshot = applyPatch(message.payload)
-          if (needsSnapshot) void refreshSnapshot()
+          const needsSnapshot = applyPatchRef.current(message.payload)
+          if (needsSnapshot) void refreshSnapshotRef.current()
         }
       } else if (message.type === 'analyzer_status') {
-        applyStatus(message.payload)
+        applyStatusRef.current(message.payload)
       } else if (message.type === 'analysis_event') {
         setEvents(prev => [message.payload, ...prev].slice(0, 200))
       } else if (message.type === 'error') {
@@ -199,10 +234,10 @@ export function useBackendGraph(mode: GraphMode) {
       }
     }
     socket.onerror = () => {
-      if (DEV_FALLBACK) applyDevFallback()
+      if (DEV_FALLBACK) applyDevFallbackRef.current()
     }
     return () => socket.close()
-  }, [applyDevFallback, applyPatch, applySnapshot, applyStatus, backendAvailable, refreshSnapshot])
+  }, [backendAvailable])
 
   const openProject = useCallback(async (path?: string) => {
     try {
