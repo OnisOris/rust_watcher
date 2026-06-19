@@ -31,6 +31,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
+use url::Url;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -775,7 +776,7 @@ async fn websocket(socket: WebSocket, state: AppStateHandle) {
     let (mut sender, mut receiver) = socket.split();
     let initial = ServerMessage::GraphSnapshot(state.graph.read().clone());
     if let Ok(text) = serde_json::to_string(&initial) {
-        let _ = sender.send(Message::Text(text)).await;
+        let _ = sender.send(Message::Text(text.into())).await;
     }
 
     let mut rx = state.ws_tx.subscribe();
@@ -783,7 +784,7 @@ async fn websocket(socket: WebSocket, state: AppStateHandle) {
         while let Ok(message) = rx.recv().await {
             match serde_json::to_string(&message) {
                 Ok(text) => {
-                    if sender.send(Message::Text(text)).await.is_err() {
+                    if sender.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
                 }
@@ -1003,7 +1004,10 @@ async fn enrich_semantic_call_edges(
                 }
             };
             for call in outgoing {
-                let Ok(target_path) = call.to.uri.to_file_path() else {
+                let Some(target_path) = Url::parse(call.to.uri.as_str())
+                    .ok()
+                    .and_then(|uri| uri.to_file_path().ok())
+                else {
                     continue;
                 };
                 if let Some(target) = symbol_index.find_by_uri_path_position(

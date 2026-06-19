@@ -4,7 +4,8 @@ use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionResponse, InitializeParams,
     InitializedParams, Location, Position, ReferenceContext, ReferenceParams, SymbolInformation,
-    TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams, WorkspaceFolder,
+    TextDocumentIdentifier, TextDocumentPositionParams, Uri, WorkDoneProgressParams,
+    WorkspaceFolder,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -75,8 +76,7 @@ impl RaClient {
     }
 
     pub async fn initialize(&self, root: &Path) -> Result<Value> {
-        let root_uri = Url::from_directory_path(root)
-            .map_err(|_| anyhow!("failed to convert project root to file URL"))?;
+        let root_uri = directory_uri(root)?;
         #[allow(deprecated)]
         let params = InitializeParams {
             root_uri: Some(root_uri.clone()),
@@ -106,8 +106,7 @@ impl RaClient {
     }
 
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<DiscoveredSymbol>> {
-        let uri = Url::from_file_path(file)
-            .map_err(|_| anyhow!("failed to convert file path to URL: {}", file.display()))?;
+        let uri = file_uri(file)?;
         let params = DocumentSymbolParams {
             text_document: TextDocumentIdentifier { uri },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -332,12 +331,33 @@ fn text_document_position_params(
     line: u32,
     character: u32,
 ) -> Result<TextDocumentPositionParams> {
-    let uri = Url::from_file_path(file)
-        .map_err(|_| anyhow!("failed to convert file path to URL: {}", file.display()))?;
+    let uri = file_uri(file)?;
     Ok(TextDocumentPositionParams {
         text_document: TextDocumentIdentifier { uri },
         position: Position { line, character },
     })
+}
+
+fn directory_uri(path: &Path) -> Result<Uri> {
+    let url = Url::from_directory_path(path).map_err(|_| {
+        anyhow!(
+            "failed to convert directory path to file URL: {}",
+            path.display()
+        )
+    })?;
+    parse_lsp_uri(url)
+}
+
+fn file_uri(path: &Path) -> Result<Uri> {
+    let url = Url::from_file_path(path)
+        .map_err(|_| anyhow!("failed to convert file path to URL: {}", path.display()))?;
+    parse_lsp_uri(url)
+}
+
+fn parse_lsp_uri(url: Url) -> Result<Uri> {
+    url.as_str()
+        .parse()
+        .with_context(|| format!("failed to parse LSP URI: {url}"))
 }
 
 fn convert_document_symbol(symbol: &DocumentSymbol, file: &str) -> DiscoveredSymbol {

@@ -149,7 +149,7 @@ fn indexed_package(pkg: &Package) -> Result<IndexedPackage> {
         .into_iter()
         .collect();
     Ok(IndexedPackage {
-        name: pkg.name.clone(),
+        name: pkg.name.to_string(),
         manifest_path,
         package_root,
         dependencies,
