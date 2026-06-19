@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::process::Command;
@@ -71,6 +72,7 @@ struct AppStateHandle {
     ws_tx: broadcast::Sender<ServerMessage>,
     rust_analyzer: PathBuf,
     watcher: Arc<RwLock<Option<notify::RecommendedWatcher>>>,
+    is_indexing: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +171,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         ws_tx,
         rust_analyzer: args.rust_analyzer.clone(),
         watcher: Arc::new(RwLock::new(None)),
+        is_indexing: Arc::new(AtomicBool::new(false)),
     };
     install_watcher(&state, project_root.clone());
 
@@ -727,6 +730,9 @@ fn install_watcher(state: &AppStateHandle, root: PathBuf) {
     let watch_state = state.clone();
     match start_watcher(root.clone(), move |event| {
         let state = watch_state.clone();
+        if state.is_indexing.load(Ordering::Relaxed) {
+            return;
+        }
         let changed_path = event
             .paths
             .first()
@@ -803,6 +809,10 @@ async fn websocket(socket: WebSocket, state: AppStateHandle) {
 }
 
 async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
+    if state.is_indexing.swap(true, Ordering::SeqCst) {
+        info!(project_root = %project_root.display(), "indexing already in progress, skipping");
+        return;
+    }
     info!(project_root = %project_root.display(), "indexing start");
     update_status(&state, |status| {
         status.app_state = AppState::Indexing;
@@ -828,6 +838,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             *state.status.write() = status.clone();
             state.graph.write().status = status.clone();
             let _ = state.ws_tx.send(ServerMessage::AnalyzerStatus(status));
+            state.is_indexing.store(false, Ordering::SeqCst);
             return;
         }
     };
@@ -863,6 +874,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             files = state.graph.read().files.len(),
             "indexing finish"
         );
+        state.is_indexing.store(false, Ordering::SeqCst);
         return;
     }
 
@@ -926,6 +938,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
         files = state.graph.read().files.len(),
         "indexing finish"
     );
+    state.is_indexing.store(false, Ordering::SeqCst);
 }
 
 fn publish_analyzer_fallback(
