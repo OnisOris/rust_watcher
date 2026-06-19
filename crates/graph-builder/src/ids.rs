@@ -31,6 +31,7 @@ pub(crate) fn language_for_file(path: &str) -> Option<String> {
     {
         Some("rs") => Some(LanguageId::Rust.to_string()),
         Some("py") => Some(LanguageId::Python.to_string()),
+        Some("qml") => Some(LanguageId::Qml.to_string()),
         Some("ts" | "tsx") => Some(LanguageId::TypeScript.to_string()),
         Some("js" | "jsx") => Some(LanguageId::JavaScript.to_string()),
         _ => None,
@@ -67,6 +68,7 @@ pub(crate) fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, lin
     let prefix = match node_type {
         NodeType::Struct => "struct",
         NodeType::Class => "class",
+        NodeType::Object => "object",
         NodeType::Enum => "enum",
         NodeType::Trait => "trait",
         NodeType::Impl => "impl",
@@ -76,6 +78,9 @@ pub(crate) fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, lin
         NodeType::Hook => "hook",
         NodeType::Interface => "interface",
         NodeType::TypeAlias => "type",
+        NodeType::Property => "property",
+        NodeType::Signal => "signal",
+        NodeType::Handler => "handler",
         NodeType::Endpoint => "endpoint",
         NodeType::Macro => "macro",
         NodeType::Module => "module",

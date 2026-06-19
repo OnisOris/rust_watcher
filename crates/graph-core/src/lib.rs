@@ -11,6 +11,7 @@ pub enum LanguageId {
     TypeScript,
     JavaScript,
     Python,
+    Qml,
     Other(String),
 }
 
@@ -21,6 +22,7 @@ impl LanguageId {
             Self::TypeScript => "typescript",
             Self::JavaScript => "javascript",
             Self::Python => "python",
+            Self::Qml => "qml",
             Self::Other(language) => language.as_str(),
         }
     }
@@ -39,6 +41,7 @@ impl From<&str> for LanguageId {
             "ts" | "tsx" | "typescript" => Self::TypeScript,
             "js" | "jsx" | "javascript" => Self::JavaScript,
             "py" | "python" => Self::Python,
+            "qml" => Self::Qml,
             other => Self::Other(other.to_string()),
         }
     }
@@ -155,6 +158,7 @@ pub enum NodeType {
     Module,
     Struct,
     Class,
+    Object,
     Enum,
     Trait,
     Impl,
@@ -164,6 +168,9 @@ pub enum NodeType {
     Hook,
     Interface,
     TypeAlias,
+    Property,
+    Signal,
+    Handler,
     Endpoint,
     Macro,
     ExternalCrate,
@@ -460,6 +467,9 @@ pub enum SymbolKindName {
     Hook,
     Interface,
     TypeAlias,
+    Property,
+    Signal,
+    Handler,
     Endpoint,
     ExternalCrate,
     Other,
@@ -472,6 +482,7 @@ impl SymbolKindName {
             NodeType::Module => Self::Module,
             NodeType::Struct => Self::Struct,
             NodeType::Class => Self::Class,
+            NodeType::Object => Self::Object,
             NodeType::Enum => Self::Enum,
             NodeType::Trait => Self::Trait,
             NodeType::Function => Self::Function,
@@ -482,6 +493,9 @@ impl SymbolKindName {
             NodeType::Hook => Self::Hook,
             NodeType::Interface => Self::Interface,
             NodeType::TypeAlias => Self::TypeAlias,
+            NodeType::Property => Self::Property,
+            NodeType::Signal => Self::Signal,
+            NodeType::Handler => Self::Handler,
             NodeType::Endpoint => Self::Endpoint,
             NodeType::ExternalCrate => Self::ExternalCrate,
         }

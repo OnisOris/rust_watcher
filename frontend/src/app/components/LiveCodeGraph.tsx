@@ -22,6 +22,7 @@ const NODE_COLORS: Record<NodeType, string> = {
   Module: '#8B5CF6',
   Struct: '#06B6D4',
   Class: '#0EA5E9',
+  Object: '#38BDF8',
   Enum: '#F59E0B',
   Trait: '#10B981',
   Impl: '#6366F1',
@@ -31,6 +32,9 @@ const NODE_COLORS: Record<NodeType, string> = {
   Hook: '#A855F7',
   Interface: '#22C55E',
   TypeAlias: '#84CC16',
+  Property: '#FACC15',
+  Signal: '#FB7185',
+  Handler: '#F472B6',
   Endpoint: '#E11D48',
   Macro: '#EF4444',
   ExternalCrate: '#7D8795',
@@ -57,6 +61,7 @@ const NODE_SIZES: Record<NodeType, number> = {
   File: 18,
   Struct: 18,
   Class: 18,
+  Object: 17,
   Enum: 18,
   Trait: 18,
   Impl: 10,
@@ -66,6 +71,9 @@ const NODE_SIZES: Record<NodeType, number> = {
   Hook: 13,
   Interface: 16,
   TypeAlias: 15,
+  Property: 10,
+  Signal: 11,
+  Handler: 12,
   Endpoint: 16,
   Macro: 12,
 }
@@ -855,9 +863,9 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
       break
     }
     default: {
-      // Function, Hook, Interface, TypeAlias, Struct, Class, ExternalCrate
+      // Function, Hook, Interface, TypeAlias, Struct, Class, Object, ExternalCrate
       ctx.beginPath()
-      if (n.type === 'Struct' || n.type === 'Class' || n.type === 'Interface' || n.type === 'TypeAlias') {
+      if (n.type === 'Struct' || n.type === 'Class' || n.type === 'Object' || n.type === 'Interface' || n.type === 'TypeAlias' || n.type === 'Property') {
         ctx.roundRect(n.x - size, n.y - size * 0.65, size * 2, size * 1.3, 5)
       } else {
         ctx.arc(n.x, n.y, size, 0, Math.PI * 2)
@@ -964,6 +972,7 @@ function labelPriority(node: GraphNode, degree: number, isSelected: boolean, isH
     Endpoint: 86,
     Struct: 72,
     Class: 72,
+    Object: 64,
     Enum: 70,
     Trait: 70,
     Impl: 52,
@@ -986,6 +995,7 @@ function isKeyLabel(node: GraphNode, degree: number) {
     || node.type === 'Endpoint'
     || node.type === 'Struct'
     || node.type === 'Class'
+    || node.type === 'Object'
     || node.type === 'Trait'
 }
 

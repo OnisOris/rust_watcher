@@ -12,7 +12,7 @@ import { useBackendGraph } from './api/useBackendGraph'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode } from './types'
 
-const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Endpoint', 'Macro', 'ExternalCrate'])
+const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Imports', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
 
 const DEFAULT_FILTERS: GraphFilters = {

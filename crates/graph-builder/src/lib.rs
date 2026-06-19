@@ -12,6 +12,7 @@ pub(crate) mod endpoints;
 pub mod filters;
 pub(crate) mod ids;
 pub mod python;
+pub mod qml;
 pub mod rust;
 pub mod typescript;
 
@@ -19,6 +20,7 @@ pub(crate) use endpoints::*;
 pub use filters::{filter_snapshot, focus_subgraph};
 pub(crate) use ids::*;
 pub use python::PythonLanguageAdapter;
+pub use qml::QmlLanguageAdapter;
 pub use rust::RustLanguageAdapter;
 pub use typescript::TypeScriptLanguageAdapter;
 
@@ -137,6 +139,7 @@ pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> Grap
     enrich_syntax_relationships(&mut snapshot, &index.files);
     let endpoint_count = enrich_api_routes(&mut snapshot, &index.files);
     let python_count = python::enrich_python_graph(&mut snapshot, &index.root);
+    let qml_count = qml::enrich_qml_graph(&mut snapshot, &index.root);
     let frontend_count = typescript::enrich_typescript_graph(&mut snapshot, &index.root);
 
     update_connections(&mut snapshot.nodes, &snapshot.edges);
@@ -144,12 +147,13 @@ pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> Grap
     snapshot.events = vec![event(
         AnalysisEventType::Graph,
         format!(
-            "Fallback graph built: {} files, {} syntax symbols, {} endpoints, {} frontend symbols, {} python symbols, {} nodes, {} edges",
+            "Fallback graph built: {} files, {} syntax symbols, {} endpoints, {} frontend symbols, {} python symbols, {} qml symbols, {} nodes, {} edges",
             snapshot.files.len(),
             syntax_symbols_count,
             endpoint_count,
             frontend_count,
             python_count,
+            qml_count,
             snapshot.nodes.len(),
             snapshot.edges.len()
         ),
@@ -797,7 +801,8 @@ fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
         SymbolKindName::Module | SymbolKindName::Package | SymbolKindName::Namespace => {
             Some(NodeType::Module)
         }
-        SymbolKindName::Struct | SymbolKindName::Object => Some(NodeType::Struct),
+        SymbolKindName::Struct => Some(NodeType::Struct),
+        SymbolKindName::Object => Some(NodeType::Object),
         SymbolKindName::Class => Some(NodeType::Class),
         SymbolKindName::Enum => Some(NodeType::Enum),
         SymbolKindName::Trait => Some(NodeType::Trait),
@@ -809,6 +814,9 @@ fn map_kind(symbol: &DiscoveredSymbol) -> Option<NodeType> {
         SymbolKindName::Hook => Some(NodeType::Hook),
         SymbolKindName::Interface => Some(NodeType::Interface),
         SymbolKindName::TypeAlias => Some(NodeType::TypeAlias),
+        SymbolKindName::Property => Some(NodeType::Property),
+        SymbolKindName::Signal => Some(NodeType::Signal),
+        SymbolKindName::Handler => Some(NodeType::Handler),
         SymbolKindName::Endpoint => Some(NodeType::Endpoint),
         SymbolKindName::ExternalCrate => Some(NodeType::ExternalCrate),
         SymbolKindName::Other => None,
@@ -2083,6 +2091,180 @@ class UserService:
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn qml_adapter_detects_nodes_relationships_and_api_bridges() {
+        let root = std::env::temp_dir().join(format!("rust-watcher-qml-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("backend")).unwrap();
+        std::fs::create_dir_all(root.join("qml/components")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"qml_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+fn person() {}
+
+fn main() {
+    app.route("/api/person", get(person));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("backend/main.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/api/users")
+def users():
+    return []
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qml/Main.qml"),
+            r#"
+import QtQuick
+import QtQuick.Controls
+import "./components"
+
+ApplicationWindow {
+    id: window
+    property string titleText: "Person"
+    signal accepted(string value)
+
+    PersonCard {
+        id: card
+        name: titleText
+    }
+
+    Button {
+        text: card.name
+        onClicked: loadPerson()
+    }
+
+    function loadPerson() { fetch("/api/person"); xhr.open("GET", "/api/users") }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qml/components/PersonCard.qml"),
+            r#"
+import QtQuick
+
+Rectangle {
+    id: root
+    property string name: "Ada"
+    signal selected(string name)
+}
+"#,
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let root_object = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Object && node.label == "ApplicationWindow")
+            .unwrap();
+        let card_object = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Object && node.label == "PersonCard")
+            .unwrap();
+        let property = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Property && node.label == "titleText")
+            .unwrap();
+        let signal = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Signal && node.label == "accepted")
+            .unwrap();
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Handler && node.label == "onClicked")
+            .unwrap();
+        let function = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "loadPerson")
+            .unwrap();
+        let rust_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/person")
+            .unwrap();
+        let python_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users")
+            .unwrap();
+
+        assert_eq!(root_object.language.as_deref(), Some("qml"));
+        assert!(property.range.is_some());
+        assert!(signal.selection_range.is_some());
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Contains
+                && edge.source == root_object.id
+                && edge.target == card_object.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Renders
+                && edge.source == root_object.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Calls
+                && edge.source == handler.id
+                && edge.target == function.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == function.id
+                && edge.target == rust_endpoint.id
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == function.id
+                && edge.target == python_endpoint.id
+        }));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Imports));
+
+        let adapter = QmlLanguageAdapter;
+        let discovered = block_on_ready(adapter.discover_files(&root)).unwrap();
+        assert!(discovered
+            .iter()
+            .any(|file| file.relative_path == "qml/Main.qml"));
+        let symbols = block_on_ready(
+            adapter.symbols(
+                discovered
+                    .iter()
+                    .find(|file| file.relative_path == "qml/Main.qml")
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(symbols
+            .iter()
+            .any(|symbol| symbol.node_type == NodeType::Handler && symbol.label == "onClicked"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn remove_changed_file_nodes_for_test(
         snapshot: &mut GraphSnapshot,
         changed_files: &HashSet<String>,
@@ -2127,6 +2309,7 @@ class UserService:
         assert_async_analyzer(&RustLanguageAdapter);
         assert_async_analyzer(&TypeScriptLanguageAdapter);
         assert_async_analyzer(&PythonLanguageAdapter);
+        assert_async_analyzer(&QmlLanguageAdapter);
     }
 }
 

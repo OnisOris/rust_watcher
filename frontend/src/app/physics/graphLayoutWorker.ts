@@ -7,6 +7,7 @@ const NODE_SIZES: Record<NodeType, number> = {
   File: 18,
   Struct: 18,
   Class: 18,
+  Object: 17,
   Enum: 18,
   Trait: 18,
   Impl: 10,
@@ -16,6 +17,9 @@ const NODE_SIZES: Record<NodeType, number> = {
   Hook: 13,
   Interface: 16,
   TypeAlias: 15,
+  Property: 10,
+  Signal: 11,
+  Handler: 12,
   Endpoint: 16,
   Macro: 12,
 }

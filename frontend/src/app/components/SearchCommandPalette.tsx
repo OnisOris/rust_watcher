@@ -16,6 +16,7 @@ const KIND_ICONS: Record<string, ReactNode> = {
   Module: <Package size={13} color="#8B5CF6" />,
   Struct: <Layers size={13} color="#06B6D4" />,
   Class: <Layers size={13} color="#0EA5E9" />,
+  Object: <Layers size={13} color="#38BDF8" />,
   Enum: <Layers size={13} color="#F59E0B" />,
   Trait: <GitBranch size={13} color="#10B981" />,
   Function: <Zap size={13} color="#EC4899" />,
@@ -24,15 +25,19 @@ const KIND_ICONS: Record<string, ReactNode> = {
   Hook: <GitBranch size={13} color="#A855F7" />,
   Interface: <Layers size={13} color="#22C55E" />,
   TypeAlias: <Layers size={13} color="#84CC16" />,
+  Property: <Layers size={13} color="#FACC15" />,
+  Signal: <GitBranch size={13} color="#FB7185" />,
+  Handler: <Zap size={13} color="#F472B6" />,
   Endpoint: <ArrowRight size={13} color="#E11D48" />,
   Macro: <Zap size={13} color="#EF4444" />,
   ExternalCrate: <Package size={13} color="#7D8795" />,
 }
 
 const KIND_COLORS: Record<string, string> = {
-  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Enum: '#F59E0B',
+  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Object: '#38BDF8', Enum: '#F59E0B',
   Trait: '#10B981', Function: '#EC4899', Method: '#F97316', Macro: '#EF4444',
   Component: '#14B8A6', Hook: '#A855F7', Interface: '#22C55E', TypeAlias: '#84CC16',
+  Property: '#FACC15', Signal: '#FB7185', Handler: '#F472B6',
   Endpoint: '#E11D48', ExternalCrate: '#7D8795', Impl: '#6366F1',
 }
 

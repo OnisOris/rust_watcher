@@ -30,6 +30,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Module,
                 NodeType::Struct,
                 NodeType::Class,
+                NodeType::Object,
                 NodeType::Enum,
                 NodeType::Trait,
                 NodeType::Impl,
@@ -39,6 +40,9 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Hook,
                 NodeType::Interface,
                 NodeType::TypeAlias,
+                NodeType::Property,
+                NodeType::Signal,
+                NodeType::Handler,
                 NodeType::Endpoint,
                 NodeType::Macro,
             ]
@@ -62,6 +66,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
             [
                 NodeType::Function,
                 NodeType::Method,
+                NodeType::Handler,
                 NodeType::Component,
                 NodeType::Hook,
                 NodeType::Endpoint,
@@ -86,10 +91,14 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Endpoint,
                 NodeType::Struct,
                 NodeType::Class,
+                NodeType::Object,
                 NodeType::Enum,
                 NodeType::Trait,
                 NodeType::Interface,
                 NodeType::TypeAlias,
+                NodeType::Property,
+                NodeType::Signal,
+                NodeType::Handler,
             ]
             .into_iter()
             .collect(),
@@ -109,6 +118,7 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 NodeType::Impl,
                 NodeType::Struct,
                 NodeType::Class,
+                NodeType::Object,
                 NodeType::Enum,
                 NodeType::Method,
             ]

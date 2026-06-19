@@ -17,9 +17,10 @@ interface InspectorPanelProps {
 }
 
 const NODE_TYPE_COLORS: Record<string, string> = {
-  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Enum: '#F59E0B',
+  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Object: '#38BDF8', Enum: '#F59E0B',
   Trait: '#10B981', Impl: '#6366F1', Function: '#EC4899', Method: '#F97316',
   Component: '#14B8A6', Hook: '#A855F7', Interface: '#22C55E', TypeAlias: '#84CC16',
+  Property: '#FACC15', Signal: '#FB7185', Handler: '#F472B6',
   Endpoint: '#E11D48', Macro: '#EF4444', ExternalCrate: '#7D8795',
 }
 
