@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import {
-  Search, RefreshCw, Minimize2, Focus, Download, Settings,
+  Search, RefreshCw, Minimize2, Download, Settings,
   Clock, Zap, Sun, Moon, SlidersHorizontal
 } from 'lucide-react'
 import type { AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
@@ -15,10 +15,8 @@ interface TopToolbarProps {
   onSettingsOpen: () => void
   onRecenter: () => void
   onCollapse: () => void
-  onFocusMode: () => void
   onThemeToggle: () => void
   onClarityToggle: () => void
-  focusModeActive: boolean
   clarityOpen: boolean
   clarityActive: boolean
   theme: ThemeMode
@@ -47,7 +45,7 @@ const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: s
 }
 
 export function TopToolbar({
-  appState, analyzerStatus, message, mode, onModeChange, onSearchOpen, onSettingsOpen, onRecenter, onCollapse, onFocusMode, onThemeToggle, onClarityToggle, focusModeActive, clarityOpen, clarityActive, theme
+  appState, analyzerStatus, message, mode, onModeChange, onSearchOpen, onSettingsOpen, onRecenter, onCollapse, onThemeToggle, onClarityToggle, clarityOpen, clarityActive, theme
 }: TopToolbarProps) {
   const status = appState === 'empty' ? STATUS_CONFIG.empty : STATUS_CONFIG[analyzerStatus]
 
@@ -198,13 +196,6 @@ export function TopToolbar({
       <div className="flex items-center gap-1 shrink-0">
         <ToolbarButton icon={<RefreshCw size={14} />} label="Recenter" onClick={onRecenter} />
         <ToolbarButton icon={<Minimize2 size={14} />} label="Collapse" onClick={onCollapse} />
-        <ToolbarButton
-          icon={<Focus size={14} />}
-          label="Focus Mode"
-          onClick={onFocusMode}
-          active={focusModeActive}
-          accentColor="#06B6D4"
-        />
         <ToolbarButton icon={<Download size={14} />} label="Export" onClick={() => {}} />
         <div style={{ width: 1, height: 16, background: 'var(--cc-border)', margin: '0 2px' }} />
         <ToolbarButton

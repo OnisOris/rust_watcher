@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ExternalLink, Focus, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers } from 'lucide-react'
+import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers } from 'lucide-react'
 import type { AnalyzerStatus, AppState, GraphNode, GraphEdge } from '../types'
 
 interface InspectorPanelProps {
@@ -12,7 +12,6 @@ interface InspectorPanelProps {
   filesCount?: number
   message?: string | null
   onTogglePin: (id: string) => void
-  onFocusBubble: (id: string) => void
   onSelectNode: (id: string) => void
   onOpenInEditor: (node: GraphNode) => void
 }
@@ -34,7 +33,6 @@ export function InspectorPanel({
   filesCount = 0,
   message,
   onTogglePin,
-  onFocusBubble,
   onSelectNode,
   onOpenInEditor,
 }: InspectorPanelProps) {
@@ -52,7 +50,7 @@ export function InspectorPanel({
       />
     )
   }
-  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onFocusBubble={onFocusBubble} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
+  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
 }
 
 // ── Project overview (nothing selected) ────────────────────────────────────
@@ -149,8 +147,8 @@ function ProjectOverview({
 }
 
 // ── Node inspector (something selected) ────────────────────────────────────
-function NodeInspector({ node, nodes, edges, onTogglePin, onFocusBubble, onSelectNode, onOpenInEditor }: {
-  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onFocusBubble: (id: string) => void; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
+function NodeInspector({ node, nodes, edges, onTogglePin, onSelectNode, onOpenInEditor }: {
+  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
 }) {
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
   const outgoing = edges.filter(e => e.source === node.id)
@@ -280,7 +278,6 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onFocusBubble, onSelec
 
         {/* actions */}
         <div className="grid grid-cols-2 gap-2">
-          <ActionBtn icon={<Focus size={13} />} label="Focus Bubble" onClick={() => onFocusBubble(node.id)} primary />
           <ActionBtn icon={<BookMarked size={13} />} label="Bookmark" onClick={() => {}} />
           <ActionBtn icon={<Pin size={13} />} label={node.pinned ? 'Unpin Node' : 'Pin Node'} onClick={() => onTogglePin(node.id)} active={!!node.pinned} />
           <ActionBtn icon={<ExternalLink size={13} />} label="Open in Editor" onClick={() => onOpenInEditor(node)} disabled={!node.file} />

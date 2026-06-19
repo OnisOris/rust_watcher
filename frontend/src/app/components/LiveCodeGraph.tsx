@@ -1,19 +1,16 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
-import type { GraphNode, GraphEdge, GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings } from '../types'
+import type { GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings } from '../types'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
   edges: GraphEdge[]
-  mode: GraphMode
   filters: GraphFilters
   selectedNodeId: string | null
-  focusBubbleNodeId: string | null
   recenterKey: number
   theme: ThemeMode
   layoutSettings: GraphLayoutSettings
   onSelectNode: (id: string | null) => void
-  onDoubleClickNode: (id: string) => void
   onUpdateNodes: (nodes: GraphNode[]) => void
 }
 
@@ -106,7 +103,14 @@ interface CanvasTheme {
   text: string
   textMuted: string
   gridDot: string
-  focusMask: string
+}
+
+interface LabelCandidate {
+  node: GraphNode
+  isSelected: boolean
+  isHovered: boolean
+  degree: number
+  priority: number
 }
 
 type LayoutWorkerResponse = {
@@ -127,7 +131,6 @@ function canvasTheme(): CanvasTheme {
     text: read('--cc-text', '#172033'),
     textMuted: read('--cc-text-muted', '#52647a'),
     gridDot: read('--cc-grid-dot', 'rgba(30,64,112,0.14)'),
-    focusMask: read('--cc-focus-mask', 'rgba(255,255,255,0.68)'),
   }
 }
 
@@ -150,7 +153,9 @@ function fitGraphToView(nodes: GraphNode[], canvasW: number, canvasH: number, pa
   const margin = 96
   const availableW = Math.max(1, canvasW - margin * 2)
   const availableH = Math.max(1, canvasH - margin * 2)
-  const nextZoom = Math.max(0.35, Math.min(1.6, Math.min(availableW / bounds.width, availableH / bounds.height)))
+  const fitZoom = Math.min(availableW / bounds.width, availableH / bounds.height)
+  const densityZoom = nodes.length > 55 ? Math.min(1.75, 1 + Math.log(nodes.length / 55) * 0.28) : 1
+  const nextZoom = Math.max(0.28, Math.min(1.6, fitZoom * densityZoom))
   const centerX = (bounds.minX + bounds.maxX) / 2
   const centerY = (bounds.minY + bounds.maxY) / 2
   zoomRef.current = nextZoom
@@ -158,18 +163,17 @@ function fitGraphToView(nodes: GraphNode[], canvasW: number, canvasH: number, pa
   pan.y = canvasH / 2 - centerY * nextZoom
 }
 
+function graphSizeScale(nodeCount: number) {
+  return Math.min(3.8, Math.max(1, Math.pow(Math.max(1, nodeCount) / 38, 0.38)))
+}
+
 function visibleNodeIdsFor(
   nodes: GraphNode[],
   edges: GraphEdge[],
   depth: GraphFilters['depth'],
-  selectedNodeId: string | null,
-  focusBubbleNodeId: string | null,
-  layoutSettings: GraphLayoutSettings,
 ) {
   const visible = new Set<string>()
   const pickDepthCenter = () => {
-    if (focusBubbleNodeId) return focusBubbleNodeId
-    if (selectedNodeId) return selectedNodeId
     const nodeById = new Map(nodes.map(n => [n.id, n]))
     const mainNode = nodes.find(n => n.type === 'Function' && n.label === 'main')
     if (mainNode) return mainNode.id
@@ -209,10 +213,8 @@ function visibleGraphSignature(
   nodes: GraphNode[],
   edges: GraphEdge[],
   filters: GraphFilters,
-  selectedNodeId: string | null,
-  focusBubbleNodeId: string | null,
 ) {
-  const visibleIds = visibleNodeIdsFor(nodes, edges, filters.depth, selectedNodeId, focusBubbleNodeId)
+  const visibleIds = visibleNodeIdsFor(nodes, edges, filters.depth)
   return [
     filters.depth,
     [...visibleIds].sort().join('|'),
@@ -265,10 +267,11 @@ function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], width: number, h
   const forces = new Map(updated.map(n => [n.id, { x: 0, y: 0 }]))
   const degree = buildDegreeMap(updated, edges)
   const layout = options.layoutSettings ?? DEFAULT_GRAPH_LAYOUT_SETTINGS
-  const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
-  const spacingScale = Math.max(0.55, layout.spacing)
-  const repulsion = BASE_REPULSION * densityScale * densityScale * Math.max(0.25, layout.repulsion) * spacingScale * spacingScale
-  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale) * Math.max(0.45, layout.linkLength) * spacingScale
+  const graphScale = graphSizeScale(updated.length)
+  const densityScale = Math.min(4.2, Math.max(1, Math.sqrt(updated.length / 72)))
+  const spacingScale = Math.max(0.55, layout.spacing) * graphScale
+  const repulsion = BASE_REPULSION * densityScale * densityScale * graphScale * Math.max(0.25, layout.repulsion) * spacingScale * spacingScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.9, densityScale) * Math.max(0.45, layout.linkLength) * spacingScale
   const centerGravity = CENTER_GRAVITY / densityScale
   const maxSpeed = MAX_SPEED * Math.min(1.8, Math.sqrt(densityScale)) * (options.maxSpeedScale ?? 1)
   const springDamping = SPRING_DAMPING * Math.max(0.35, layout.damping) * (options.dampingScale ?? 1)
@@ -480,10 +483,11 @@ function runEquilibriumStep(
   const index = new Map(updated.map(node => [node.id, node]))
   const forces = new Map(updated.map(node => [node.id, { x: 0, y: 0 }]))
   const degree = buildDegreeMap(updated, edges)
-  const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
-  const spacingScale = Math.max(0.55, layoutSettings.spacing)
-  const repulsion = BASE_REPULSION * densityScale * densityScale * Math.max(0.25, layoutSettings.repulsion) * spacingScale * spacingScale
-  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale) * Math.max(0.45, layoutSettings.linkLength) * spacingScale
+  const graphScale = graphSizeScale(updated.length)
+  const densityScale = Math.min(4.2, Math.max(1, Math.sqrt(updated.length / 72)))
+  const spacingScale = Math.max(0.55, layoutSettings.spacing) * graphScale
+  const repulsion = BASE_REPULSION * densityScale * densityScale * graphScale * Math.max(0.25, layoutSettings.repulsion) * spacingScale * spacingScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.9, densityScale) * Math.max(0.45, layoutSettings.linkLength) * spacingScale
   const centerGravity = CENTER_GRAVITY / densityScale
 
   forRepulsionPairs(updated, (i, j, a, b) => {
@@ -859,11 +863,88 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
   ctx.restore()
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, theme: CanvasTheme) {
+function compactLabel(label: string, isImportant: boolean) {
+  const max = isImportant ? 34 : 24
+  return label.length > max ? `${label.slice(0, max - 1)}…` : label
+}
+
+function labelFont(isSelected: boolean, isHovered: boolean) {
+  return `${isSelected ? '700' : '500'} ${isSelected || isHovered ? 12 : 10}px Inter, sans-serif`
+}
+
+function labelBounds(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
+  const size = NODE_SIZES[n.type]
+  const label = compactLabel(n.label, isSelected || isHovered)
+  ctx.font = labelFont(isSelected, isHovered)
+  const width = ctx.measureText(label).width + 10
+  const height = isSelected || isHovered ? 17 : 14
+  const offsetY = n.type === 'Module' ? size * 0.7 + 5 : size + 5
+  return {
+    label,
+    x1: n.x - width / 2,
+    y1: n.y + offsetY - 1,
+    x2: n.x + width / 2,
+    y2: n.y + offsetY + height,
+  }
+}
+
+function boxesOverlap(a: { x1: number; y1: number; x2: number; y2: number }, b: { x1: number; y1: number; x2: number; y2: number }) {
+  return a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1
+}
+
+function labelPriority(node: GraphNode, degree: number, isSelected: boolean, isHovered: boolean) {
+  if (isSelected) return 10000
+  if (isHovered) return 9000
+  const typeBoost: Partial<Record<NodeType, number>> = {
+    Module: 110,
+    File: 90,
+    Endpoint: 86,
+    Struct: 72,
+    Enum: 70,
+    Trait: 70,
+    Impl: 52,
+    Component: 48,
+  }
+  return degree * 34 + (typeBoost[node.type] ?? 0) + (node.pinned ? 600 : 0)
+}
+
+function labelBudget(visibleCount: number, zoom: number) {
+  if (visibleCount <= 45) return visibleCount
+  const zoomScale = zoom >= 1 ? 1.35 : zoom >= 0.75 ? 1 : zoom >= 0.5 ? 0.72 : 0.45
+  return Math.round(Math.min(visibleCount, Math.max(24, Math.sqrt(visibleCount) * 7.5 * zoomScale)))
+}
+
+function drawLabels(
+  ctx: CanvasRenderingContext2D,
+  candidates: LabelCandidate[],
+  visibleCount: number,
+  zoom: number,
+  theme: CanvasTheme,
+) {
+  const occupied: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
+  const sorted = [...candidates].sort((a, b) => b.priority - a.priority)
+  const budget = labelBudget(visibleCount, zoom)
+  let drawn = 0
+
+  for (const candidate of sorted) {
+    const force = candidate.isSelected || candidate.isHovered || candidate.node.pinned
+    if (!force && drawn >= budget) continue
+    if (!force && visibleCount > 70 && zoom < 0.62 && candidate.degree < 3) continue
+
+    const box = labelBounds(ctx, candidate.node, candidate.isSelected, candidate.isHovered)
+    if (!force && occupied.some(existing => boxesOverlap(existing, box))) continue
+
+    drawLabel(ctx, candidate.node, candidate.isSelected, candidate.isHovered, theme, box.label)
+    occupied.push(box)
+    drawn++
+  }
+}
+
+function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, theme: CanvasTheme, label: string) {
   const size = NODE_SIZES[n.type]
   const color = NODE_COLORS[n.type]
   ctx.save()
-  ctx.font = `${isSelected ? '700' : '500'} ${isSelected || isHovered ? 12 : 10}px Inter, sans-serif`
+  ctx.font = labelFont(isSelected, isHovered)
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
   const offsetY = n.type === 'Module' ? size * 0.7 + 5 : size + 5
@@ -871,7 +952,7 @@ function drawLabel(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: bool
   ctx.shadowColor = theme.card
   ctx.shadowBlur = 5
   ctx.fillStyle = isSelected ? theme.text : isHovered ? color : theme.textMuted
-  ctx.fillText(n.label, n.x, n.y + offsetY)
+  ctx.fillText(label, n.x, n.y + offsetY)
   ctx.restore()
 }
 
@@ -949,7 +1030,7 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, focusBubbleNodeId, recenterKey, theme, layoutSettings, onSelectNode, onDoubleClickNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
   const animFrameRef = useRef<number>(0)
@@ -959,7 +1040,9 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
   const isDraggingRef = useRef(false)
   const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 })
   const dragNodeRef = useRef<string | null>(null)
+  const suppressNextClickRef = useRef(false)
   const hoveredNodeRef = useRef<string | null>(null)
+  const selectedNodeIdRef = useRef<string | null>(selectedNodeId)
   const userNavigatedRef = useRef(false)
   const graphSignatureRef = useRef('')
   const visibleSignatureRef = useRef('')
@@ -974,16 +1057,17 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
 
   layoutSettingsRef.current = layoutSettings
   onUpdateNodesRef.current = onUpdateNodes
+  selectedNodeIdRef.current = selectedNodeId
 
   const fitCurrentGraph = useCallback((force = false) => {
     const canvas = canvasRef.current
     if (!canvas || nodesRef.current.length === 0) return
     if (!force && userNavigatedRef.current) return
     const rect = canvas.getBoundingClientRect()
-    const visibleIds = visibleNodeIdsFor(nodesRef.current, edges, filters.depth, selectedNodeId, focusBubbleNodeId)
+    const visibleIds = visibleNodeIdsFor(nodesRef.current, edges, filters.depth)
     const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
     fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, rect.width, rect.height, panRef.current, zoomRef)
-  }, [edges, filters.depth, filters.nodeTypes, focusBubbleNodeId, selectedNodeId])
+  }, [edges, filters.depth, filters.nodeTypes])
 
   useEffect(() => {
     let worker: Worker | null = null
@@ -1020,7 +1104,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       const previousNodes = nodesRef.current
       const previous = new Map(previousNodes.map(node => [node.id, node]))
       graphSignatureRef.current = signature
-      visibleSignatureRef.current = visibleGraphSignature(nodes, edges, filters, selectedNodeId, focusBubbleNodeId)
+      visibleSignatureRef.current = visibleGraphSignature(nodes, edges, filters)
       if (layoutWorkerRef.current && nodes.length >= SPATIAL_GRID_THRESHOLD) {
         const workerSignature = `${signature}::${layoutSettingsSignature(layoutSettings)}`
         layoutWorkerSignatureRef.current = workerSignature
@@ -1048,10 +1132,10 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
         return existing ? { ...node, x: existing.x, y: existing.y, vx: existing.vx, vy: existing.vy } : { ...node, vx: 0, vy: 0 }
       })
     }
-  }, [edges, filters, fitCurrentGraph, focusBubbleNodeId, nodes, selectedNodeId])
+  }, [edges, filters, fitCurrentGraph, nodes])
 
   useEffect(() => {
-    const signature = visibleGraphSignature(nodesRef.current, edges, filters, selectedNodeId, focusBubbleNodeId)
+    const signature = visibleGraphSignature(nodesRef.current, edges, filters)
     if (signature === visibleSignatureRef.current) return
     visibleSignatureRef.current = signature
     layoutWorkerSignatureRef.current = ''
@@ -1060,7 +1144,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
     settledRef.current = false
     userNavigatedRef.current = false
     requestAnimationFrame(() => fitCurrentGraph(true))
-  }, [edges, filters, fitCurrentGraph, focusBubbleNodeId, selectedNodeId])
+  }, [edges, filters, fitCurrentGraph])
 
   useEffect(() => {
     physicsTicksRef.current = 0
@@ -1093,8 +1177,8 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
   }, [toWorld])
 
   const getVisibleNodeIds = useCallback(() => {
-    return visibleNodeIdsFor(nodesRef.current, edges, filters.depth, selectedNodeId, focusBubbleNodeId)
-  }, [focusBubbleNodeId, selectedNodeId, edges, filters.depth])
+    return visibleNodeIdsFor(nodesRef.current, edges, filters.depth)
+  }, [edges, filters.depth])
 
   // main render + physics loop
   useEffect(() => {
@@ -1187,8 +1271,10 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       }
 
       const nodeMap = new Map(nodesRef.current.map(n => [n.id, n]))
+      const degree = buildDegreeMap(nodesRef.current, edges)
       const hoveredConnections = new Set<string>()
       const selectedConnections = new Set<string>()
+      const activeSelectedNodeId = selectedNodeIdRef.current
       if (hoveredNodeRef.current) {
         edges.forEach(e => {
           if (e.source === hoveredNodeRef.current || e.target === hoveredNodeRef.current) {
@@ -1197,9 +1283,9 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
           }
         })
       }
-      if (selectedNodeId) {
+      if (activeSelectedNodeId) {
         edges.forEach(e => {
-          if (e.source === selectedNodeId || e.target === selectedNodeId) {
+          if (e.source === activeSelectedNodeId || e.target === activeSelectedNodeId) {
             selectedConnections.add(e.source)
             selectedConnections.add(e.target)
           }
@@ -1224,24 +1310,24 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
         drawArrow(ctx, src.x, src.y, tgt.x, tgt.y, color, width, dashed, animated, ts, NODE_SIZES[src.type], NODE_SIZES[tgt.type])
       }
 
-      // draw focus bubble background
-      if (focusBubbleNodeId) {
-        ctx.fillStyle = canvasColors.focusMask
-        ctx.fillRect(-panRef.current.x / zoomRef.current - 2000, -panRef.current.y / zoomRef.current - 2000, 4000 + W / zoomRef.current, 4000 + H / zoomRef.current)
-      }
-
       // draw nodes
+      const labelCandidates: LabelCandidate[] = []
       for (const n of nodesRef.current) {
         if (!filters.nodeTypes.has(n.type)) continue
         if (!visibleIds.has(n.id)) continue
-        const isSelected = n.id === selectedNodeId
+        const isSelected = n.id === activeSelectedNodeId
         const isHovered = n.id === hoveredNodeRef.current
         const isFocusContext = visibleIds.has(n.id)
-        const isFaded = (focusBubbleNodeId !== null && !isFocusContext)
-          || (hoveredNodeRef.current !== null && !hoveredConnections.has(n.id) && !isHovered && n.id !== hoveredNodeRef.current)
+        const isFaded = hoveredNodeRef.current !== null && !hoveredConnections.has(n.id) && !isHovered && n.id !== hoveredNodeRef.current
 
         drawNode(ctx, n, isSelected, isHovered, isFocusContext, isFaded, canvasColors)
-        drawLabel(ctx, n, isSelected, isHovered, canvasColors)
+        labelCandidates.push({
+          node: n,
+          isSelected,
+          isHovered,
+          degree: degree.get(n.id) ?? 0,
+          priority: labelPriority(n, degree.get(n.id) ?? 0, isSelected, isHovered),
+        })
 
         // pin indicator
         if (n.pinned) {
@@ -1254,6 +1340,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
           ctx.restore()
         }
       }
+      drawLabels(ctx, labelCandidates, labelCandidates.length, zoomRef.current, canvasColors)
 
       ctx.restore()
 
@@ -1261,8 +1348,8 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       drawMiniMap(ctx, nodesRef.current.filter(n => visibleIds.has(n.id)), panRef.current, zoomRef.current, W, H, canvasColors)
 
       // "You are here" breadcrumb for selected
-      if (selectedNodeId) {
-        const sel = nodeMap.get(selectedNodeId)
+      if (activeSelectedNodeId) {
+        const sel = nodeMap.get(activeSelectedNodeId)
         if (sel) {
           const sx = sel.x * zoomRef.current + panRef.current.x
           const sy = sel.y * zoomRef.current + panRef.current.y
@@ -1288,7 +1375,7 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
       cancelAnimationFrame(animFrameRef.current)
       ro.disconnect()
     }
-  }, [edges, selectedNodeId, focusBubbleNodeId, filters, getVisibleNodeIds, theme])
+  }, [edges, filters, getVisibleNodeIds, theme])
 
   // mouse events
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -1296,9 +1383,12 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
     if (hit) {
       dragNodeRef.current = hit.id
       isDraggingRef.current = false
+      suppressNextClickRef.current = false
+      dragStartRef.current = { x: e.clientX, y: e.clientY, panX: panRef.current.x, panY: panRef.current.y }
     } else {
       dragNodeRef.current = null
       isDraggingRef.current = true
+      suppressNextClickRef.current = false
       userNavigatedRef.current = true
       dragStartRef.current = { x: e.clientX, y: e.clientY, panX: panRef.current.x, panY: panRef.current.y }
     }
@@ -1313,6 +1403,12 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
     }
 
     if (dragNodeRef.current) {
+      const dx = e.clientX - dragStartRef.current.x
+      const dy = e.clientY - dragStartRef.current.y
+      if (dx * dx + dy * dy > 16) {
+        suppressNextClickRef.current = true
+        userNavigatedRef.current = true
+      }
       const { x, y } = toWorld(e.clientX, e.clientY)
       nodesRef.current = nodesRef.current.map(n =>
         n.id === dragNodeRef.current ? { ...n, x, y, vx: 0, vy: 0 } : n
@@ -1323,23 +1419,19 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
     }
   }, [hitTest, toWorld])
 
-  const handleMouseUp = useCallback((e: React.MouseEvent) => {
-    if (dragNodeRef.current && !isDraggingRef.current) {
-      // it was a click, not a drag
-    }
+  const handleMouseUp = useCallback(() => {
     dragNodeRef.current = null
     isDraggingRef.current = false
   }, [])
 
   const handleClick = useCallback((e: React.MouseEvent) => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false
+      return
+    }
     const hit = hitTest(e.clientX, e.clientY)
     onSelectNode(hit?.id ?? null)
   }, [hitTest, onSelectNode])
-
-  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    const hit = hitTest(e.clientX, e.clientY)
-    if (hit) onDoubleClickNode(hit.id)
-  }, [hitTest, onDoubleClickNode])
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
@@ -1364,7 +1456,6 @@ export function LiveCodeGraph({ nodes, edges, mode, filters, selectedNodeId, foc
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onClick={handleClick}
-        onDoubleClick={handleDoubleClick}
         onWheel={handleWheel}
       />
     </div>

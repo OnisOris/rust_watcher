@@ -223,7 +223,7 @@ export function EmptyState({ onOpenProject }: EmptyStateProps) {
         <div className="grid grid-cols-3 gap-3 mt-6 w-full">
           {[
             { icon: '🗺', label: 'Live Code Graph', desc: 'Force-directed, always up to date' },
-            { icon: '🔍', label: 'Focus Bubble', desc: 'Zoom into any symbol context' },
+            { icon: '🔍', label: 'Depth Filters', desc: 'Switch between D1, D2, D3 and Full' },
             { icon: '⚡', label: 'rust-analyzer', desc: 'Semantic analysis in real time' },
           ].map(f => (
             <div key={f.label} className="rounded-xl p-3 text-center" style={{ background: 'var(--cc-panel)', border: '1px solid var(--cc-border)' }}>

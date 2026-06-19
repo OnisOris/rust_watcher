@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { AlertCircle, Check, EyeOff, Focus, Layers, Minimize2, RotateCcw, SlidersHorizontal, Waypoints, X } from 'lucide-react'
+import { AlertCircle, Check, EyeOff, Layers, Minimize2, RotateCcw, SlidersHorizontal, Waypoints, X } from 'lucide-react'
 import type { GraphLayoutSettings } from '../types'
 
 type GraphLens = 'all' | 'architecture' | 'api'
@@ -13,7 +13,6 @@ interface DenseGraphSuggestionProps {
   depth: 1 | 2 | 3 | 'full'
   externalHidden: boolean
   testsHidden: boolean
-  canFocus: boolean
   layoutSettings: GraphLayoutSettings
   onDismiss: () => void
   onLensChange: (lens: GraphLens) => void
@@ -22,7 +21,6 @@ interface DenseGraphSuggestionProps {
   onHideExternal: () => void
   onHideTests: () => void
   onDepth2: () => void
-  onFocusBubble: () => void
 }
 
 export function DenseGraphSuggestion({
@@ -34,7 +32,6 @@ export function DenseGraphSuggestion({
   depth,
   externalHidden,
   testsHidden,
-  canFocus,
   layoutSettings,
   onDismiss,
   onLensChange,
@@ -43,7 +40,6 @@ export function DenseGraphSuggestion({
   onHideExternal,
   onHideTests,
   onDepth2,
-  onFocusBubble,
 }: DenseGraphSuggestionProps) {
   return (
     <div
@@ -115,16 +111,9 @@ export function DenseGraphSuggestion({
           <SuggestionAction
             icon={<Layers size={12} />}
             label="Depth 2"
-            detail={depth === 2 ? 'Active' : 'Show local neighborhood'}
+            detail={depth === 2 ? 'Active' : 'Show main/hub neighborhood'}
             active={depth === 2}
             onClick={onDepth2}
-          />
-          <SuggestionAction
-            icon={<Focus size={12} />}
-            label="Focus selected"
-            detail={canFocus ? 'Open focus bubble' : 'Select a node first'}
-            disabled={!canFocus}
-            onClick={onFocusBubble}
           />
         </div>
 

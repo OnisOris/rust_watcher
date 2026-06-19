@@ -96,10 +96,11 @@ function runEquilibriumStep(nodes: GraphNode[], edges: GraphEdge[], step: number
   const index = new Map(updated.map(node => [node.id, node]))
   const forces = new Map(updated.map(node => [node.id, { x: 0, y: 0 }]))
   const degree = buildDegreeMap(updated, edges)
-  const densityScale = Math.min(3.4, Math.max(1, Math.sqrt(updated.length / 80)))
-  const spacingScale = Math.max(0.55, layoutSettings.spacing)
-  const repulsion = BASE_REPULSION * densityScale * densityScale * Math.max(0.25, layoutSettings.repulsion) * spacingScale * spacingScale
-  const springLength = BASE_SPRING_LENGTH * Math.min(2.6, densityScale) * Math.max(0.45, layoutSettings.linkLength) * spacingScale
+  const graphScale = graphSizeScale(updated.length)
+  const densityScale = Math.min(4.2, Math.max(1, Math.sqrt(updated.length / 72)))
+  const spacingScale = Math.max(0.55, layoutSettings.spacing) * graphScale
+  const repulsion = BASE_REPULSION * densityScale * densityScale * graphScale * Math.max(0.25, layoutSettings.repulsion) * spacingScale * spacingScale
+  const springLength = BASE_SPRING_LENGTH * Math.min(2.9, densityScale) * Math.max(0.45, layoutSettings.linkLength) * spacingScale
   const centerGravity = CENTER_GRAVITY / densityScale
 
   forRepulsionPairs(updated, (i, j, a, b) => {
@@ -146,6 +147,10 @@ function runEquilibriumStep(nodes: GraphNode[], edges: GraphEdge[], step: number
   }
 
   return updated
+}
+
+function graphSizeScale(nodeCount: number) {
+  return Math.min(3.8, Math.max(1, Math.pow(Math.max(1, nodeCount) / 38, 0.38)))
 }
 
 function seedLayout(nodes: GraphNode[], edges: GraphEdge[], previous: Map<string, GraphNode>) {

@@ -8,7 +8,6 @@ import { FilterBar } from './components/FilterBar'
 import { SearchCommandPalette } from './components/SearchCommandPalette'
 import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
-import { FocusBubbleControls } from './components/FocusBubbleControls'
 import { useBackendGraph } from './api/useBackendGraph'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings } from './types'
@@ -42,13 +41,11 @@ function initialTheme(): ThemeMode {
 export default function App() {
   const [mode, setMode] = useState<GraphMode>('Macro')
   const [theme, setTheme] = useState<ThemeMode>(initialTheme)
-  const [focusBubbleNodeId, setFocusBubbleNodeId] = useState<string | null>(null)
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS)
   const [timelineCollapsed, setTimelineCollapsed] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarityOpen, setClarityOpen] = useState(false)
-  const [focusModeActive, setFocusModeActive] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
@@ -67,7 +64,6 @@ export default function App() {
     setSelectedNodeId,
     openProject,
     openInEditor,
-    requestFocusBubble,
     search,
     refreshSnapshot,
   } = useBackendGraph(mode)
@@ -139,32 +135,6 @@ export default function App() {
     setSelectedNodeId(id)
   }, [setSelectedNodeId])
 
-  const handleDoubleClickNode = useCallback((id: string) => {
-    setFocusBubbleNodeId(id)
-    setFocusModeActive(true)
-  }, [])
-
-  const handleFocusBubble = useCallback((id: string) => {
-    setFocusBubbleNodeId(id)
-    setFocusModeActive(true)
-    requestFocusBubble(id).catch(() => {})
-  }, [requestFocusBubble])
-
-  const handleCloseFocusBubble = useCallback(() => {
-    setFocusBubbleNodeId(null)
-    setFocusModeActive(false)
-  }, [])
-
-  const handleFocusModeToggle = useCallback(() => {
-    if (focusModeActive) {
-      handleCloseFocusBubble()
-    } else if (selectedNodeId) {
-      handleFocusBubble(selectedNodeId)
-    }
-  }, [focusModeActive, selectedNodeId, handleCloseFocusBubble, handleFocusBubble])
-
-  const focusBubbleNode = focusBubbleNodeId ? graphNodes.find(n => n.id === focusBubbleNodeId) ?? null : null
-
   // ── Empty state ──────────────────────────────────────────────────────────
   if (appState === 'empty') {
     return (
@@ -200,10 +170,8 @@ export default function App() {
         onSettingsOpen={() => setSettingsOpen(true)}
         onRecenter={() => setRecenterKey(key => key + 1)}
         onCollapse={() => setGraphLens(current => current === 'architecture' ? 'all' : 'architecture')}
-        onFocusMode={handleFocusModeToggle}
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         onClarityToggle={() => setClarityOpen(open => !open)}
-        focusModeActive={focusModeActive}
         clarityOpen={clarityOpen}
         clarityActive={graphLens !== 'all' || filters.depth !== 'full' || !filters.showExternal || !filters.showTests}
         theme={theme}
@@ -226,33 +194,17 @@ export default function App() {
           <LiveCodeGraph
             nodes={visibleGraphNodes}
             edges={visibleGraphEdges}
-            mode={mode}
             filters={filters}
             selectedNodeId={selectedNodeId}
-            focusBubbleNodeId={focusBubbleNodeId}
             recenterKey={recenterKey}
             theme={theme}
             layoutSettings={layoutSettings}
             onSelectNode={handleSelectNode}
-            onDoubleClickNode={handleDoubleClickNode}
             onUpdateNodes={() => {}}
           />
 
           {/* floating filter bar */}
           <FilterBar filters={filters} onFiltersChange={setFilters} />
-
-          {/* focus bubble controls */}
-          {focusBubbleNodeId && focusBubbleNode && (
-            <FocusBubbleControls
-              nodeLabel={focusBubbleNode.label}
-              onClose={handleCloseFocusBubble}
-              onExpandDepth={() => setFilters(f => ({ ...f, depth: f.depth === 'full' ? 3 : (typeof f.depth === 'number' ? Math.min(f.depth + 1, 3) as 1 | 2 | 3 : 'full') }))}
-              onCollapseNoise={() => setFilters(f => ({ ...f, depth: 1 }))}
-              onShowCallers={() => {}}
-              onShowCallees={() => {}}
-              onShowDataFlow={() => {}}
-            />
-          )}
 
           <div
             className="absolute top-3 right-5 z-20 transition-all duration-200 ease-out"
@@ -272,7 +224,6 @@ export default function App() {
               depth={filters.depth}
               externalHidden={!filters.showExternal || !filters.nodeTypes.has('ExternalCrate')}
               testsHidden={!filters.showTests}
-              canFocus={!!selectedNodeId}
               layoutSettings={layoutSettings}
               onDismiss={() => setClarityOpen(false)}
               onLensChange={setGraphLens}
@@ -291,9 +242,6 @@ export default function App() {
               }}
               onHideTests={() => setFilters(f => ({ ...f, showTests: !f.showTests }))}
               onDepth2={() => setFilters(f => ({ ...f, depth: f.depth === 2 ? 'full' : 2 }))}
-              onFocusBubble={() => {
-                if (selectedNodeId) handleFocusBubble(selectedNodeId)
-              }}
             />
           </div>
 
@@ -335,7 +283,6 @@ export default function App() {
           filesCount={files.length}
           message={message}
           onTogglePin={togglePinNode}
-          onFocusBubble={handleFocusBubble}
           onSelectNode={handleSelectNode}
           onOpenInEditor={openInEditor}
         />
