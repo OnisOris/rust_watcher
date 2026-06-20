@@ -16,6 +16,11 @@
   --cc-text-subtle: #728197;
   --cc-text-faint: #98a6b8;
   --cc-muted: #7d8795;
+  --cc-accent: #0ea5e9;
+  --cc-crate: #7c3aed;
+  --cc-module: #6366f1;
+  --cc-file: #2563eb;
+  --cc-selected-soft: rgba(14, 165, 233, 0.10);
   --cc-overlay: rgba(255, 255, 255, 0.86);
   --cc-backdrop: rgba(24, 37, 56, 0.34);
   --cc-shadow: 0 8px 28px rgba(22, 35, 54, 0.12);
@@ -63,20 +68,25 @@
 
 [data-theme="dark"],
 .dark {
-  --cc-bg: #0b0f14;
-  --cc-graph-bg: #0b0f14;
-  --cc-graph-bg-2: #0f1825;
-  --cc-panel: #111820;
-  --cc-surface: #0d1520;
-  --cc-card: #0f1825;
-  --cc-elevated: #182230;
-  --cc-border: #1e2d3d;
-  --cc-border-strong: #1e3050;
+  --cc-bg: #0f172a;
+  --cc-graph-bg: #0f172a;
+  --cc-graph-bg-2: #111c31;
+  --cc-panel: #111827;
+  --cc-surface: #162033;
+  --cc-card: #162033;
+  --cc-elevated: #1e293b;
+  --cc-border: #263449;
+  --cc-border-strong: #3b4f6b;
   --cc-text: #e2e8f0;
   --cc-text-muted: #94a3b8;
   --cc-text-subtle: #4b6278;
   --cc-text-faint: #3a5068;
   --cc-muted: #6b7280;
+  --cc-accent: #38bdf8;
+  --cc-crate: #a78bfa;
+  --cc-module: #818cf8;
+  --cc-file: #60a5fa;
+  --cc-selected-soft: rgba(56, 189, 248, 0.12);
   --cc-overlay: rgba(13, 21, 32, 0.8);
   --cc-backdrop: rgba(0, 0, 0, 0.65);
   --cc-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);

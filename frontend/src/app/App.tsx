@@ -69,7 +69,7 @@ export default function App() {
   const [mode, setMode] = useState<GraphMode>('Macro')
   const [theme, setTheme] = useState<ThemeMode>(initialTheme)
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS)
-  const [timelineCollapsed, setTimelineCollapsed] = useState(false)
+  const [timelineCollapsed, setTimelineCollapsed] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarityOpen, setClarityOpen] = useState(false)
@@ -149,6 +149,10 @@ export default function App() {
     },
     [graphNodes, edges, mode, graphLens, neighborhoodNodeId, filters, collapsedGroups, diagnosticsByNode],
   )
+  const zeroEdgeHint = visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
+    ? graphModeEmptyHint(mode)
+    : null
+
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
     const nextPinned = !(node?.pinned ?? pinnedNodeIds.has(id))
@@ -318,6 +322,9 @@ export default function App() {
         appState={appState}
         analyzerStatus={analyzerStatus}
         message={message}
+        projectName={projectName}
+        lastUpdated={lastUpdated}
+        filesCount={files.length}
         mode={mode}
         onModeChange={setMode}
         onSearchOpen={() => setSearchOpen(true)}
@@ -360,6 +367,16 @@ export default function App() {
             onSelectNode={handleSelectNode}
             onUpdateNodes={handleUpdateNodes}
           />
+
+          {zeroEdgeHint && (
+            <div
+              className="absolute left-1/2 top-24 z-20 -translate-x-1/2 rounded-xl px-4 py-3"
+              style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', boxShadow: 'var(--cc-shadow)', maxWidth: 420, backdropFilter: 'blur(12px)' }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>{zeroEdgeHint.title}</div>
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', lineHeight: 1.45, marginTop: 4 }}>{zeroEdgeHint.body}</div>
+            </div>
+          )}
 
           {/* floating filter bar */}
           <FilterBar
@@ -432,6 +449,10 @@ export default function App() {
           analyzerStatus={analyzerStatus}
           appState={appState}
           filesCount={files.length}
+          totalNodes={graphNodes.length}
+          totalEdges={edges.length}
+          visibleNodes={visibleGraphNodes.length}
+          visibleEdges={visibleGraphEdges.length}
           message={message}
           onTogglePin={togglePinNode}
           onToggleCollapse={toggleCollapseGroup}
@@ -465,6 +486,19 @@ export default function App() {
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   )
+}
+
+function graphModeEmptyHint(mode: GraphMode) {
+  switch (mode) {
+    case 'CallFlow':
+      return { title: 'No call flow edges detected', body: 'This mode expects endpoint-to-handler or function-call edges. Try Semantic or All edges, or check route extraction.' }
+    case 'DataFlow':
+      return { title: 'No data flow detected', body: 'This mode shows request parameters, DTOs and response types. Try Semantic edges or inspect handler signatures.' }
+    case 'Traits':
+      return { title: 'No trait or impl relations found', body: 'This mode expects trait, impl or derive relations. Try enabling external crates and semantic edges.' }
+    default:
+      return { title: 'No edges in this view', body: 'The current filters hide all relationships. Try Full depth, Semantic edges, or enable detached and external sources.' }
+  }
 }
 
 function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens) {

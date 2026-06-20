@@ -69,7 +69,7 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
           background: 'var(--cc-panel)',
           border: '1px solid var(--cc-border)',
           boxShadow: 'var(--cc-shadow)',
-          minWidth: 480,
+          minWidth: 620,
         }}
       >
         {/* collapsed bar */}
@@ -79,7 +79,7 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
           onClick={() => setExpanded(!expanded)}
         >
           <Filter size={13} color="var(--cc-text-subtle)" />
-          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontWeight: 500 }}>Filters</span>
+          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontWeight: 700 }}>Filters</span>
 
           {activeFilterCount > 0 && (
             <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 10, background: 'rgba(6,182,212,0.15)', color: '#06B6D4', border: '1px solid rgba(6,182,212,0.25)' }}>
@@ -94,17 +94,17 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
                 key={d}
                 onClick={() => onFiltersChange({ ...filters, depth: d })}
                 style={{
-                  padding: '2px 7px',
+                  padding: '3px 8px',
                   fontSize: 10,
-                  borderRadius: 4,
-                  background: filters.depth === d ? '#06B6D4' : 'transparent',
-                  color: filters.depth === d ? '#fff' : 'var(--cc-text-subtle)',
-                  border: 'none',
+                  borderRadius: 999,
+                  background: filters.depth === d ? 'var(--cc-selected-soft)' : 'transparent',
+                  color: filters.depth === d ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+                  border: filters.depth === d ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
                   cursor: 'pointer',
                   fontWeight: filters.depth === d ? 600 : 400,
                 }}
               >
-                {d === 'full' ? 'Full' : `D${d}`}
+                {d === 'full' ? 'Depth: Full' : `Depth: ${d}`}
               </button>
             ))}
           </div>
@@ -116,41 +116,41 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
             {EDGE_VISIBILITY_OPTIONS.map(level => (
               <QuickToggle
                 key={level}
-                label={level === 'Essential' ? 'Ess' : level === 'Semantic' ? 'Sem' : 'All'}
+                label={level === 'Essential' ? 'Edges: Essential' : level === 'Semantic' ? 'Edges: Semantic' : 'Edges: All'}
                 active={filters.edgeVisibility === level}
                 onToggle={() => onFiltersChange({ ...filters, edgeVisibility: level })}
               />
             ))}
             <QuickToggle
-              label="Tests"
+              label="Hide tests"
               active={!filters.showTests}
               onToggle={() => onFiltersChange({ ...filters, showTests: !filters.showTests })}
             />
             <QuickToggle
-              label="Ext"
+              label="Hide external"
               active={!filters.showExternal}
               onToggle={() => onFiltersChange({ ...filters, showExternal: !filters.showExternal })}
             />
             <QuickToggle
-              label="Detached"
+              label="Show detached"
               active={filters.showDetached}
               onToggle={() => onFiltersChange({ ...filters, showDetached: !filters.showDetached })}
             />
             <QuickToggle
-              label="Pub only"
+              label="Public only"
               active={filters.onlyPublicAPI}
               onToggle={() => onFiltersChange({ ...filters, onlyPublicAPI: !filters.onlyPublicAPI })}
             />
             {onUnpinAll && (
               <QuickToggle
-                label="Unpin"
+                label="Unpin all"
                 active={false}
                 onToggle={onUnpinAll}
               />
             )}
             {onSaveView && (
               <QuickToggle
-                label="Save"
+                label="Save view"
                 active={false}
                 onToggle={onSaveView}
               />
@@ -280,15 +280,17 @@ function FilterChip({ label, active, color, onToggle }: { label: string; active:
 function QuickToggle({ label, active, onToggle }: { label: string; active: boolean; onToggle: () => void }) {
   return (
     <button
+      title={label}
       onClick={onToggle}
       style={{
-        padding: '2px 7px',
+        padding: '3px 8px',
         fontSize: 10,
-        borderRadius: 4,
-        background: active ? 'rgba(248,113,113,0.12)' : 'transparent',
-        color: active ? '#F87171' : 'var(--cc-text-subtle)',
-        border: `1px solid ${active ? 'rgba(248,113,113,0.25)' : 'transparent'}`,
+        borderRadius: 999,
+        background: active ? 'var(--cc-selected-soft)' : 'transparent',
+        color: active ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+        border: `1px solid ${active ? 'rgba(14,165,233,0.35)' : 'transparent'}`,
         cursor: 'pointer',
+        whiteSpace: 'nowrap',
       }}
     >
       {active ? <><X size={9} className="inline mr-0.5" />{label}</> : label}

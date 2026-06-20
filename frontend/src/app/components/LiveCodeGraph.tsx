@@ -756,7 +756,7 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
 
   if (isDetached) {
     ctx.setLineDash([6, 4])
-  } else if (n.type === 'ExternalCrate' || n.type === 'Interface') {
+  } else if (n.type === 'Interface') {
     ctx.setLineDash([4, 3])
   } else {
     ctx.setLineDash([])
@@ -825,6 +825,26 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
       ctx.globalAlpha = alpha * 0.85
       ctx.beginPath()
       ctx.arc(n.x - size * 0.85, n.y, 3, 0, Math.PI * 2)
+      ctx.fill()
+      break
+    }
+    case 'ExternalCrate': {
+      const w = size * 1.9
+      const h = size * 1.35
+      ctx.beginPath()
+      ctx.roundRect(n.x - w / 2, n.y - h / 2, w, h, 7)
+      ctx.fill()
+      ctx.stroke()
+      ctx.strokeStyle = color
+      ctx.globalAlpha = alpha * 0.52
+      ctx.beginPath()
+      ctx.moveTo(n.x - w / 2 + 6, n.y - h / 2 + 8)
+      ctx.lineTo(n.x + w / 2 - 6, n.y - h / 2 + 8)
+      ctx.stroke()
+      ctx.fillStyle = color
+      ctx.globalAlpha = alpha * 0.36
+      ctx.beginPath()
+      ctx.roundRect(n.x - w / 2 + 8, n.y - h / 2 - 3, w * 0.38, 7, 3)
       ctx.fill()
       break
     }
@@ -925,7 +945,7 @@ function fitLabelLine(ctx: CanvasRenderingContext2D, text: string, maxWidth: num
 }
 
 function wrapLabel(ctx: CanvasRenderingContext2D, label: string, isImportant: boolean) {
-  const maxWidth = isImportant ? 160 : 118
+  const maxWidth = isImportant ? 170 : 118
   const parts = splitLabelParts(label)
   const lines: string[] = []
   let current = ''
@@ -949,11 +969,30 @@ function wrapLabel(ctx: CanvasRenderingContext2D, label: string, isImportant: bo
   return compacted.slice(0, 2).map(line => fitLabelLine(ctx, line, maxWidth))
 }
 
+function shortPath(path: string) {
+  const parts = path.split('/').filter(Boolean)
+  if (parts.length <= 2) return path
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
+}
+
+function nodeLabelLines(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
+  const important = isSelected || isHovered || n.type === 'Endpoint' || n.type === 'File' || n.type === 'Struct' || n.type === 'Trait'
+  const lines = wrapLabel(ctx, n.label, important)
+  const shouldShowPath = !!n.file && n.file !== n.label && (isSelected || isHovered || n.type === 'Endpoint' || n.type === 'File' || n.type === 'Struct')
+  if (shouldShowPath) {
+    lines.push(fitLabelLine(ctx, shortPath(n.file!), important ? 170 : 118))
+  }
+  if ((isSelected || isHovered) && n.reachability === 'Detached') {
+    lines.push('Detached source')
+  }
+  return lines.slice(0, isSelected || isHovered ? 3 : 2)
+}
+
 function labelBounds(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
   const size = NODE_SIZES[n.type]
   ctx.font = labelFont(isSelected, isHovered)
-  const lines = wrapLabel(ctx, n.label, isSelected || isHovered)
-  const width = Math.max(...lines.map(line => ctx.measureText(line).width)) + 10
+  const lines = nodeLabelLines(ctx, n, isSelected, isHovered)
+  const width = Math.max(...lines.map(line => ctx.measureText(line).width)) + 12
   const height = lines.length * labelLineHeight(isSelected, isHovered) + 2
   const offsetY = n.type === 'Module' ? size * 0.7 + 5 : size + 5
   return {

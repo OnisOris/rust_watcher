@@ -134,7 +134,7 @@ export function SearchCommandPalette({ nodes, search, open, onClose, onSelectNod
             ref={inputRef}
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Search symbol, file, trait, function…"
+            placeholder="Search symbol, file, endpoint, path, trait, function..."
             style={{
               flex: 1,
               background: 'none',
@@ -175,7 +175,7 @@ export function SearchCommandPalette({ nodes, search, open, onClose, onSelectNod
               style={{
                 background: i === cursor ? 'var(--cc-elevated)' : 'transparent',
                 cursor: 'pointer',
-                borderLeft: i === cursor ? '2px solid #06B6D4' : '2px solid transparent',
+                borderLeft: i === cursor ? '2px solid var(--cc-accent)' : '2px solid transparent',
               }}
             >
               <div className="flex items-center justify-center rounded shrink-0" style={{ width: 28, height: 28, background: `${KIND_COLORS[node.type] ?? '#7D8795'}18` }}>
@@ -184,7 +184,7 @@ export function SearchCommandPalette({ nodes, search, open, onClose, onSelectNod
               <div className="flex-1 text-left min-w-0">
                 <div style={{ fontSize: 13, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', fontWeight: 500 }}>{node.label}</div>
                 <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 1 }}>
-                  {node.file ?? node.module ?? node.crate ?? ''}
+                  {[node.file ?? node.module ?? node.crate, node.reachability].filter(Boolean).join(' · ')}
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -198,7 +198,7 @@ export function SearchCommandPalette({ nodes, search, open, onClose, onSelectNod
                 }}>
                   {node.type}
                 </span>
-                {i === cursor && <ArrowRight size={12} color="#06B6D4" />}
+                {i === cursor && <ArrowRight size={12} color="var(--cc-accent)" />}
               </div>
             </button>
           ))}

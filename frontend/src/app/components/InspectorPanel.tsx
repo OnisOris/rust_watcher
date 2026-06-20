@@ -11,6 +11,10 @@ interface InspectorPanelProps {
   analyzerStatus?: AnalyzerStatus
   appState?: AppState
   filesCount?: number
+  totalNodes?: number
+  totalEdges?: number
+  visibleNodes?: number
+  visibleEdges?: number
   message?: string | null
   onTogglePin: (id: string) => void
   onToggleCollapse: (id: string) => void
@@ -39,6 +43,10 @@ export function InspectorPanel({
   analyzerStatus = 'Starting',
   appState = 'empty',
   filesCount = 0,
+  totalNodes,
+  totalEdges,
+  visibleNodes,
+  visibleEdges,
   message,
   onTogglePin,
   onToggleCollapse,
@@ -59,6 +67,10 @@ export function InspectorPanel({
         analyzerStatus={analyzerStatus}
         appState={appState}
         filesCount={filesCount}
+        totalNodes={totalNodes ?? nodes.length}
+        totalEdges={totalEdges ?? edges.length}
+        visibleNodes={visibleNodes ?? nodes.length}
+        visibleEdges={visibleEdges ?? edges.length}
         message={message}
         onSelectNode={onSelectNode}
       />
@@ -75,6 +87,10 @@ function ProjectOverview({
   analyzerStatus,
   appState,
   filesCount,
+  totalNodes,
+  totalEdges,
+  visibleNodes,
+  visibleEdges,
   message,
   onSelectNode,
 }: {
@@ -84,6 +100,10 @@ function ProjectOverview({
   analyzerStatus: AnalyzerStatus
   appState: AppState
   filesCount: number
+  totalNodes: number
+  totalEdges: number
+  visibleNodes: number
+  visibleEdges: number
   message?: string | null
   onSelectNode: (id: string) => void
 }) {
@@ -92,16 +112,26 @@ function ProjectOverview({
   const analyzerColor = analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' || analyzerStatus === 'Starting' || analyzerStatus === 'Fallback' ? '#F59E0B' : '#34D399'
   const languageCounts = {
     Rust: nodes.filter(node => node.language === 'rust').length,
-    TS: nodes.filter(node => node.language === 'typescript' || node.language === 'javascript').length,
+    TypeScript: nodes.filter(node => node.language === 'typescript' || node.language === 'javascript').length,
     Python: nodes.filter(node => node.language === 'python').length,
     QML: nodes.filter(node => node.language === 'qml').length,
+  }
+  const nodeTypeCounts = {
+    Files: nodes.filter(node => node.type === 'File').length,
+    Functions: nodes.filter(node => node.type === 'Function' || node.type === 'Method').length,
+    Structs: nodes.filter(node => node.type === 'Struct').length,
     Endpoints: nodes.filter(node => node.type === 'Endpoint').length,
+    Crates: crateCount,
+    External: nodes.filter(node => node.type === 'ExternalCrate').length,
   }
   const sourceCounts = {
-    Active: nodes.filter(node => node.type === 'File' && node.reachability === 'Active').length,
+    Active: nodes.filter(node => node.type === 'File' && (node.reachability === 'Active' || !node.reachability)).length,
     Detached: nodes.filter(node => node.type === 'File' && node.reachability === 'Detached').length,
+    Generated: nodes.filter(node => node.type === 'File' && node.reachability === 'Generated').length,
     External: nodes.filter(node => node.reachability === 'External' || node.type === 'ExternalCrate').length,
   }
+  const hiddenNodes = Math.max(0, totalNodes - visibleNodes)
+  const hiddenEdges = Math.max(0, totalEdges - visibleEdges)
 
   const topConnected = [...nodes]
     .map(n => ({
@@ -121,32 +151,44 @@ function ProjectOverview({
 
       <div className="overflow-y-auto flex-1 p-3 space-y-4" style={{ scrollbarWidth: 'thin', scrollbarColor: 'var(--cc-border) transparent' }}>
         {/* stats grid */}
-        <div className="grid grid-cols-3 gap-2">
-          <StatCard label="Nodes" value={nodes.length} color="#06B6D4" />
-          <StatCard label="Edges" value={edges.length} color="#8B5CF6" />
-          <StatCard label="Crates" value={crateCount} color="#10B981" />
-        </div>
+        <Card>
+          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Graph scope</p>
+          <div className="grid grid-cols-2 gap-2">
+            <StatCard label="Visible nodes" value={visibleNodes} color="var(--cc-accent)" />
+            <StatCard label="Visible edges" value={visibleEdges} color="var(--cc-crate)" />
+            <StatCard label="Total nodes" value={totalNodes} color="#64748B" />
+            <StatCard label="Total edges" value={totalEdges} color="#64748B" />
+          </div>
+          {(hiddenNodes > 0 || hiddenEdges > 0) && (
+            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)' }}>
+              Hidden by filters: {hiddenNodes} nodes · {hiddenEdges} edges
+            </div>
+          )}
+        </Card>
 
         <Card>
-          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Languages</p>
-          <div className="grid grid-cols-5 gap-1.5">
+          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Languages</p>
+          <div className="grid grid-cols-4 gap-1.5">
             {Object.entries(languageCounts).map(([label, value]) => (
-              <div key={label} className="rounded px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-                <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 650 }}>{value}</div>
-                <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)' }}>{label}</div>
-              </div>
+              <MetricPill key={label} label={label} value={value} />
             ))}
           </div>
         </Card>
 
         <Card>
-          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Sources</p>
+          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Node types</p>
           <div className="grid grid-cols-3 gap-1.5">
+            {Object.entries(nodeTypeCounts).map(([label, value]) => (
+              <MetricPill key={label} label={label} value={value} />
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Sources</p>
+          <div className="grid grid-cols-4 gap-1.5">
             {Object.entries(sourceCounts).map(([label, value]) => (
-              <div key={label} className="rounded px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-                <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 650 }}>{value}</div>
-                <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)' }}>{label}</div>
-              </div>
+              <MetricPill key={label} label={label} value={value} />
             ))}
           </div>
         </Card>
@@ -166,13 +208,20 @@ function ProjectOverview({
         {/* hotspots */}
         <Section label="Hotspots">
           {topConnected.slice(0, 4).map(node => (
-            <div key={node.id} className="flex items-start gap-2 py-1.5">
+            <button
+              key={node.id}
+              onClick={() => onSelectNode(node.id)}
+              className="flex items-start gap-2 py-1.5 px-2 rounded-lg w-full text-left transition-colors"
+              style={{ background: 'transparent', cursor: 'pointer' }}
+            >
               <div className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ background: NODE_TYPE_COLORS[node.type] ?? '#7D8795' }} />
-              <div>
-                <div style={{ fontSize: 11, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace' }}>{node.label}</div>
-                <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{node.inCount + node.outCount} links · {node.type}</div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', overflowWrap: 'anywhere' }}>{node.label}</div>
+                <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>
+                  {node.inCount + node.outCount} links · {node.type}{node.file ? ` · ${node.file}` : ''}
+                </div>
               </div>
-            </div>
+            </button>
           ))}
         </Section>
 
@@ -291,7 +340,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
             </div>
             <div className="flex-1 min-w-0">
               <div style={{ fontSize: 15, color: 'var(--cc-text)', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.3 }}>{node.label}</div>
-              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{node.type} · {node.crate ?? 'unknown'}</div>
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{node.type} · {node.file ?? node.crate ?? 'unknown'}</div>
             </div>
           </div>
 
@@ -307,7 +356,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
             {node.isAsync && <Badge color="#06B6D4">async</Badge>}
             {node.isUnsafe && <Badge color="#F87171">unsafe</Badge>}
             {node.isGeneric && <Badge color="#8B5CF6">generic</Badge>}
-            {node.reachability === 'Detached' && <Badge color="#7D8795">Detached</Badge>}
+            {node.reachability && <Badge color={node.reachability === 'Detached' ? '#64748B' : node.reachability === 'External' ? '#94A3B8' : node.reachability === 'Generated' ? '#8B5CF6' : '#10B981'}>{node.reachability}</Badge>}
             {diagnostics.length > 0 && <Badge color={diagnostics.some(d => d.severity === 'Error') ? '#F87171' : '#F59E0B'}>{diagnostics.length} diagnostics</Badge>}
           </div>
 
@@ -526,8 +575,17 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className="rounded-lg p-2 text-center" style={{ background: 'var(--cc-card)', border: '1px solid var(--cc-border)' }}>
-      <div style={{ fontSize: 20, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
+      <div style={{ fontSize: 20, fontWeight: 750, color, lineHeight: 1 }}>{value}</div>
       <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{label}</div>
+    </div>
+  )
+}
+
+function MetricPill({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+      <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 700 }}>{value}</div>
+      <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
     </div>
   )
 }
