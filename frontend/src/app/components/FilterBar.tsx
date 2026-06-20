@@ -125,7 +125,7 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
             <ToggleChip
               label="External"
               enabled={filters.showExternal}
-              title={filters.showExternal ? 'External crates are visible' : 'External crates are hidden'}
+              title={filters.showExternal ? 'External dependencies are visible' : 'External dependencies are hidden'}
               onToggle={() => onFiltersChange({ ...filters, showExternal: !filters.showExternal })}
             />
             <ToggleChip

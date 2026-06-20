@@ -299,8 +299,8 @@ function modeVisibility(mode: GraphMode): { nodeTypes: Set<NodeType>; edgeTypes:
   }
   if (mode === 'Traits') {
     return {
-      nodeTypes: new Set(['Trait', 'Impl', 'Struct', 'Class', 'Object', 'Enum', 'Method']),
-      edgeTypes: new Set(['Implements', 'Contains', 'TypeReference']),
+      nodeTypes: new Set(['File', 'Module', 'Trait', 'Impl', 'Struct', 'Class', 'Object', 'Enum', 'Interface', 'TypeAlias', 'Function', 'Method', 'Property']),
+      edgeTypes: new Set(['Implements', 'Contains', 'TypeReference', 'Imports', 'Uses']),
     }
   }
   return {

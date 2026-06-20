@@ -134,7 +134,7 @@ export function SearchCommandPalette({ nodes, search, open, onClose, onSelectNod
             ref={inputRef}
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Search symbol, file, endpoint, path, trait, function..."
+            placeholder="Search symbol, file, endpoint, path, type, function..."
             style={{
               flex: 1,
               background: 'none',

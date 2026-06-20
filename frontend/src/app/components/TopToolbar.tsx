@@ -12,12 +12,13 @@ import {
   SlidersHorizontal,
   Wifi,
 } from 'lucide-react'
-import type { AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
+import type { AnalyzerStatus, GraphMode, AppState, ThemeMode, AppStatus } from '../types'
 import { formatUpdatedLabel } from '../utils/time'
 
 interface TopToolbarProps {
   appState: AppState
   analyzerStatus: AnalyzerStatus
+  pythonAnalyzer?: AppStatus['pythonAnalyzer']
   message?: string | null
   projectName?: string | null
   lastUpdated?: string | null
@@ -36,12 +37,12 @@ interface TopToolbarProps {
 }
 
 const MODES: { key: GraphMode; label: string; hint: string }[] = [
-  { key: 'Macro', label: 'Macro', hint: 'Project, crates, files and external dependencies' },
+  { key: 'Macro', label: 'Macro', hint: 'Project scopes, files and external dependencies' },
   { key: 'Meso', label: 'Meso', hint: 'Important symbols with file context' },
   { key: 'Micro', label: 'Micro', hint: 'Detailed symbol-level relations' },
   { key: 'CallFlow', label: 'Call Flow', hint: 'Endpoint-to-handler and function chains' },
   { key: 'DataFlow', label: 'Data Flow', hint: 'Request, DTO and response type flow' },
-  { key: 'Traits', label: 'Traits & Impl', hint: 'Traits, impls and derive relationships' },
+  { key: 'Traits', label: 'Types & Impl', hint: 'Traits, impls, classes and type relationships' },
 ]
 
 const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: string; dot: string; pulse: boolean }> = {
@@ -60,6 +61,7 @@ const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: s
 export function TopToolbar({
   appState,
   analyzerStatus,
+  pythonAnalyzer,
   message,
   projectName,
   lastUpdated,
@@ -116,6 +118,14 @@ export function TopToolbar({
         <span style={{ color: status.color, fontSize: 11, fontWeight: 700 }}>
           rust-analyzer · {status.label}
         </span>
+        {pythonAnalyzer && (
+          <span
+            title={pythonAnalyzer.message ?? undefined}
+            style={{ color: pythonAnalyzer.status.includes('ready') ? '#10B981' : pythonAnalyzer.status.includes('error') || pythonAnalyzer.status.includes('unavailable') ? '#D97706' : 'var(--cc-text-subtle)', fontSize: 11 }}
+          >
+            · python {pythonAnalyzer.status}
+          </span>
+        )}
         <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>
           <Clock size={10} className="inline mr-1" />
           {formatUpdatedLabel(lastUpdated)}
@@ -169,7 +179,7 @@ export function TopToolbar({
       >
         <Search size={14} style={{ flexShrink: 0 }} />
         <span style={{ minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>
-          Search symbol, file, endpoint, trait, function...
+          Search symbol, file, endpoint, type, function...
         </span>
         <span className="ml-auto rounded" style={{ padding: '1px 6px', background: 'var(--cc-elevated)', color: 'var(--cc-text-subtle)', fontSize: 10, border: '1px solid var(--cc-border)', flexShrink: 0 }}>
           ⌘K

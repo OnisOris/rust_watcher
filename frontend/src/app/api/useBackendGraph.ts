@@ -29,6 +29,7 @@ const DEV_FALLBACK = import.meta.env.DEV
 const MOCK_STATUS: AppStatus = {
   appState: 'normal',
   analyzerStatus: 'Ready',
+  pythonAnalyzer: { mode: 'parser', status: 'parser only' },
   projectName: 'mock workspace',
   projectPath: null,
   lastUpdated: null,
@@ -56,6 +57,7 @@ function diagnosticsMapFromRecord(record: Record<string, DiagnosticRecord[]>): M
 export function useBackendGraph(mode: GraphMode) {
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
+  const [pythonAnalyzer, setPythonAnalyzer] = useState<AppStatus['pythonAnalyzer']>(null)
   const [projectName, setProjectName] = useState<string | null>(null)
   const [projectPath, setProjectPath] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
@@ -83,6 +85,7 @@ export function useBackendGraph(mode: GraphMode) {
   const applyStatus = useCallback((status: AppStatus) => {
     setAppState(status.appState)
     setAnalyzerStatus(status.analyzerStatus)
+    setPythonAnalyzer(status.pythonAnalyzer ?? null)
     setProjectName(status.projectName)
     setProjectPath(status.projectPath)
     setLastUpdated(status.lastUpdated)
@@ -330,6 +333,7 @@ export function useBackendGraph(mode: GraphMode) {
   return {
     appState,
     analyzerStatus,
+    pythonAnalyzer,
     projectName,
     projectPath,
     lastUpdated,

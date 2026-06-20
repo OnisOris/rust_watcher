@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
-import type { AnalyzerStatus, AppState, ContextPack, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import type { AnalyzerStatus, AppState, AppStatus, ContextPack, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
 import { contextPackToMarkdown, summarizeContextPack } from '../api/contextPack'
 import { traceToMarkdown } from '../api/trace'
 
@@ -10,6 +10,7 @@ interface InspectorPanelProps {
   edges: GraphEdge[]
   projectName?: string | null
   analyzerStatus?: AnalyzerStatus
+  pythonAnalyzer?: AppStatus['pythonAnalyzer']
   appState?: AppState
   filesCount?: number
   totalNodes?: number
@@ -42,6 +43,7 @@ export function InspectorPanel({
   edges,
   projectName,
   analyzerStatus = 'Starting',
+  pythonAnalyzer = null,
   appState = 'empty',
   filesCount = 0,
   totalNodes,
@@ -66,6 +68,7 @@ export function InspectorPanel({
         edges={edges}
         projectName={projectName}
         analyzerStatus={analyzerStatus}
+        pythonAnalyzer={pythonAnalyzer}
         appState={appState}
         filesCount={filesCount}
         totalNodes={totalNodes ?? nodes.length}
@@ -88,12 +91,20 @@ function sourceBucket(node: GraphNode) {
   return 'Active'
 }
 
+function detachedSourceFallback(node: GraphNode) {
+  if (node.language === 'rust') return 'This file is not reachable from crate roots or mod declarations.'
+  if (node.language === 'python') return 'This file is not imported or referenced by the active Python package graph.'
+  if (node.language === 'qml') return 'This QML file is not imported or rendered by the active QML graph.'
+  return 'This source file is not reachable from the active project graph.'
+}
+
 // ── Project overview (nothing selected) ────────────────────────────────────
 function ProjectOverview({
   nodes,
   edges,
   projectName,
   analyzerStatus,
+  pythonAnalyzer,
   appState,
   filesCount,
   totalNodes,
@@ -107,6 +118,7 @@ function ProjectOverview({
   edges: GraphEdge[]
   projectName?: string | null
   analyzerStatus: AnalyzerStatus
+  pythonAnalyzer?: AppStatus['pythonAnalyzer']
   appState: AppState
   filesCount: number
   totalNodes: number
@@ -116,8 +128,8 @@ function ProjectOverview({
   message?: string | null
   onSelectNode: (id: string) => void
 }) {
-  const visibleCrates = new Set(nodes.map(n => n.crate).filter((crateName): crateName is string => !!crateName && crateName !== 'external'))
-  const crateCount = visibleCrates.size || nodes.filter(n => n.id.startsWith('crate:')).length
+  const visibleScopes = new Set(nodes.map(n => n.crate ?? n.module).filter((scope): scope is string => !!scope && scope !== 'external'))
+  const scopeCount = visibleScopes.size || nodes.filter(n => n.id.startsWith('crate:')).length
   const analyzerColor = analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' || analyzerStatus === 'Starting' || analyzerStatus === 'Fallback' ? '#F59E0B' : '#34D399'
   const languageCounts = {
     Rust: nodes.filter(node => node.language === 'rust').length,
@@ -130,7 +142,7 @@ function ProjectOverview({
     Functions: nodes.filter(node => node.type === 'Function' || node.type === 'Method').length,
     Structs: nodes.filter(node => node.type === 'Struct').length,
     Endpoints: nodes.filter(node => node.type === 'Endpoint').length,
-    Crates: crateCount,
+    Scopes: scopeCount,
     External: nodes.filter(node => node.type === 'ExternalCrate').length,
   }
   const sourceCounts = {
@@ -212,6 +224,11 @@ function ProjectOverview({
           <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>
             {message ?? appState} · {filesCount} files indexed
           </div>
+          {pythonAnalyzer && (
+            <div title={pythonAnalyzer.message ?? undefined} style={{ marginTop: 6, fontSize: 10, color: 'var(--cc-text-subtle)' }}>
+              python · {pythonAnalyzer.status}
+            </div>
+          )}
         </Card>
 
         {/* hotspots */}
@@ -443,7 +460,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
           <Card>
             <SectionLabel label="Detached Source" />
             <div style={{ fontSize: 11, color: 'var(--cc-text-muted)', lineHeight: 1.45 }}>
-              {node.detachedReason ?? 'This file is not reachable from crate roots or mod declarations.'}
+              {node.detachedReason ?? detachedSourceFallback(node)}
             </div>
             <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
               Add a <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>mod</span> declaration from main.rs/lib.rs, move it to examples/, or keep it as notes/scratch.

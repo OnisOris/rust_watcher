@@ -796,11 +796,22 @@ pub struct GraphPatch {
 pub struct AppStatus {
     pub app_state: AppState,
     pub analyzer_status: AnalyzerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub python_analyzer: Option<PythonAnalyzerStatus>,
     pub project_name: Option<String>,
     pub project_path: Option<String>,
     pub last_updated: Option<String>,
     pub message: Option<String>,
     pub progress: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PythonAnalyzerStatus {
+    pub mode: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -906,6 +917,7 @@ impl AppStatus {
         Self {
             app_state: AppState::Empty,
             analyzer_status: AnalyzerStatus::Starting,
+            python_analyzer: None,
             project_name: None,
             project_path: None,
             last_updated: None,

@@ -41,10 +41,15 @@ use url::Url;
 use uuid::Uuid;
 
 mod context_pack;
+mod python_ty;
 mod trace;
 use context_pack::{
     build_edge_context_pack, build_node_context_pack, build_route_context_pack,
     build_trace_context_pack,
+};
+use python_ty::{
+    enrich_python_semantic_calls_for_files, enrich_python_with_ty, PythonAnalyzerMode,
+    PythonTyState,
 };
 use trace::{active_trace_node, build_edge_trace, build_node_trace, build_route_trace};
 
@@ -79,6 +84,12 @@ struct ServeArgs {
     rust_analyzer: PathBuf,
     #[arg(long)]
     enable_editor_open: bool,
+    #[arg(long, value_enum, default_value_t = PythonAnalyzerMode::Auto)]
+    python_analyzer: PythonAnalyzerMode,
+    #[arg(long, default_value = "ty")]
+    ty_path: PathBuf,
+    #[arg(long)]
+    disable_ty: bool,
 }
 
 #[derive(Clone)]
@@ -88,6 +99,7 @@ struct AppStateHandle {
     status: Arc<RwLock<AppStatus>>,
     ws_tx: broadcast::Sender<ServerMessage>,
     analyzer: Arc<AnalyzerState>,
+    python_ty: Arc<PythonTyState>,
     diagnostics_by_file: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     diagnostics_by_node: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     watcher: Arc<RwLock<Option<notify::RecommendedWatcher>>>,
@@ -464,9 +476,21 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .canonicalize()
         .context("failed to canonicalize project root")?;
 
+    let python_analyzer_mode = if args.disable_ty {
+        PythonAnalyzerMode::Parser
+    } else {
+        args.python_analyzer
+    };
+    let python_ty = Arc::new(PythonTyState::new(
+        args.ty_path.clone(),
+        python_analyzer_mode,
+        project_root.clone(),
+    ));
+
     let initial_status = AppStatus {
         app_state: AppState::Empty,
         analyzer_status: AnalyzerStatus::Starting,
+        python_analyzer: Some(python_ty.status_record()),
         project_name: project_root
             .file_name()
             .and_then(|n| n.to_str())
@@ -497,6 +521,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         status: Arc::new(RwLock::new(initial_status)),
         ws_tx,
         analyzer,
+        python_ty,
         diagnostics_by_file: Arc::new(RwLock::new(HashMap::new())),
         diagnostics_by_node: Arc::new(RwLock::new(HashMap::new())),
         watcher: Arc::new(RwLock::new(None)),
@@ -505,7 +530,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     install_watcher(&state, project_root.clone());
 
-    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %args.rust_analyzer.display(), "starting Rust Code Command Center");
+    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %args.rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), "starting Rust Code Command Center");
 
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -842,6 +867,7 @@ async fn node_details(
         .collect::<Vec<_>>();
     let mut references = graph_reference_records(&incoming_edges, &node_by_id);
     references.extend(resolve_rust_references(&state, &graph, &node).await);
+    references.extend(resolve_python_references(&state, &graph, &node).await);
     dedupe_references(&mut references);
     let related_types = related_type_nodes(&incoming_edges, &outgoing_edges, &node_by_id);
     let diagnostics = state
@@ -1171,6 +1197,7 @@ async fn open_project(
     };
     *state.project_root.write() = root.clone();
     state.analyzer.set_root(root.clone()).await;
+    state.python_ty.set_root(root.clone()).await;
     install_watcher(&state, root.clone());
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -1590,6 +1617,8 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
                 status.progress = Some(80);
             });
             let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
+            start_python_ty_if_available(&state).await;
+            let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
             snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
             publish_snapshot(&state, snapshot);
             state.is_indexing.store(false, Ordering::SeqCst);
@@ -1658,6 +1687,8 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             status.progress = Some(92);
         });
         enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
+        start_python_ty_if_available(&state).await;
+        let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
         snapshot.status = ready_status(&state, "Ready");
         publish_snapshot(&state, snapshot);
     }
@@ -1770,6 +1801,7 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
     }
     if only_python {
         match index_changed_python_files(&state, &project_root, python_files, changed_files.clone())
+            .await
         {
             Ok(()) => {
                 state.is_indexing.store(false, Ordering::SeqCst);
@@ -1829,6 +1861,8 @@ async fn rebuild_patch_snapshot(
         }
         enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
     }
+    start_python_ty_if_available(&state).await;
+    let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
     snapshot.status = ready_status(&state, "Ready");
     let diagnostics = state
         .diagnostics_by_file
@@ -1851,6 +1885,8 @@ async fn rebuild_language_patch_snapshot(
 ) {
     let old_snapshot = state.graph.read().clone();
     let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
+    start_python_ty_if_available(&state).await;
+    let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
     snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
     let diagnostics = state
         .diagnostics_by_file
@@ -1975,7 +2011,7 @@ fn index_changed_typescript_files(
     Ok(())
 }
 
-fn index_changed_python_files(
+async fn index_changed_python_files(
     state: &AppStateHandle,
     project_root: &Path,
     files: Vec<String>,
@@ -1991,7 +2027,22 @@ fn index_changed_python_files(
         .collect::<HashMap<_, _>>();
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
+    if !state.python_ty.is_parser_only() {
+        for file in &changed_set {
+            let absolute = project_root.join(file);
+            if let Err(error) = state.python_ty.sync_changed_file(&absolute).await {
+                warn!(?error, file = %file, "ty didChange failed; keeping parser Python incremental path");
+            }
+        }
+    }
     graph_builder::python::enrich_python_graph_for_files(&mut snapshot, project_root, &changed_set);
+    enrich_python_semantic_calls_for_files(
+        &mut snapshot,
+        project_root,
+        &state.python_ty,
+        &changed_set,
+    )
+    .await;
     restore_existing_positions(&mut snapshot, &old_positions);
     snapshot.status = ready_status(state, "Ready");
     let diagnostics = state
@@ -2191,12 +2242,63 @@ fn spawn_diagnostics_listener(
             ) else {
                 continue;
             };
-            apply_lsp_diagnostics(&state, params);
+            apply_lsp_diagnostics(&state, LanguageId::Rust, params);
         }
     });
 }
 
-fn apply_lsp_diagnostics(state: &AppStateHandle, params: ra_client::LspPublishDiagnosticsParams) {
+async fn start_python_ty_if_available(state: &AppStateHandle) -> bool {
+    if state.python_ty.is_parser_only() {
+        update_status(state, |_| {});
+        return false;
+    }
+    match state.python_ty.subscribe_notifications().await {
+        Ok(rx) => {
+            spawn_python_diagnostics_listener(state.clone(), rx);
+            update_status(state, |_| {});
+            true
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                "ty unavailable; Python parser fallback remains active"
+            );
+            let status_record = state.python_ty.status_record();
+            update_status(state, |status| {
+                if status_record.mode == "ty" {
+                    status.analyzer_status = AnalyzerStatus::Error;
+                    status.message = Some(format!("Python analyzer ty unavailable: {error}"));
+                }
+            });
+            false
+        }
+    }
+}
+
+fn spawn_python_diagnostics_listener(
+    state: AppStateHandle,
+    mut rx: broadcast::Receiver<ra_client::LspNotification>,
+) {
+    tokio::spawn(async move {
+        while let Ok(notification) = rx.recv().await {
+            if notification.method != "textDocument/publishDiagnostics" {
+                continue;
+            }
+            let Ok(params) = serde_json::from_value::<ra_client::LspPublishDiagnosticsParams>(
+                notification.params,
+            ) else {
+                continue;
+            };
+            apply_lsp_diagnostics(&state, LanguageId::Python, params);
+        }
+    });
+}
+
+fn apply_lsp_diagnostics(
+    state: &AppStateHandle,
+    language: LanguageId,
+    params: ra_client::LspPublishDiagnosticsParams,
+) {
     let Some(path) = Url::parse(params.uri.as_str())
         .ok()
         .and_then(|uri| uri.to_file_path().ok())
@@ -2211,7 +2313,15 @@ fn apply_lsp_diagnostics(state: &AppStateHandle, params: ra_client::LspPublishDi
         .diagnostics
         .into_iter()
         .enumerate()
-        .map(|(idx, diagnostic)| diagnostic_from_lsp(&file, idx, diagnostic, &symbol_index))
+        .map(|(idx, diagnostic)| {
+            diagnostic_from_lsp_with_language(
+                language.clone(),
+                &file,
+                idx,
+                diagnostic,
+                &symbol_index,
+            )
+        })
         .collect::<Vec<_>>();
 
     state
@@ -2228,7 +2338,18 @@ fn apply_lsp_diagnostics(state: &AppStateHandle, params: ra_client::LspPublishDi
     }));
 }
 
+#[cfg(test)]
 fn diagnostic_from_lsp(
+    file: &str,
+    index: usize,
+    diagnostic: ra_client::LspDiagnostic,
+    symbol_index: &SymbolIndex,
+) -> DiagnosticRecord {
+    diagnostic_from_lsp_with_language(LanguageId::Rust, file, index, diagnostic, symbol_index)
+}
+
+fn diagnostic_from_lsp_with_language(
+    language: LanguageId,
     file: &str,
     index: usize,
     diagnostic: ra_client::LspDiagnostic,
@@ -2254,7 +2375,7 @@ fn diagnostic_from_lsp(
             "diagnostic:{file}:{}:{}:{index}",
             range.start.line, range.start.character
         ),
-        language: LanguageId::Rust,
+        language,
         file: file.to_string(),
         range: Some(range),
         severity: diagnostic_severity(diagnostic.severity),
@@ -2585,6 +2706,54 @@ async fn resolve_rust_references(
     references_from_locations(graph, &project_root, locations)
 }
 
+async fn resolve_python_references(
+    state: &AppStateHandle,
+    graph: &GraphSnapshot,
+    node: &GraphNode,
+) -> Vec<ReferenceRecord> {
+    if state.python_ty.is_parser_only()
+        || node.language.as_deref() != Some(LanguageId::Python.as_str())
+        || !matches!(
+            node.node_type,
+            graph_core::NodeType::Function
+                | graph_core::NodeType::Method
+                | graph_core::NodeType::Class
+        )
+    {
+        return Vec::new();
+    }
+    let Some(file) = node.file.as_ref() else {
+        return Vec::new();
+    };
+    let Some(selection_range) = node.selection_range else {
+        return Vec::new();
+    };
+    let project_root = state.project_root.read().clone();
+    let absolute_file = project_root.join(file);
+    let locations = match timeout(
+        Duration::from_secs(4),
+        state.python_ty.references(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(locations)) => locations,
+        Ok(Err(error)) => {
+            warn!(?error, node = %node.id, "ty references failed");
+            return Vec::new();
+        }
+        Err(_) => {
+            warn!(node = %node.id, "ty references timed out");
+            return Vec::new();
+        }
+    };
+
+    references_from_locations(graph, &project_root, locations)
+}
+
 fn references_from_locations(
     graph: &GraphSnapshot,
     project_root: &Path,
@@ -2678,6 +2847,7 @@ where
 {
     let mut status = state.status.read().clone();
     update(&mut status);
+    status.python_analyzer = Some(state.python_ty.status_record());
     status.last_updated = Some(timestamp());
     *state.status.write() = status.clone();
     state.graph.write().status = status.clone();
@@ -2687,6 +2857,7 @@ where
 fn publish_snapshot(state: &AppStateHandle, mut snapshot: GraphSnapshot) {
     let project_root = state.project_root.read().clone();
     apply_saved_layout(&mut snapshot, &project_root);
+    snapshot.status.python_analyzer = Some(state.python_ty.status_record());
     snapshot.status.last_updated = Some(timestamp());
     *state.status.write() = snapshot.status.clone();
     *state.graph.write() = snapshot.clone();
@@ -2697,6 +2868,7 @@ fn ready_status(state: &AppStateHandle, message: &str) -> AppStatus {
     let mut status = state.status.read().clone();
     status.app_state = AppState::Normal;
     status.analyzer_status = AnalyzerStatus::Ready;
+    status.python_analyzer = Some(state.python_ty.status_record());
     status.message = Some(message.into());
     status.progress = Some(100);
     status.last_updated = Some(timestamp());
@@ -2711,6 +2883,7 @@ fn fallback_status(state: &AppStateHandle, message: &str) -> AppStatus {
     let mut status = state.status.read().clone();
     status.app_state = AppState::Normal;
     status.analyzer_status = AnalyzerStatus::Fallback;
+    status.python_analyzer = Some(state.python_ty.status_record());
     status.message = Some(message.into());
     status.progress = Some(100);
     status.last_updated = Some(timestamp());

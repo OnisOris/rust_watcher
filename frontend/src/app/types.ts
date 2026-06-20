@@ -162,6 +162,11 @@ export interface AnalysisEvent {
 export interface AppStatus {
   appState: AppState
   analyzerStatus: AnalyzerStatus
+  pythonAnalyzer?: {
+    mode: string
+    status: string
+    message?: string | null
+  } | null
   projectName: string | null
   projectPath: string | null
   lastUpdated: string | null

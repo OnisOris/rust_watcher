@@ -1509,6 +1509,7 @@ mod tests {
         AppStatus {
             app_state: AppState::Normal,
             analyzer_status: AnalyzerStatus::Ready,
+            python_analyzer: None,
             project_name: Some("test".into()),
             project_path: None,
             last_updated: None,

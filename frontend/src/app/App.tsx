@@ -86,6 +86,7 @@ export default function App() {
   const {
     appState,
     analyzerStatus,
+    pythonAnalyzer,
     projectName,
     lastUpdated,
     message,
@@ -322,6 +323,7 @@ export default function App() {
       <TopToolbar
         appState={appState}
         analyzerStatus={analyzerStatus}
+        pythonAnalyzer={pythonAnalyzer}
         message={message}
         projectName={projectName}
         lastUpdated={lastUpdated}
@@ -434,7 +436,7 @@ export default function App() {
                 </>
               )}
               <span style={{ color: 'var(--cc-border)' }}>·</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{mode}</span>
+              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{graphModeLabel(mode)}</span>
             </div>
             <div className="flex items-center gap-1.5 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' ? '#F59E0B' : '#34D399' }} />
@@ -450,6 +452,7 @@ export default function App() {
           edges={visibleGraphEdges}
           projectName={projectName}
           analyzerStatus={analyzerStatus}
+          pythonAnalyzer={pythonAnalyzer}
           appState={appState}
           filesCount={files.length}
           totalNodes={graphNodes.length}
@@ -498,10 +501,14 @@ function graphModeEmptyHint(mode: GraphMode) {
     case 'DataFlow':
       return { title: 'No data flow detected', body: 'This mode shows request parameters, DTOs and response types. Try Semantic edges or inspect handler signatures.' }
     case 'Traits':
-      return { title: 'No trait or impl relations found', body: 'This mode expects trait, impl or derive relations. Try enabling external crates and semantic edges.' }
+      return { title: 'No type or implementation relations found', body: 'This mode shows Rust traits/impls plus class and type-reference relationships in other languages. Try enabling external dependencies and semantic edges.' }
     default:
       return { title: 'No edges in this view', body: 'The current filters hide all relationships. Try Full depth, Semantic edges, or enable detached and external sources.' }
   }
+}
+
+function graphModeLabel(mode: GraphMode) {
+  return mode === 'Traits' ? 'Types & Impl' : mode
 }
 
 function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens) {
@@ -591,11 +598,11 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
 function IndexingScreen() {
   const steps = [
     { label: 'Reading Cargo.toml…', done: true },
-    { label: 'Discovering crates…', done: true },
+    { label: 'Discovering project scopes…', done: true },
     { label: 'Loading rust-analyzer…', done: true },
     { label: 'Indexing source files…', done: false, progress: 45 },
     { label: 'Building semantic graph…', done: false, pending: true },
-    { label: 'Resolving trait bounds…', done: false, pending: true },
+    { label: 'Resolving type relationships…', done: false, pending: true },
   ]
 
   return (
@@ -650,7 +657,7 @@ function IndexingScreen() {
         ))}
       </div>
 
-      <p style={{ fontSize: 11, color: 'var(--cc-text-faint)', marginTop: 16 }}>247 files · 4 crates · rust-analyzer 2024.12</p>
+      <p style={{ fontSize: 11, color: 'var(--cc-text-faint)', marginTop: 16 }}>247 files · 4 scopes · semantic analyzers</p>
     </div>
   )
 }

@@ -42,6 +42,7 @@ const FALLBACK_TREE: TreeCrate[] = [
     id: 'workspace',
     label: 'workspace',
     type: 'crate',
+    kind: 'workspace',
     children: [
       {
         id: 'src',
@@ -122,7 +123,7 @@ export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, onS
           </div>
           <div className="flex items-center gap-1">
             <IconBtn icon={<FocusIcon size={13} />} title="Focus current file" />
-            <IconBtn icon={<EyeOff size={13} />} title="Hide external crates" />
+            <IconBtn icon={<EyeOff size={13} />} title="Hide external dependencies" />
             <IconBtn icon={<ChevronsUpDown size={13} />} title="Collapse all" onClick={() => { setExpandedCrates(new Set()); setExpandedModules(new Set()) }} />
           </div>
         </div>
@@ -153,22 +154,22 @@ export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, onS
       <div className="overflow-y-auto flex-1 py-2" style={{ scrollbarWidth: 'thin', scrollbarColor: 'var(--cc-border) transparent' }}>
         {activeSection === 'workspace' && (
           <div>
-            {tree.map(crate => (
-              <div key={crate.id}>
+            {tree.map(group => (
+              <div key={group.id}>
                 <button
                   className="flex items-center gap-2 w-full px-3 py-1.5 transition-colors"
                   style={{ background: 'none', cursor: 'pointer', color: 'var(--cc-text)' }}
-                  onClick={() => toggleExpand(crate.id, 'crate')}
+                  onClick={() => toggleExpand(group.id, 'crate')}
                 >
-                  {expandedCrates.has(crate.id) ? <ChevronDown size={12} color="var(--cc-text-subtle)" /> : <ChevronRight size={12} color="var(--cc-text-subtle)" />}
+                  {expandedCrates.has(group.id) ? <ChevronDown size={12} color="var(--cc-text-subtle)" /> : <ChevronRight size={12} color="var(--cc-text-subtle)" />}
                   <Package size={13} color="var(--cc-crate)" />
-                  <span style={{ fontSize: 12, fontWeight: 650, color: 'var(--cc-text)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{crate.label}</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--cc-text-faint)', background: 'var(--cc-elevated)', padding: '1px 5px', borderRadius: 6 }}>crate</span>
+                  <span style={{ fontSize: 12, fontWeight: 650, color: 'var(--cc-text)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{group.label}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--cc-text-faint)', background: 'var(--cc-elevated)', padding: '1px 5px', borderRadius: 6 }}>{groupKindLabel(group.kind)}</span>
                 </button>
 
-                {expandedCrates.has(crate.id) && (
+                {expandedCrates.has(group.id) && (
                   <div>
-                    {crate.children.map(child => (
+                    {group.children.map(child => (
                       <div key={child.id}>
                         {isModule(child) ? (
                           <div>
@@ -309,6 +310,7 @@ type TreeCrate = {
   id: string
   label: string
   type: 'crate'
+  kind: 'crate' | 'package' | 'workspace' | 'module'
   children: Array<TreeModule | TreeFile>
 }
 
@@ -321,7 +323,8 @@ function buildFileTree(files: ProjectFile[], nodes: GraphNode[]): TreeCrate[] {
     const crateName = file.crate || 'workspace'
     let crateNode = crates.get(crateName)
     if (!crateNode) {
-      crateNode = { id: crateName, label: crateName, type: 'crate', children: [] }
+      const graphNode = fileNodeByPath.get(file.path)
+      crateNode = { id: crateName, label: crateName, type: 'crate', kind: groupKindForFile(file, graphNode), children: [] }
       crates.set(crateName, crateNode)
     }
 
@@ -351,6 +354,27 @@ function buildFileTree(files: ProjectFile[], nodes: GraphNode[]): TreeCrate[] {
   }
 
   return [...crates.values()]
+}
+
+function groupKindForFile(file: ProjectFile, node?: GraphNode): TreeCrate['kind'] {
+  const language = node?.language
+  if (language === 'rust' || file.crate === 'external') return 'crate'
+  if (language === 'python') return 'package'
+  if (language === 'qml') return 'module'
+  return 'workspace'
+}
+
+function groupKindLabel(kind: TreeCrate['kind']) {
+  switch (kind) {
+    case 'package':
+      return 'package'
+    case 'module':
+      return 'module'
+    case 'workspace':
+      return 'scope'
+    case 'crate':
+      return 'crate'
+  }
 }
 
 function resolveFileNodeId(file: ProjectFile, nodes: GraphNode[]) {

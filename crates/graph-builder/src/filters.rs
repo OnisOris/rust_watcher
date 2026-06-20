@@ -116,13 +116,19 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
         ),
         GraphMode::Traits => (
             [
+                NodeType::File,
+                NodeType::Module,
                 NodeType::Trait,
                 NodeType::Impl,
                 NodeType::Struct,
                 NodeType::Class,
                 NodeType::Object,
                 NodeType::Enum,
+                NodeType::Interface,
+                NodeType::TypeAlias,
+                NodeType::Function,
                 NodeType::Method,
+                NodeType::Property,
             ]
             .into_iter()
             .collect(),
@@ -130,6 +136,8 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
                 EdgeType::Implements,
                 EdgeType::Contains,
                 EdgeType::TypeReference,
+                EdgeType::Imports,
+                EdgeType::Uses,
             ]
             .into_iter()
             .collect(),

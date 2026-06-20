@@ -44,11 +44,36 @@ pub struct RaClient {
     pending: PendingMap,
     notifications: broadcast::Sender<LspNotification>,
     next_id: AtomicU64,
+    language_id: String,
+    process_name: String,
 }
 
 impl RaClient {
     pub async fn start(binary: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Self> {
+        Self::start_with_options(
+            binary,
+            std::iter::empty::<&str>(),
+            root,
+            "rust",
+            "rust-analyzer",
+        )
+        .await
+    }
+
+    pub async fn start_with_options<I, S>(
+        binary: impl AsRef<Path>,
+        args: I,
+        root: impl AsRef<Path>,
+        language_id: impl Into<String>,
+        process_name: impl Into<String>,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let process_name = process_name.into();
         let mut child = Command::new(binary.as_ref())
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -56,7 +81,7 @@ impl RaClient {
             .spawn()
             .with_context(|| {
                 format!(
-                    "failed to start rust-analyzer at {}",
+                    "failed to start {process_name} at {}",
                     binary.as_ref().display()
                 )
             })?;
@@ -70,10 +95,11 @@ impl RaClient {
             .take()
             .ok_or_else(|| anyhow!("rust-analyzer stdout unavailable"))?;
         if let Some(stderr) = child.stderr.take() {
+            let process_name = process_name.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "rust-analyzer", "{line}");
+                    tracing::debug!(target: "lsp-client", process = %process_name, "{line}");
                 }
             });
         }
@@ -88,6 +114,8 @@ impl RaClient {
             pending,
             notifications,
             next_id: AtomicU64::new(1),
+            language_id: language_id.into(),
+            process_name,
         };
         client.initialize(root.as_ref()).await?;
         client.initialized().await?;
@@ -131,7 +159,7 @@ impl RaClient {
     pub async fn did_open(&self, file: &Path, text: String, version: i32) -> Result<()> {
         self.notify(
             "textDocument/didOpen",
-            did_open_params(file, text, version)?,
+            did_open_params(file, text, version, &self.language_id)?,
         )
         .await
     }
@@ -295,7 +323,10 @@ impl RaClient {
             "params": params,
         });
         self.write_message(&message).await?;
-        match rx.await.context("rust-analyzer request channel closed")? {
+        match rx
+            .await
+            .with_context(|| format!("{} request channel closed", self.process_name))?
+        {
             Ok(value) => Ok(value),
             Err(error) => Err(anyhow!(error)),
         }
@@ -408,11 +439,12 @@ fn did_open_params(
     file: &Path,
     text: String,
     version: i32,
+    language_id: &str,
 ) -> Result<lsp_types::DidOpenTextDocumentParams> {
     Ok(lsp_types::DidOpenTextDocumentParams {
         text_document: TextDocumentItem {
             uri: file_uri(file)?,
-            language_id: "rust".to_string(),
+            language_id: language_id.to_string(),
             version,
             text,
         },
@@ -574,7 +606,8 @@ mod tests {
     fn did_open_and_change_params_serialize_full_text_documents() {
         let file = Path::new("/tmp/example/src/lib.rs");
         let open =
-            serde_json::to_value(did_open_params(file, "fn main() {}".into(), 7).unwrap()).unwrap();
+            serde_json::to_value(did_open_params(file, "fn main() {}".into(), 7, "rust").unwrap())
+                .unwrap();
         assert_eq!(open["textDocument"]["languageId"], "rust");
         assert_eq!(open["textDocument"]["version"], 7);
         assert_eq!(open["textDocument"]["text"], "fn main() {}");
@@ -585,5 +618,16 @@ mod tests {
         assert_eq!(change["textDocument"]["version"], 8);
         assert_eq!(change["contentChanges"][0]["text"], "fn helper() {}");
         assert!(change["contentChanges"][0].get("range").is_none());
+    }
+
+    #[test]
+    fn did_open_accepts_python_language_id() {
+        let file = Path::new("/tmp/example/app.py");
+        let open = serde_json::to_value(
+            did_open_params(file, "def main(): pass".into(), 3, "python").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(open["textDocument"]["languageId"], "python");
+        assert_eq!(open["textDocument"]["version"], 3);
     }
 }

@@ -179,6 +179,7 @@ fn empty_ts_snapshot() -> GraphSnapshot {
         status: AppStatus {
             app_state: AppState::Normal,
             analyzer_status: AnalyzerStatus::Ready,
+            python_analyzer: None,
             project_name: None,
             project_path: None,
             last_updated: None,
