@@ -29,6 +29,18 @@ const DEV_FALLBACK = import.meta.env.DEV
 const MOCK_STATUS: AppStatus = {
   appState: 'normal',
   analyzerStatus: 'Ready',
+  analyzers: [
+    {
+      id: 'rust-analyzer',
+      kind: 'Rust',
+      engine: 'RustAnalyzer',
+      label: 'rust-analyzer',
+      status: 'Ready',
+      capabilities: ['Symbols', 'Diagnostics', 'References', 'CallHierarchy', 'SemanticCalls'],
+      filesIndexed: 247,
+      lastUpdated: null,
+    },
+  ],
   pythonAnalyzer: { mode: 'parser', status: 'parser only' },
   projectName: 'mock workspace',
   projectPath: null,
@@ -57,6 +69,7 @@ function diagnosticsMapFromRecord(record: Record<string, DiagnosticRecord[]>): M
 export function useBackendGraph(mode: GraphMode) {
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
+  const [analyzers, setAnalyzers] = useState<AppStatus['analyzers']>([])
   const [pythonAnalyzer, setPythonAnalyzer] = useState<AppStatus['pythonAnalyzer']>(null)
   const [projectName, setProjectName] = useState<string | null>(null)
   const [projectPath, setProjectPath] = useState<string | null>(null)
@@ -85,6 +98,7 @@ export function useBackendGraph(mode: GraphMode) {
   const applyStatus = useCallback((status: AppStatus) => {
     setAppState(status.appState)
     setAnalyzerStatus(status.analyzerStatus)
+    setAnalyzers(status.analyzers ?? [])
     setPythonAnalyzer(status.pythonAnalyzer ?? null)
     setProjectName(status.projectName)
     setProjectPath(status.projectPath)
@@ -333,6 +347,7 @@ export function useBackendGraph(mode: GraphMode) {
   return {
     appState,
     analyzerStatus,
+    analyzers,
     pythonAnalyzer,
     projectName,
     projectPath,

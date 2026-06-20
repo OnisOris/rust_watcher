@@ -170,6 +170,7 @@ fn empty_py_snapshot() -> GraphSnapshot {
         status: AppStatus {
             app_state: AppState::Normal,
             analyzer_status: AnalyzerStatus::Ready,
+            analyzers: Vec::new(),
             python_analyzer: None,
             project_name: None,
             project_path: None,

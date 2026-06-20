@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
-import type { AnalyzerStatus, AppState, AppStatus, ContextPack, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import type { AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, ContextPack, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import { analyzerCapabilityLabel, analyzerEngineLabel, analyzerStatusColor, sortAnalyzers, summarizeAnalyzers } from '../api/analyzerStatus'
 import { contextPackToMarkdown, summarizeContextPack } from '../api/contextPack'
 import { traceToMarkdown } from '../api/trace'
 
@@ -10,6 +11,7 @@ interface InspectorPanelProps {
   edges: GraphEdge[]
   projectName?: string | null
   analyzerStatus?: AnalyzerStatus
+  analyzers?: AnalyzerServiceStatus[]
   pythonAnalyzer?: AppStatus['pythonAnalyzer']
   appState?: AppState
   filesCount?: number
@@ -43,6 +45,7 @@ export function InspectorPanel({
   edges,
   projectName,
   analyzerStatus = 'Starting',
+  analyzers = [],
   pythonAnalyzer = null,
   appState = 'empty',
   filesCount = 0,
@@ -68,6 +71,7 @@ export function InspectorPanel({
         edges={edges}
         projectName={projectName}
         analyzerStatus={analyzerStatus}
+        analyzers={analyzers}
         pythonAnalyzer={pythonAnalyzer}
         appState={appState}
         filesCount={filesCount}
@@ -98,12 +102,39 @@ function detachedSourceFallback(node: GraphNode) {
   return 'This source file is not reachable from the active project graph.'
 }
 
+function AnalyzerRows({ analyzers }: { analyzers: AnalyzerServiceStatus[] }) {
+  const sorted = sortAnalyzers(analyzers)
+  if (!sorted.length) {
+    return <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)' }}>No analyzer services reported yet.</div>
+  }
+  return (
+    <div className="space-y-1.5" style={{ marginTop: 8 }}>
+      {sorted.slice(0, 5).map(analyzer => {
+        const capabilities = analyzer.capabilities.slice(0, 3).map(analyzerCapabilityLabel).join(', ')
+        const color = analyzerStatusColor(analyzer.status)
+        return (
+          <div key={analyzer.id} className="rounded-lg px-2 py-1.5" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+            <div className="flex items-center gap-1.5">
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: color }} />
+              <span style={{ fontSize: 10, color: 'var(--cc-text)', fontWeight: 700 }}>{analyzer.label}</span>
+              <span style={{ fontSize: 9, color: 'var(--cc-text-faint)' }}>· {analyzerEngineLabel(analyzer.engine)}</span>
+              <span style={{ marginLeft: 'auto', fontSize: 9, color }}>{analyzer.status}</span>
+            </div>
+            {capabilities && <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)', marginTop: 3 }}>{capabilities}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Project overview (nothing selected) ────────────────────────────────────
 function ProjectOverview({
   nodes,
   edges,
   projectName,
   analyzerStatus,
+  analyzers,
   pythonAnalyzer,
   appState,
   filesCount,
@@ -118,6 +149,7 @@ function ProjectOverview({
   edges: GraphEdge[]
   projectName?: string | null
   analyzerStatus: AnalyzerStatus
+  analyzers?: AnalyzerServiceStatus[]
   pythonAnalyzer?: AppStatus['pythonAnalyzer']
   appState: AppState
   filesCount: number
@@ -130,7 +162,7 @@ function ProjectOverview({
 }) {
   const visibleScopes = new Set(nodes.map(n => n.crate ?? n.module).filter((scope): scope is string => !!scope && scope !== 'external'))
   const scopeCount = visibleScopes.size || nodes.filter(n => n.id.startsWith('crate:')).length
-  const analyzerColor = analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' || analyzerStatus === 'Starting' || analyzerStatus === 'Fallback' ? '#F59E0B' : '#34D399'
+  const analyzerSummary = summarizeAnalyzers(analyzers)
   const languageCounts = {
     Rust: nodes.filter(node => node.language === 'rust').length,
     TypeScript: nodes.filter(node => node.language === 'typescript' || node.language === 'javascript').length,
@@ -217,18 +249,15 @@ function ProjectOverview({
         {/* analyzer status */}
         <Card>
           <div className="flex items-center gap-2 mb-2">
-            <div className="w-2 h-2 rounded-full" style={{ background: analyzerColor }} />
-            <span style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 500 }}>rust-analyzer</span>
-            <span style={{ marginLeft: 'auto', fontSize: 10, color: analyzerColor }}>{analyzerStatus}</span>
+            <span style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 700 }}>Analyzers</span>
+            <span style={{ marginLeft: 'auto', fontSize: 10, color: analyzerSummary.error ? '#DC2626' : analyzerSummary.fallback ? '#D97706' : '#10B981' }}>
+              {analyzerSummary.ready} ready · {analyzerSummary.fallback} fallback · {analyzerSummary.error} error
+            </span>
           </div>
           <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>
             {message ?? appState} · {filesCount} files indexed
           </div>
-          {pythonAnalyzer && (
-            <div title={pythonAnalyzer.message ?? undefined} style={{ marginTop: 6, fontSize: 10, color: 'var(--cc-text-subtle)' }}>
-              python · {pythonAnalyzer.status}
-            </div>
-          )}
+          <AnalyzerRows analyzers={analyzers} />
         </Card>
 
         {/* hotspots */}

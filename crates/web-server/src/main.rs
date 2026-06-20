@@ -13,11 +13,12 @@ use graph_builder::{
     mark_rust_source_reachability, push_unique_edge_with_confidence, python, qml, typescript,
 };
 use graph_core::{
-    AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
+    AnalysisEvent, AnalysisEventType, AnalyzerCapability, AnalyzerEngine, AnalyzerKind,
+    AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
     DiagnosticSeverity, EdgeConfidence, EdgeType, EndpointDetails, EndpointHandlerDetails,
     FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphPatch, GraphSnapshot,
-    LanguageId, NodeDetailsResponse, ReferenceRecord, SearchResult, ServerMessage, SourceLocation,
-    SymbolIndex, SymbolKindName,
+    LanguageId, NodeDetailsResponse, PythonAnalyzerStatus, ReferenceRecord, SearchResult,
+    ServerMessage, SourceLocation, SymbolIndex, SymbolKindName,
 };
 use parking_lot::RwLock;
 use project_indexer::{index_project, start_watcher};
@@ -490,6 +491,12 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let initial_status = AppStatus {
         app_state: AppState::Empty,
         analyzer_status: AnalyzerStatus::Starting,
+        analyzers: initial_analyzer_services(
+            AnalyzerStatus::Starting,
+            Some(python_ty.status_record()),
+            0,
+            None,
+        ),
         python_analyzer: Some(python_ty.status_record()),
         project_name: project_root
             .file_name()
@@ -2841,13 +2848,205 @@ fn dedupe_references(references: &mut Vec<ReferenceRecord>) {
     });
 }
 
+fn decorate_app_status(state: &AppStateHandle, status: &mut AppStatus) {
+    let snapshot = state.graph.read().clone();
+    decorate_app_status_for_snapshot(state, status, &snapshot);
+}
+
+fn decorate_app_status_for_snapshot(
+    state: &AppStateHandle,
+    status: &mut AppStatus,
+    snapshot: &GraphSnapshot,
+) {
+    let python = state.python_ty.status_record();
+    status.python_analyzer = Some(python.clone());
+    status.analyzers = analyzer_services_from_snapshot(
+        status.analyzer_status,
+        status.message.clone(),
+        Some(python),
+        snapshot,
+        status.last_updated.clone(),
+    );
+}
+
+fn initial_analyzer_services(
+    rust_status: AnalyzerStatus,
+    python: Option<PythonAnalyzerStatus>,
+    files_indexed: u32,
+    last_updated: Option<String>,
+) -> Vec<AnalyzerServiceStatus> {
+    analyzer_services_from_counts(
+        rust_status,
+        None,
+        python,
+        AnalyzerFileCounts {
+            rust: files_indexed,
+            typescript: 0,
+            python: 0,
+            qml: 0,
+        },
+        last_updated,
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AnalyzerFileCounts {
+    rust: u32,
+    typescript: u32,
+    python: u32,
+    qml: u32,
+}
+
+fn analyzer_services_from_snapshot(
+    rust_status: AnalyzerStatus,
+    rust_message: Option<String>,
+    python: Option<PythonAnalyzerStatus>,
+    snapshot: &GraphSnapshot,
+    last_updated: Option<String>,
+) -> Vec<AnalyzerServiceStatus> {
+    let mut counts = AnalyzerFileCounts::default();
+    for file in &snapshot.files {
+        if file.path.ends_with(".rs") {
+            counts.rust += 1;
+        } else if typescript::is_typescript_path(&file.path) {
+            counts.typescript += 1;
+        } else if python::is_python_path(&file.path) {
+            counts.python += 1;
+        } else if qml::is_qml_path(&file.path) {
+            counts.qml += 1;
+        }
+    }
+    analyzer_services_from_counts(rust_status, rust_message, python, counts, last_updated)
+}
+
+fn analyzer_services_from_counts(
+    rust_status: AnalyzerStatus,
+    rust_message: Option<String>,
+    python: Option<PythonAnalyzerStatus>,
+    counts: AnalyzerFileCounts,
+    last_updated: Option<String>,
+) -> Vec<AnalyzerServiceStatus> {
+    let mut services = vec![AnalyzerServiceStatus {
+        id: "rust-analyzer".into(),
+        kind: AnalyzerKind::Rust,
+        engine: AnalyzerEngine::RustAnalyzer,
+        label: "rust-analyzer".into(),
+        status: rust_status,
+        mode: None,
+        message: rust_message,
+        capabilities: vec![
+            AnalyzerCapability::Symbols,
+            AnalyzerCapability::Diagnostics,
+            AnalyzerCapability::References,
+            AnalyzerCapability::Definitions,
+            AnalyzerCapability::TypeDefinitions,
+            AnalyzerCapability::CallHierarchy,
+            AnalyzerCapability::SemanticCalls,
+        ],
+        files_indexed: counts.rust,
+        last_updated: last_updated.clone(),
+    }];
+
+    if let Some(python) = python {
+        let ty_status = analyzer_status_from_python_status(&python.status);
+        let ty_ready = ty_status == AnalyzerStatus::Ready;
+        let ty_unavailable_auto = python.mode == "auto"
+            && matches!(ty_status, AnalyzerStatus::Fallback | AnalyzerStatus::Error);
+        if python.mode == "ty" || ty_ready || ty_unavailable_auto {
+            services.push(AnalyzerServiceStatus {
+                id: "python-ty".into(),
+                kind: AnalyzerKind::Python,
+                engine: AnalyzerEngine::Ty,
+                label: "ty".into(),
+                status: ty_status,
+                mode: Some(python.mode.clone()),
+                message: python.message.clone(),
+                capabilities: if ty_ready {
+                    vec![
+                        AnalyzerCapability::Symbols,
+                        AnalyzerCapability::Diagnostics,
+                        AnalyzerCapability::References,
+                        AnalyzerCapability::Definitions,
+                        AnalyzerCapability::TypeDefinitions,
+                        AnalyzerCapability::CallHierarchy,
+                        AnalyzerCapability::SemanticCalls,
+                    ]
+                } else {
+                    Vec::new()
+                },
+                files_indexed: counts.python,
+                last_updated: last_updated.clone(),
+            });
+        }
+        if python.mode == "parser" || ty_unavailable_auto || python.status == "parser only" {
+            services.push(AnalyzerServiceStatus {
+                id: "python-parser".into(),
+                kind: AnalyzerKind::Python,
+                engine: AnalyzerEngine::Parser,
+                label: "Python parser".into(),
+                status: AnalyzerStatus::Ready,
+                mode: Some("parser".into()),
+                message: if ty_unavailable_auto {
+                    Some("Using parser fallback because ty is unavailable.".into())
+                } else {
+                    None
+                },
+                capabilities: vec![AnalyzerCapability::Symbols],
+                files_indexed: counts.python,
+                last_updated: last_updated.clone(),
+            });
+        }
+    }
+
+    services.push(AnalyzerServiceStatus {
+        id: "typescript-parser".into(),
+        kind: AnalyzerKind::TypeScript,
+        engine: AnalyzerEngine::TypeScriptParser,
+        label: "TypeScript parser".into(),
+        status: AnalyzerStatus::Ready,
+        mode: Some("parser".into()),
+        message: None,
+        capabilities: vec![AnalyzerCapability::Symbols],
+        files_indexed: counts.typescript,
+        last_updated: last_updated.clone(),
+    });
+    services.push(AnalyzerServiceStatus {
+        id: "qml-parser".into(),
+        kind: AnalyzerKind::Qml,
+        engine: AnalyzerEngine::QmlParser,
+        label: "QML parser".into(),
+        status: AnalyzerStatus::Ready,
+        mode: Some("parser".into()),
+        message: None,
+        capabilities: vec![AnalyzerCapability::Symbols],
+        files_indexed: counts.qml,
+        last_updated,
+    });
+    services
+}
+
+fn analyzer_status_from_python_status(status: &str) -> AnalyzerStatus {
+    let status = status.to_ascii_lowercase();
+    if status.contains("ready") {
+        AnalyzerStatus::Ready
+    } else if status.contains("restart") || status.contains("starting") {
+        AnalyzerStatus::Starting
+    } else if status.contains("error") {
+        AnalyzerStatus::Error
+    } else if status.contains("unavailable") || status.contains("parser only") {
+        AnalyzerStatus::Fallback
+    } else {
+        AnalyzerStatus::Stale
+    }
+}
+
 fn update_status<F>(state: &AppStateHandle, mut update: F)
 where
     F: FnMut(&mut AppStatus),
 {
     let mut status = state.status.read().clone();
     update(&mut status);
-    status.python_analyzer = Some(state.python_ty.status_record());
+    decorate_app_status(state, &mut status);
     status.last_updated = Some(timestamp());
     *state.status.write() = status.clone();
     state.graph.write().status = status.clone();
@@ -2857,7 +3056,15 @@ where
 fn publish_snapshot(state: &AppStateHandle, mut snapshot: GraphSnapshot) {
     let project_root = state.project_root.read().clone();
     apply_saved_layout(&mut snapshot, &project_root);
-    snapshot.status.python_analyzer = Some(state.python_ty.status_record());
+    let python = state.python_ty.status_record();
+    snapshot.status.python_analyzer = Some(python.clone());
+    snapshot.status.analyzers = analyzer_services_from_snapshot(
+        snapshot.status.analyzer_status,
+        snapshot.status.message.clone(),
+        Some(python),
+        &snapshot,
+        snapshot.status.last_updated.clone(),
+    );
     snapshot.status.last_updated = Some(timestamp());
     *state.status.write() = snapshot.status.clone();
     *state.graph.write() = snapshot.clone();
@@ -2868,9 +3075,9 @@ fn ready_status(state: &AppStateHandle, message: &str) -> AppStatus {
     let mut status = state.status.read().clone();
     status.app_state = AppState::Normal;
     status.analyzer_status = AnalyzerStatus::Ready;
-    status.python_analyzer = Some(state.python_ty.status_record());
     status.message = Some(message.into());
     status.progress = Some(100);
+    decorate_app_status(state, &mut status);
     status.last_updated = Some(timestamp());
     *state.status.write() = status.clone();
     let _ = state
@@ -2883,9 +3090,9 @@ fn fallback_status(state: &AppStateHandle, message: &str) -> AppStatus {
     let mut status = state.status.read().clone();
     status.app_state = AppState::Normal;
     status.analyzer_status = AnalyzerStatus::Fallback;
-    status.python_analyzer = Some(state.python_ty.status_record());
     status.message = Some(message.into());
     status.progress = Some(100);
+    decorate_app_status(state, &mut status);
     status.last_updated = Some(timestamp());
     *state.status.write() = status.clone();
     let _ = state
@@ -3121,6 +3328,85 @@ mod tests {
             data_flow_kind: None,
             evidence: None,
         }
+    }
+
+    #[test]
+    fn analyzer_services_include_rust_typescript_and_qml_records() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            Some("Ready".into()),
+            None,
+            AnalyzerFileCounts {
+                rust: 2,
+                typescript: 3,
+                python: 0,
+                qml: 4,
+            },
+            Some("now".into()),
+        );
+
+        assert!(services.iter().any(|service| {
+            service.id == "rust-analyzer"
+                && service.kind == AnalyzerKind::Rust
+                && service.engine == AnalyzerEngine::RustAnalyzer
+        }));
+        assert!(services
+            .iter()
+            .any(|service| service.id == "typescript-parser"));
+        assert!(services.iter().any(|service| service.id == "qml-parser"));
+    }
+
+    #[test]
+    fn analyzer_services_include_python_ty_record_when_ready() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            None,
+            Some(PythonAnalyzerStatus {
+                mode: "auto".into(),
+                status: "ty ready".into(),
+                message: None,
+            }),
+            AnalyzerFileCounts {
+                python: 5,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+        let ty = services
+            .iter()
+            .find(|service| service.id == "python-ty")
+            .expect("python ty analyzer record");
+
+        assert_eq!(ty.status, AnalyzerStatus::Ready);
+        assert!(ty.capabilities.contains(&AnalyzerCapability::Diagnostics));
+        assert_eq!(ty.files_indexed, 5);
+    }
+
+    #[test]
+    fn analyzer_services_report_python_parser_fallback() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            None,
+            Some(PythonAnalyzerStatus {
+                mode: "auto".into(),
+                status: "ty unavailable".into(),
+                message: Some("missing ty".into()),
+            }),
+            AnalyzerFileCounts {
+                python: 7,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+
+        assert!(services.iter().any(|service| {
+            service.id == "python-ty" && service.status == AnalyzerStatus::Fallback
+        }));
+        assert!(services.iter().any(|service| {
+            service.id == "python-parser"
+                && service.status == AnalyzerStatus::Ready
+                && service.capabilities == vec![AnalyzerCapability::Symbols]
+        }));
     }
 
     fn trace_snapshot() -> GraphSnapshot {

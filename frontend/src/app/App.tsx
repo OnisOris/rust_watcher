@@ -86,6 +86,7 @@ export default function App() {
   const {
     appState,
     analyzerStatus,
+    analyzers,
     pythonAnalyzer,
     projectName,
     lastUpdated,
@@ -323,7 +324,7 @@ export default function App() {
       <TopToolbar
         appState={appState}
         analyzerStatus={analyzerStatus}
-        pythonAnalyzer={pythonAnalyzer}
+        analyzers={analyzers}
         message={message}
         projectName={projectName}
         lastUpdated={lastUpdated}
@@ -452,6 +453,7 @@ export default function App() {
           edges={visibleGraphEdges}
           projectName={projectName}
           analyzerStatus={analyzerStatus}
+          analyzers={analyzers}
           pythonAnalyzer={pythonAnalyzer}
           appState={appState}
           filesCount={files.length}

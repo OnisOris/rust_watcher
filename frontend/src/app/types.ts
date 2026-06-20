@@ -69,6 +69,27 @@ export type GraphLabelMode = 'auto' | 'key' | 'all'
 export type EdgeVisibilityLevel = 'Essential' | 'Semantic' | 'All'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
 export type AnalyzerStatus = 'Starting' | 'Indexing' | 'Ready' | 'Fallback' | 'Stale' | 'Error'
+export type AnalyzerKind = 'Rust' | 'TypeScript' | 'Python' | 'Qml' | 'Other'
+export type AnalyzerEngine =
+  | 'RustAnalyzer'
+  | 'Ty'
+  | 'TypeScriptParser'
+  | 'TypeScriptLanguageServer'
+  | 'QmlParser'
+  | 'QmlLanguageServer'
+  | 'TreeSitter'
+  | 'Parser'
+  | 'Other'
+export type AnalyzerCapability =
+  | 'Symbols'
+  | 'Diagnostics'
+  | 'References'
+  | 'Definitions'
+  | 'TypeDefinitions'
+  | 'CallHierarchy'
+  | 'SemanticCalls'
+  | 'SemanticTokens'
+  | 'Formatting'
 export type ThemeMode = 'light' | 'dark'
 
 export interface GraphLayoutSettings {
@@ -162,6 +183,7 @@ export interface AnalysisEvent {
 export interface AppStatus {
   appState: AppState
   analyzerStatus: AnalyzerStatus
+  analyzers?: AnalyzerServiceStatus[]
   pythonAnalyzer?: {
     mode: string
     status: string
@@ -172,6 +194,19 @@ export interface AppStatus {
   lastUpdated: string | null
   message: string | null
   progress: number | null
+}
+
+export interface AnalyzerServiceStatus {
+  id: string
+  kind: AnalyzerKind
+  engine: AnalyzerEngine
+  label: string
+  status: AnalyzerStatus
+  mode?: string | null
+  message?: string | null
+  capabilities: AnalyzerCapability[]
+  filesIndexed: number
+  lastUpdated?: string | null
 }
 
 export interface GraphSnapshot {

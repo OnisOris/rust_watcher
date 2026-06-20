@@ -796,6 +796,8 @@ pub struct GraphPatch {
 pub struct AppStatus {
     pub app_state: AppState,
     pub analyzer_status: AnalyzerStatus,
+    #[serde(default)]
+    pub analyzers: Vec<AnalyzerServiceStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub python_analyzer: Option<PythonAnalyzerStatus>,
     pub project_name: Option<String>,
@@ -803,6 +805,59 @@ pub struct AppStatus {
     pub last_updated: Option<String>,
     pub message: Option<String>,
     pub progress: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AnalyzerKind {
+    Rust,
+    TypeScript,
+    Python,
+    Qml,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AnalyzerEngine {
+    RustAnalyzer,
+    Ty,
+    TypeScriptParser,
+    TypeScriptLanguageServer,
+    QmlParser,
+    QmlLanguageServer,
+    TreeSitter,
+    Parser,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AnalyzerCapability {
+    Symbols,
+    Diagnostics,
+    References,
+    Definitions,
+    TypeDefinitions,
+    CallHierarchy,
+    SemanticCalls,
+    SemanticTokens,
+    Formatting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzerServiceStatus {
+    pub id: String,
+    pub kind: AnalyzerKind,
+    pub engine: AnalyzerEngine,
+    pub label: String,
+    pub status: AnalyzerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub capabilities: Vec<AnalyzerCapability>,
+    pub files_indexed: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -917,6 +972,7 @@ impl AppStatus {
         Self {
             app_state: AppState::Empty,
             analyzer_status: AnalyzerStatus::Starting,
+            analyzers: Vec::new(),
             python_analyzer: None,
             project_name: None,
             project_path: None,

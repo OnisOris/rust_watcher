@@ -5,20 +5,19 @@ import {
   Minimize2,
   Download,
   Settings,
-  Clock,
   Zap,
   Sun,
   Moon,
   SlidersHorizontal,
   Wifi,
 } from 'lucide-react'
-import type { AnalyzerStatus, GraphMode, AppState, ThemeMode, AppStatus } from '../types'
-import { formatUpdatedLabel } from '../utils/time'
+import type { AnalyzerServiceStatus, AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
+import { AnalyzerStatusSummary } from './AnalyzerStatusSummary'
 
 interface TopToolbarProps {
   appState: AppState
   analyzerStatus: AnalyzerStatus
-  pythonAnalyzer?: AppStatus['pythonAnalyzer']
+  analyzers?: AnalyzerServiceStatus[]
   message?: string | null
   projectName?: string | null
   lastUpdated?: string | null
@@ -61,7 +60,7 @@ const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: s
 export function TopToolbar({
   appState,
   analyzerStatus,
-  pythonAnalyzer,
+  analyzers,
   message,
   projectName,
   lastUpdated,
@@ -110,30 +109,13 @@ export function TopToolbar({
 
       <div className="hidden xl:block" style={{ width: 1, height: 24, background: 'var(--cc-border)' }} />
 
-      <div className="hidden lg:flex items-center gap-2 shrink-0" title={message ?? undefined}>
-        <div className="relative" style={{ width: 9, height: 9 }}>
-          <div style={{ width: 9, height: 9, borderRadius: 999, background: status.dot }} />
-          {status.pulse && <div className="animate-ping" style={{ position: 'absolute', inset: 0, borderRadius: 999, background: status.dot, opacity: 0.65 }} />}
-        </div>
-        <span style={{ color: status.color, fontSize: 11, fontWeight: 700 }}>
-          rust-analyzer · {status.label}
-        </span>
-        {pythonAnalyzer && (
-          <span
-            title={pythonAnalyzer.message ?? undefined}
-            style={{ color: pythonAnalyzer.status.includes('ready') ? '#10B981' : pythonAnalyzer.status.includes('error') || pythonAnalyzer.status.includes('unavailable') ? '#D97706' : 'var(--cc-text-subtle)', fontSize: 11 }}
-          >
-            · python {pythonAnalyzer.status}
-          </span>
-        )}
-        <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>
-          <Clock size={10} className="inline mr-1" />
-          {formatUpdatedLabel(lastUpdated)}
-        </span>
-        <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>
-          · {filesCount} files
-        </span>
-      </div>
+      <AnalyzerStatusSummary
+        analyzers={analyzers}
+        overallStatus={analyzerStatus}
+        message={message}
+        lastUpdated={lastUpdated}
+        filesCount={filesCount}
+      />
 
       <div className="flex items-center gap-0.5 rounded-xl p-1 shrink-0" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
         {MODES.map(item => (
