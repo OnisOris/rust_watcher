@@ -46,6 +46,22 @@ export type DataFlowKind =
   | 'ModelUse'
   | 'Unknown'
 export type SourceReachability = 'Active' | 'Detached' | 'Generated' | 'External'
+export type TraceKind = 'Route' | 'DataFlow' | 'NodeNeighborhood'
+export type TraceStepKind =
+  | 'Caller'
+  | 'ApiRequest'
+  | 'Endpoint'
+  | 'EndpointHandler'
+  | 'BackendHandler'
+  | 'ServiceCall'
+  | 'ModelUse'
+  | 'ReturnValue'
+  | 'ApiResponse'
+  | 'StateUpdate'
+  | 'PropertyBinding'
+  | 'DetachedSource'
+  | 'ExternalDependency'
+  | 'Unknown'
 export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
@@ -237,6 +253,33 @@ export interface SourceLocation {
   line: number
   character: number
   range?: LspRange
+}
+
+export interface TraceStep {
+  id: string
+  kind: TraceStepKind
+  nodeId?: string
+  edgeId?: string
+  title: string
+  description: string
+  language?: string
+  file?: string
+  line?: number
+  confidence?: EdgeConfidence
+  evidence?: string
+  reachability?: SourceReachability
+}
+
+export interface TraceExplanation {
+  id: string
+  kind: TraceKind
+  title: string
+  summary: string
+  steps: TraceStep[]
+  warnings: string[]
+  rootNodeId?: string
+  routeKey?: string
+  createdAt: string
 }
 
 export interface GraphFilters {

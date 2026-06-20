@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
-import type { AnalyzerStatus, AppState, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord } from '../types'
+import type { AnalyzerStatus, AppState, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
 
 interface InspectorPanelProps {
   selectedNode: GraphNode | null
@@ -197,6 +197,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
 }) {
   const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
   const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
+  const [trace, setTrace] = useState<TraceExplanation | null>(null)
+  const [traceError, setTraceError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -211,6 +213,30 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
       })
     return () => { cancelled = true }
   }, [node.id])
+
+  useEffect(() => {
+    setTrace(null)
+    setTraceError(null)
+  }, [node.id])
+
+  const loadTrace = (url: string) => {
+    setTraceError(null)
+    fetch(url)
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('Trace not available')))
+      .then((payload: TraceExplanation) => setTrace(payload))
+      .catch(error => setTraceError(error instanceof Error ? error.message : 'Trace not available'))
+  }
+
+  const explainNode = () => loadTrace(`/api/trace/node/${encodeURIComponent(node.id)}`)
+  const explainRoute = () => {
+    const routeKey = endpointDetails?.routeKey
+    if (routeKey) loadTrace(`/api/trace/route/${encodeURIComponent(routeKey)}`)
+    else explainNode()
+  }
+  const explainDataFlow = () => {
+    const edge = outgoingDataFlow[0] ?? incomingDataFlow[0]
+    if (edge) loadTrace(`/api/trace/edge/${encodeURIComponent(edge.id)}`)
+  }
 
   const outgoing = details?.outgoingEdges ?? edges.filter(e => e.source === node.id)
   const incoming = details?.incomingEdges ?? edges.filter(e => e.target === node.id)
@@ -282,7 +308,23 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
               </pre>
             </div>
           )}
+
+          <div className="flex flex-wrap gap-1.5 mt-3">
+            {node.type === 'Endpoint' && <ActionBtn icon={<GitBranch size={12} />} label="Explain route" onClick={explainRoute} />}
+            {(incomingDataFlow.length > 0 || outgoingDataFlow.length > 0) && <ActionBtn icon={<GitBranch size={12} />} label="Explain data flow" onClick={explainDataFlow} />}
+            <ActionBtn icon={<ChevronRight size={12} />} label="Explain node" onClick={explainNode} />
+          </div>
         </Card>
+
+        {(trace || traceError) && (
+          <Card>
+            {trace ? (
+              <TracePanel trace={trace} nodeMap={nodeMap} onSelect={onSelectNode} />
+            ) : (
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{traceError}</div>
+            )}
+          </Card>
+        )}
 
         {/* location */}
         {(node.file || node.module) && (
@@ -654,6 +696,95 @@ function shortEvidence(evidence?: string) {
   if (!evidence) return ''
   const compact = evidence.replace(/\s+/g, ' ').trim()
   return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact
+}
+
+function TracePanel({ trace, nodeMap, onSelect }: { trace: TraceExplanation; nodeMap: Map<string, GraphNode>; onSelect: (id: string) => void }) {
+  const copyMarkdown = () => {
+    const markdown = traceToMarkdown(trace)
+    void navigator.clipboard?.writeText(markdown)
+  }
+  return (
+    <div>
+      <div className="flex items-start gap-2 mb-2">
+        <GitBranch size={12} color="#8B5CF6" />
+        <div className="flex-1 min-w-0">
+          <div style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 650 }}>{trace.title}</div>
+          <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{trace.summary}</div>
+        </div>
+        <button
+          onClick={copyMarkdown}
+          className="rounded px-2 py-1"
+          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
+        >
+          Copy
+        </button>
+      </div>
+      {trace.warnings.map(warning => (
+        <div key={warning} className="rounded p-1.5 mb-1.5" style={{ fontSize: 10, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B30' }}>
+          {warning}
+        </div>
+      ))}
+      <div className="space-y-1.5">
+        {trace.steps.map((step, index) => (
+          <TraceStepRow key={step.id} step={step} index={index} node={step.nodeId ? nodeMap.get(step.nodeId) : undefined} onSelect={onSelect} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function TraceStepRow({ step, index, node, onSelect }: { step: TraceStep; index: number; node?: GraphNode; onSelect: (id: string) => void }) {
+  return (
+    <button
+      onClick={() => step.nodeId && onSelect(step.nodeId)}
+      disabled={!step.nodeId}
+      className="w-full rounded px-2 py-1.5 text-left"
+      style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', opacity: step.reachability === 'Detached' ? 0.72 : 1 }}
+    >
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span style={{ fontSize: 10, color: 'var(--cc-text-faint)', width: 18 }}>{index + 1}.</span>
+        <Badge color={traceStepColor(step.kind)}>{step.kind}</Badge>
+        {step.confidence && <ConfidenceBadge confidence={step.confidence} />}
+        {step.reachability && step.reachability !== 'Active' && <Badge color="#7D8795">{step.reachability}</Badge>}
+      </div>
+      <div style={{ marginTop: 4, fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', overflowWrap: 'anywhere' }}>
+        {step.title}
+      </div>
+      <div style={{ marginTop: 2, fontSize: 10, color: 'var(--cc-text-subtle)', overflowWrap: 'anywhere' }}>
+        {[step.language ?? node?.language, step.file, step.line ? `L${step.line}` : undefined].filter(Boolean).join(' · ') || step.description}
+      </div>
+      {step.evidence && (
+        <div style={{ marginTop: 4, fontSize: 10, color: 'var(--cc-text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {shortEvidence(step.evidence)}
+        </div>
+      )}
+    </button>
+  )
+}
+
+function traceStepColor(kind: TraceStep['kind']) {
+  if (kind === 'ApiRequest' || kind === 'Endpoint' || kind === 'EndpointHandler') return '#E11D48'
+  if (kind === 'BackendHandler' || kind === 'ServiceCall') return '#EC4899'
+  if (kind === 'ReturnValue' || kind === 'ApiResponse' || kind === 'ModelUse') return '#8B5CF6'
+  if (kind === 'DetachedSource') return '#7D8795'
+  return '#06B6D4'
+}
+
+function traceToMarkdown(trace: TraceExplanation) {
+  const lines = [`# ${trace.title}`, '', trace.summary]
+  if (trace.warnings.length) {
+    lines.push('', '## Warnings', ...trace.warnings.map(warning => `- ${warning}`))
+  }
+  lines.push('', '## Steps')
+  trace.steps.forEach((step, index) => {
+    const where = [step.language, step.file, step.line ? `L${step.line}` : undefined].filter(Boolean).join(' · ')
+    lines.push(`${index + 1}. **${step.kind}** ${step.title}`)
+    if (where) lines.push(`   - Location: ${where}`)
+    if (step.confidence) lines.push(`   - Confidence: ${step.confidence}`)
+    if (step.reachability) lines.push(`   - Reachability: ${step.reachability}`)
+    if (step.evidence) lines.push(`   - Evidence: \`${shortEvidence(step.evidence)}\``)
+  })
+  return lines.join('\n')
 }
 
 function DiagnosticsList({ diagnostics }: { diagnostics: DiagnosticRecord[] }) {

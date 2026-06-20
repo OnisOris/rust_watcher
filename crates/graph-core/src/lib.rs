@@ -222,6 +222,72 @@ pub enum SourceReachability {
     External,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TraceKind {
+    Route,
+    DataFlow,
+    NodeNeighborhood,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TraceStepKind {
+    Caller,
+    ApiRequest,
+    Endpoint,
+    EndpointHandler,
+    BackendHandler,
+    ServiceCall,
+    ModelUse,
+    ReturnValue,
+    ApiResponse,
+    StateUpdate,
+    PropertyBinding,
+    DetachedSource,
+    ExternalDependency,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceStep {
+    pub id: String,
+    pub kind: TraceStepKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<EdgeConfidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<SourceReachability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceExplanation {
+    pub id: String,
+    pub kind: TraceKind,
+    pub title: String,
+    pub summary: String,
+    pub steps: Vec<TraceStep>,
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_key: Option<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteKey {
