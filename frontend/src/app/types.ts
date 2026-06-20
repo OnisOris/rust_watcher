@@ -62,6 +62,7 @@ export type TraceStepKind =
   | 'DetachedSource'
   | 'ExternalDependency'
   | 'Unknown'
+export type ContextPackKind = 'Node' | 'Trace' | 'Route' | 'DataFlow'
 export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
@@ -279,6 +280,34 @@ export interface TraceExplanation {
   warnings: string[]
   rootNodeId?: string
   routeKey?: string
+  createdAt: string
+}
+
+export interface ContextSnippet {
+  id: string
+  file: string
+  language?: string
+  startLine: number
+  endLine: number
+  code: string
+  relatedNodeIds: string[]
+  relatedEdgeIds: string[]
+  reason: string
+}
+
+export interface ContextPack {
+  id: string
+  kind: ContextPackKind
+  title: string
+  summary: string
+  rootNodeId?: string
+  routeKey?: string
+  traceId?: string
+  snippets: ContextSnippet[]
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  diagnostics: DiagnosticRecord[]
+  warnings: string[]
   createdAt: string
 }
 

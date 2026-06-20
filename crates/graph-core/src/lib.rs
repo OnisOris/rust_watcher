@@ -288,6 +288,49 @@ pub struct TraceExplanation {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContextPackKind {
+    Node,
+    Trace,
+    Route,
+    DataFlow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextSnippet {
+    pub id: String,
+    pub file: String,
+    pub language: Option<String>,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub code: String,
+    pub related_node_ids: Vec<String>,
+    pub related_edge_ids: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPack {
+    pub id: String,
+    pub kind: ContextPackKind,
+    pub title: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    pub snippets: Vec<ContextSnippet>,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub diagnostics: Vec<DiagnosticRecord>,
+    pub warnings: Vec<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteKey {

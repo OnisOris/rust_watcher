@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
-import type { AnalyzerStatus, AppState, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import type { AnalyzerStatus, AppState, ContextPack, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import { contextPackToMarkdown, summarizeContextPack } from '../api/contextPack'
 import { traceToMarkdown } from '../api/trace'
 
 interface InspectorPanelProps {
@@ -261,6 +262,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
   const [trace, setTrace] = useState<TraceExplanation | null>(null)
   const [traceError, setTraceError] = useState<string | null>(null)
+  const [contextPack, setContextPack] = useState<ContextPack | null>(null)
+  const [contextError, setContextError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -279,6 +282,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   useEffect(() => {
     setTrace(null)
     setTraceError(null)
+    setContextPack(null)
+    setContextError(null)
   }, [node.id])
 
   const loadTrace = (url: string) => {
@@ -304,6 +309,25 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   const explainDataFlow = () => {
     const edge = outgoingDataFlow[0] ?? incomingDataFlow[0]
     if (edge) loadTrace(`/api/trace/edge/${encodeURIComponent(edge.id)}`)
+  }
+  const loadContext = (url: string) => {
+    setContextError(null)
+    fetch(url)
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('Context not available')))
+      .then((payload: ContextPack) => setContextPack(payload))
+      .catch(error => setContextError(error instanceof Error ? error.message : 'Context not available'))
+  }
+  const buildNodeContext = () => loadContext(`/api/context/node/${encodeURIComponent(node.id)}`)
+  const buildTraceContext = (trace: TraceExplanation) => {
+    setContextError(null)
+    fetch('/api/context/trace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(trace),
+    })
+      .then(response => response.ok ? response.json() : Promise.reject(new Error('Context not available')))
+      .then((payload: ContextPack) => setContextPack(payload))
+      .catch(error => setContextError(error instanceof Error ? error.message : 'Context not available'))
   }
 
   const outgoing = details?.outgoingEdges ?? edges.filter(e => e.source === node.id)
@@ -381,15 +405,26 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
             {node.type === 'Endpoint' && <ActionBtn icon={<GitBranch size={12} />} label="Explain route" onClick={explainRoute} />}
             {(incomingDataFlow.length > 0 || outgoingDataFlow.length > 0) && <ActionBtn icon={<GitBranch size={12} />} label="Explain data flow" onClick={explainDataFlow} />}
             <ActionBtn icon={<ChevronRight size={12} />} label="Explain node" onClick={explainNode} />
+            <ActionBtn icon={<Layers size={12} />} label="Build context" onClick={buildNodeContext} />
           </div>
         </Card>
 
         {(trace || traceError) && (
           <Card>
             {trace ? (
-              <TracePanel trace={trace} nodeMap={nodeMap} onSelect={onSelectNode} onClearHighlight={onClearTraceHighlight} />
+              <TracePanel trace={trace} nodeMap={nodeMap} onSelect={onSelectNode} onClearHighlight={onClearTraceHighlight} onBuildContext={buildTraceContext} />
             ) : (
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{traceError}</div>
+            )}
+          </Card>
+        )}
+
+        {(contextPack || contextError) && (
+          <Card>
+            {contextPack ? (
+              <ContextPackPanel pack={contextPack} />
+            ) : (
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{contextError}</div>
             )}
           </Card>
         )}
@@ -775,7 +810,7 @@ function shortEvidence(evidence?: string) {
   return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact
 }
 
-function TracePanel({ trace, nodeMap, onSelect, onClearHighlight }: { trace: TraceExplanation; nodeMap: Map<string, GraphNode>; onSelect: (id: string) => void; onClearHighlight: () => void }) {
+function TracePanel({ trace, nodeMap, onSelect, onClearHighlight, onBuildContext }: { trace: TraceExplanation; nodeMap: Map<string, GraphNode>; onSelect: (id: string) => void; onClearHighlight: () => void; onBuildContext: (trace: TraceExplanation) => void }) {
   const copyMarkdown = () => {
     const markdown = traceToMarkdown(trace)
     void navigator.clipboard?.writeText(markdown)
@@ -802,6 +837,13 @@ function TracePanel({ trace, nodeMap, onSelect, onClearHighlight }: { trace: Tra
         >
           Clear
         </button>
+        <button
+          onClick={() => onBuildContext(trace)}
+          className="rounded px-2 py-1"
+          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
+        >
+          Context
+        </button>
       </div>
       {trace.warnings.map(warning => (
         <div key={warning} className="rounded p-1.5 mb-1.5" style={{ fontSize: 10, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B30' }}>
@@ -813,6 +855,66 @@ function TracePanel({ trace, nodeMap, onSelect, onClearHighlight }: { trace: Tra
           <TraceStepRow key={step.id} step={step} index={index} node={step.nodeId ? nodeMap.get(step.nodeId) : undefined} onSelect={onSelect} />
         ))}
       </div>
+    </div>
+  )
+}
+
+function ContextPackPanel({ pack }: { pack: ContextPack }) {
+  const [expanded, setExpanded] = useState(false)
+  const copyMarkdown = () => {
+    void navigator.clipboard?.writeText(contextPackToMarkdown(pack))
+  }
+  const files = [...new Set(pack.snippets.map(snippet => snippet.file))]
+  return (
+    <div>
+      <div className="flex items-start gap-2 mb-2">
+        <Layers size={12} color="#06B6D4" />
+        <div className="flex-1 min-w-0">
+          <div style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 650 }}>{pack.title}</div>
+          <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{pack.summary || summarizeContextPack(pack)}</div>
+        </div>
+        <button
+          onClick={copyMarkdown}
+          className="rounded px-2 py-1"
+          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
+        >
+          Copy context
+        </button>
+      </div>
+      {pack.warnings.map(warning => (
+        <div key={warning} className="rounded p-1.5 mb-1.5" style={{ fontSize: 10, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B30' }}>
+          {warning}
+        </div>
+      ))}
+      <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.5 }}>
+        {pack.snippets.length} snippets · {pack.nodes.length} nodes · {pack.edges.length} edges
+      </div>
+      {files.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 10, color: 'var(--cc-text-faint)', overflowWrap: 'anywhere' }}>
+          {files.slice(0, 5).join(', ')}{files.length > 5 ? ` +${files.length - 5}` : ''}
+        </div>
+      )}
+      {pack.snippets.length > 0 && (
+        <button
+          onClick={() => setExpanded(value => !value)}
+          className="rounded px-2 py-1 mt-2"
+          style={{ fontSize: 10, color: '#06B6D4', background: 'rgba(6,182,212,0.10)', border: '1px solid rgba(6,182,212,0.25)' }}
+        >
+          {expanded ? 'Hide snippets' : 'Show snippets'}
+        </button>
+      )}
+      {expanded && (
+        <div className="mt-2 space-y-2">
+          {pack.snippets.slice(0, 4).map(snippet => (
+            <div key={snippet.id} className="rounded p-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+              <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontFamily: 'JetBrains Mono, monospace', marginBottom: 4 }}>
+                {snippet.file}:L{snippet.startLine}-L{snippet.endLine}
+              </div>
+              <pre style={{ margin: 0, fontSize: 10, color: 'var(--cc-text-muted)', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>{snippet.code}</pre>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
