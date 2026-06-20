@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
 import type { AnalyzerStatus, AppState, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import { traceToMarkdown } from '../api/trace'
 
 interface InspectorPanelProps {
   selectedNode: GraphNode | null
@@ -18,6 +19,8 @@ interface InspectorPanelProps {
   neighborhoodNodeId: string | null
   onSelectNode: (id: string) => void
   onOpenInEditor: (node: GraphNode) => void
+  onTraceLoaded: (trace: TraceExplanation) => void
+  onClearTraceHighlight: () => void
 }
 
 const NODE_TYPE_COLORS: Record<string, string> = {
@@ -44,6 +47,8 @@ export function InspectorPanel({
   neighborhoodNodeId,
   onSelectNode,
   onOpenInEditor,
+  onTraceLoaded,
+  onClearTraceHighlight,
 }: InspectorPanelProps) {
   if (!selectedNode) {
     return (
@@ -59,7 +64,7 @@ export function InspectorPanel({
       />
     )
   }
-  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} />
+  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} onTraceLoaded={onTraceLoaded} onClearTraceHighlight={onClearTraceHighlight} />
 }
 
 // ── Project overview (nothing selected) ────────────────────────────────────
@@ -192,8 +197,8 @@ function ProjectOverview({
 }
 
 // ── Node inspector (something selected) ────────────────────────────────────
-function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, collapsedGroups, onShowNeighborhood, neighborhoodNodeId, onSelectNode, onOpenInEditor }: {
-  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onShowNeighborhood: (id: string) => void; neighborhoodNodeId: string | null; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void
+function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, collapsedGroups, onShowNeighborhood, neighborhoodNodeId, onSelectNode, onOpenInEditor, onTraceLoaded, onClearTraceHighlight }: {
+  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onShowNeighborhood: (id: string) => void; neighborhoodNodeId: string | null; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void; onTraceLoaded: (trace: TraceExplanation) => void; onClearTraceHighlight: () => void
 }) {
   const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
   const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
@@ -223,14 +228,20 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
     setTraceError(null)
     fetch(url)
       .then(response => response.ok ? response.json() : Promise.reject(new Error('Trace not available')))
-      .then((payload: TraceExplanation) => setTrace(payload))
+      .then((payload: TraceExplanation) => {
+        setTrace(payload)
+        onTraceLoaded(payload)
+      })
       .catch(error => setTraceError(error instanceof Error ? error.message : 'Trace not available'))
   }
 
   const explainNode = () => loadTrace(`/api/trace/node/${encodeURIComponent(node.id)}`)
   const explainRoute = () => {
     const routeKey = endpointDetails?.routeKey
-    if (routeKey) loadTrace(`/api/trace/route/${encodeURIComponent(routeKey)}`)
+    if (routeKey) {
+      const [method, ...pathParts] = routeKey.split(' ')
+      loadTrace(`/api/trace/route?method=${encodeURIComponent(method)}&path=${encodeURIComponent(pathParts.join(' '))}`)
+    }
     else explainNode()
   }
   const explainDataFlow = () => {
@@ -319,7 +330,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
         {(trace || traceError) && (
           <Card>
             {trace ? (
-              <TracePanel trace={trace} nodeMap={nodeMap} onSelect={onSelectNode} />
+              <TracePanel trace={trace} nodeMap={nodeMap} onSelect={onSelectNode} onClearHighlight={onClearTraceHighlight} />
             ) : (
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{traceError}</div>
             )}
@@ -698,7 +709,7 @@ function shortEvidence(evidence?: string) {
   return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact
 }
 
-function TracePanel({ trace, nodeMap, onSelect }: { trace: TraceExplanation; nodeMap: Map<string, GraphNode>; onSelect: (id: string) => void }) {
+function TracePanel({ trace, nodeMap, onSelect, onClearHighlight }: { trace: TraceExplanation; nodeMap: Map<string, GraphNode>; onSelect: (id: string) => void; onClearHighlight: () => void }) {
   const copyMarkdown = () => {
     const markdown = traceToMarkdown(trace)
     void navigator.clipboard?.writeText(markdown)
@@ -717,6 +728,13 @@ function TracePanel({ trace, nodeMap, onSelect }: { trace: TraceExplanation; nod
           style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
         >
           Copy
+        </button>
+        <button
+          onClick={onClearHighlight}
+          className="rounded px-2 py-1"
+          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
+        >
+          Clear
         </button>
       </div>
       {trace.warnings.map(warning => (
@@ -768,23 +786,6 @@ function traceStepColor(kind: TraceStep['kind']) {
   if (kind === 'ReturnValue' || kind === 'ApiResponse' || kind === 'ModelUse') return '#8B5CF6'
   if (kind === 'DetachedSource') return '#7D8795'
   return '#06B6D4'
-}
-
-function traceToMarkdown(trace: TraceExplanation) {
-  const lines = [`# ${trace.title}`, '', trace.summary]
-  if (trace.warnings.length) {
-    lines.push('', '## Warnings', ...trace.warnings.map(warning => `- ${warning}`))
-  }
-  lines.push('', '## Steps')
-  trace.steps.forEach((step, index) => {
-    const where = [step.language, step.file, step.line ? `L${step.line}` : undefined].filter(Boolean).join(' · ')
-    lines.push(`${index + 1}. **${step.kind}** ${step.title}`)
-    if (where) lines.push(`   - Location: ${where}`)
-    if (step.confidence) lines.push(`   - Confidence: ${step.confidence}`)
-    if (step.reachability) lines.push(`   - Reachability: ${step.reachability}`)
-    if (step.evidence) lines.push(`   - Evidence: \`${shortEvidence(step.evidence)}\``)
-  })
-  return lines.join('\n')
 }
 
 function DiagnosticsList({ diagnostics }: { diagnostics: DiagnosticRecord[] }) {

@@ -19,8 +19,9 @@ import {
   bundleEdges,
 } from './api/graphView'
 import { applySavedViewState, normalizeSavedView, serializableFilters } from './api/savedViews'
+import { deriveTraceHighlights, type TraceHighlights } from './api/trace'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView, TraceExplanation } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Imports', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
@@ -80,6 +81,7 @@ export default function App() {
   const [pinnedNodeIds, setPinnedNodeIds] = useState<Set<string>>(new Set())
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(DEFAULT_COLLAPSED_GROUPS)
   const [userSavedViews, setUserSavedViews] = useState<SavedView[]>([])
+  const [traceHighlights, setTraceHighlights] = useState<TraceHighlights | null>(null)
   const {
     appState,
     analyzerStatus,
@@ -109,6 +111,10 @@ export default function App() {
     [nodes, pinnedNodeIds],
   )
   const selectedNode = selectedNodeId ? graphNodes.find(n => n.id === selectedNodeId) ?? null : null
+  const handleTraceLoaded = useCallback((trace: TraceExplanation) => {
+    setTraceHighlights(deriveTraceHighlights(trace))
+  }, [])
+  const clearTraceHighlight = useCallback(() => setTraceHighlights(null), [])
   const layoutTuned = layoutSettings.spacing !== DEFAULT_GRAPH_LAYOUT_SETTINGS.spacing
     || layoutSettings.repulsion !== DEFAULT_GRAPH_LAYOUT_SETTINGS.repulsion
     || layoutSettings.linkLength !== DEFAULT_GRAPH_LAYOUT_SETTINGS.linkLength
@@ -349,6 +355,8 @@ export default function App() {
             layoutSettings={layoutSettings}
             labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
+            highlightedTraceNodeIds={traceHighlights?.nodeIds}
+            highlightedTraceEdgeIds={traceHighlights?.edgeIds}
             onSelectNode={handleSelectNode}
             onUpdateNodes={handleUpdateNodes}
           />
@@ -432,6 +440,8 @@ export default function App() {
           neighborhoodNodeId={neighborhoodNodeId}
           onSelectNode={handleSelectNode}
           onOpenInEditor={openInEditor}
+          onTraceLoaded={handleTraceLoaded}
+          onClearTraceHighlight={clearTraceHighlight}
         />
       </div>
 

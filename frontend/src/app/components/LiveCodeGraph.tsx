@@ -12,6 +12,8 @@ interface LiveCodeGraphProps {
   layoutSettings: GraphLayoutSettings
   labelMode: GraphLabelMode
   diagnosticsByNode?: Map<string, DiagnosticRecord[]>
+  highlightedTraceNodeIds?: Set<string>
+  highlightedTraceEdgeIds?: Set<string>
   onSelectNode: (id: string | null) => void
   onUpdateNodes: (nodes: GraphNode[]) => void
 }
@@ -1145,7 +1147,7 @@ function drawEdgeBundleBadge(ctx: CanvasRenderingContext2D, src: GraphNode, tgt:
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, diagnosticsByNode, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
   const animFrameRef = useRef<number>(0)
@@ -1402,6 +1404,12 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
           }
         })
       }
+      const traceActive = !!highlightedTraceNodeIds?.size || !!highlightedTraceEdgeIds?.size
+      const edgeInTrace = (edge: GraphEdge) => {
+        if (!highlightedTraceEdgeIds?.size) return false
+        return highlightedTraceEdgeIds.has(edge.id)
+          || edge.bundledEdgeIds?.some(id => highlightedTraceEdgeIds.has(id))
+      }
 
       // draw edges
       for (const edge of edges) {
@@ -1412,9 +1420,11 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
         const isActive = hoveredConnections.has(edge.source) && hoveredConnections.has(edge.target)
           || selectedConnections.has(edge.source) && selectedConnections.has(edge.target)
+        const isTraceEdge = edgeInTrace(edge)
         const baseColor = EDGE_COLORS[edge.type]
-        const color = isActive ? baseColor : baseColor + '99'
-        const width = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler' ? 2.5 : edge.type === 'Calls' || edge.type === 'Renders' ? 1.8 : 1.2
+        const color = isTraceEdge ? baseColor : isActive ? baseColor : traceActive ? baseColor + '44' : baseColor + '99'
+        const baseWidth = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler' ? 2.5 : edge.type === 'Calls' || edge.type === 'Renders' ? 1.8 : 1.2
+        const width = isTraceEdge ? baseWidth + 1.8 : baseWidth
         const dashed = edge.type === 'Implements' || edge.type === 'ExternalDependency' || edge.type === 'Renders'
         const animated = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler'
 
@@ -1432,9 +1442,11 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         const isSelected = n.id === activeSelectedNodeId
         const isHovered = n.id === hoveredNodeRef.current
         const isFocusContext = visibleIds.has(n.id)
-        const isFaded = hoveredNodeRef.current !== null && !hoveredConnections.has(n.id) && !isHovered && n.id !== hoveredNodeRef.current
+        const isTraceNode = highlightedTraceNodeIds?.has(n.id) ?? false
+        const isFaded = (traceActive && !isTraceNode)
+          || (hoveredNodeRef.current !== null && !hoveredConnections.has(n.id) && !isHovered && n.id !== hoveredNodeRef.current)
 
-        drawNode(ctx, n, isSelected, isHovered, isFocusContext, isFaded, canvasColors)
+        drawNode(ctx, n, isSelected || isTraceNode, isHovered, isFocusContext, isFaded, canvasColors)
         const diagnostics = diagnosticsByNode?.get(n.id) ?? []
         if (diagnostics.length > 0) {
           drawDiagnosticBadge(ctx, n, diagnostics.some(diagnostic => diagnostic.severity === 'Error') ? 'Error' : 'Warning')
@@ -1496,7 +1508,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       cancelAnimationFrame(animFrameRef.current)
       ro.disconnect()
     }
-  }, [diagnosticsByNode, edges, filters, getVisibleNodeIds, labelMode, theme])
+  }, [diagnosticsByNode, edges, filters, getVisibleNodeIds, highlightedTraceEdgeIds, highlightedTraceNodeIds, labelMode, theme])
 
   // mouse events
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
