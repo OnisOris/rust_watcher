@@ -114,6 +114,9 @@ where
         move |event: std::result::Result<Event, notify::Error>| match event {
             Ok(event) => {
                 let interesting = event.paths.iter().any(|path| {
+                    if is_ignored_path(path) {
+                        return false;
+                    }
                     let extension = path.extension().and_then(|e| e.to_str());
                     path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml")
                         || matches!(
@@ -170,7 +173,7 @@ fn collect_rs_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if file_name == "target" || file_name == ".git" {
+        if is_ignored_dir_name(file_name) {
             continue;
         }
         if path.is_dir() {
@@ -180,6 +183,33 @@ fn collect_rs_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn is_ignored_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(is_ignored_dir_name)
+    })
+}
+
+fn is_ignored_dir_name(name: &str) -> bool {
+    matches!(
+        name,
+        "target"
+            | "node_modules"
+            | ".git"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".cache"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "coverage"
+            | ".vite"
+    )
 }
 
 pub fn relative_to(root: &Path, path: &Path) -> String {
@@ -222,4 +252,19 @@ pub fn files_by_package(files: &[IndexedFile]) -> HashMap<String, Vec<IndexedFil
             .push(file.clone());
     }
     grouped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_and_cache_paths_are_ignored() {
+        assert!(is_ignored_path(Path::new(
+            "target/debug/build/demo/out/private.rs"
+        )));
+        assert!(is_ignored_path(Path::new("node_modules/pkg/index.ts")));
+        assert!(is_ignored_path(Path::new(".venv/lib/site.py")));
+        assert!(!is_ignored_path(Path::new("src/main.rs")));
+    }
 }

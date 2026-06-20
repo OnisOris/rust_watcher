@@ -45,7 +45,7 @@ export function applyGraphMode(graph: { nodes: GraphNode[]; edges: GraphEdge[] }
 }
 
 export function applyGraphFilters(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, filters: GraphFilters) {
-  const nodes = graph.nodes.filter(node => matchesLanguageFilter(node, filters))
+  const nodes = graph.nodes.filter(node => matchesLanguageFilter(node, filters) && matchesReachabilityFilter(node, filters))
   const nodeIds = new Set(nodes.map(node => node.id))
   const edges = applyEdgeVisibilityLevel(
     graph.edges.filter(edge => nodeIds.has(edge.source) && nodeIds.has(edge.target)),
@@ -182,12 +182,14 @@ export function buildRouteFlowGraph(graph: { nodes: GraphNode[]; edges: GraphEdg
 
   for (const edge of graph.edges) {
     if (edge.type !== 'ApiCall') continue
+    if (isDetachedNode(nodesById.get(edge.source)) || isDetachedNode(nodesById.get(edge.target))) continue
     keepEdges.add(edge.id)
     keepNodes.add(edge.source)
     keepNodes.add(edge.target)
     keepDataFlowBetween(keepEdges, byPair, edge.source, edge.target, ['ApiRequest'])
     for (const handler of outgoing.get(edge.target) ?? []) {
       if (handler.type !== 'EndpointHandler') continue
+      if (isDetachedNode(nodesById.get(handler.target))) continue
       keepEdges.add(handler.id)
       keepNodes.add(handler.target)
       keepDataFlowBetween(keepEdges, byPair, handler.target, edge.target, ['ApiResponse', 'ReturnValue'])
@@ -224,7 +226,10 @@ export function buildRouteFlowGraph(graph: { nodes: GraphNode[]; edges: GraphEdg
   }
 
   return {
-    nodes: graph.nodes.filter(node => keepNodes.has(node.id) || (node.type === 'Endpoint' && hasApiEdge(graph.edges, node.id))),
+    nodes: graph.nodes.filter(node =>
+      !isDetachedNode(node)
+      && (keepNodes.has(node.id) || (node.type === 'Endpoint' && hasApiEdge(graph.edges, node.id)))
+    ),
     edges: graph.edges.filter(edge =>
       keepEdges.has(edge.id)
       && nodesById.has(edge.source)
@@ -267,6 +272,10 @@ export function matchesLanguageFilter(node: GraphNode, filters: GraphFilters) {
   if (language === 'python') return filters.languages.has('python')
   if (language === 'qml') return filters.languages.has('qml')
   return true
+}
+
+export function matchesReachabilityFilter(node: GraphNode, filters: Pick<GraphFilters, 'showDetached'>) {
+  return filters.showDetached || node.reachability !== 'Detached'
 }
 
 function modeVisibility(mode: GraphMode): { nodeTypes: Set<NodeType>; edgeTypes: Set<EdgeType> } {
@@ -369,4 +378,8 @@ function edgesByPair(edges: GraphEdge[]) {
 
 function hasApiEdge(edges: GraphEdge[], nodeId: string) {
   return edges.some(edge => edge.type === 'ApiCall' && (edge.source === nodeId || edge.target === nodeId))
+}
+
+function isDetachedNode(node?: GraphNode) {
+  return node?.reachability === 'Detached'
 }

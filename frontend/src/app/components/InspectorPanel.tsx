@@ -92,6 +92,11 @@ function ProjectOverview({
     QML: nodes.filter(node => node.language === 'qml').length,
     Endpoints: nodes.filter(node => node.type === 'Endpoint').length,
   }
+  const sourceCounts = {
+    Active: nodes.filter(node => node.type === 'File' && node.reachability === 'Active').length,
+    Detached: nodes.filter(node => node.type === 'File' && node.reachability === 'Detached').length,
+    External: nodes.filter(node => node.reachability === 'External' || node.type === 'ExternalCrate').length,
+  }
 
   const topConnected = [...nodes]
     .map(n => ({
@@ -121,6 +126,18 @@ function ProjectOverview({
           <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Languages</p>
           <div className="grid grid-cols-5 gap-1.5">
             {Object.entries(languageCounts).map(([label, value]) => (
+              <div key={label} className="rounded px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+                <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 650 }}>{value}</div>
+                <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Sources</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {Object.entries(sourceCounts).map(([label, value]) => (
               <div key={label} className="rounded px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
                 <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 650 }}>{value}</div>
                 <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)' }}>{label}</div>
@@ -253,6 +270,7 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
             {node.isAsync && <Badge color="#06B6D4">async</Badge>}
             {node.isUnsafe && <Badge color="#F87171">unsafe</Badge>}
             {node.isGeneric && <Badge color="#8B5CF6">generic</Badge>}
+            {node.reachability === 'Detached' && <Badge color="#7D8795">Detached</Badge>}
             {diagnostics.length > 0 && <Badge color={diagnostics.some(d => d.severity === 'Error') ? '#F87171' : '#F59E0B'}>{diagnostics.length} diagnostics</Badge>}
           </div>
 
@@ -273,6 +291,18 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
             {node.file && <InfoRow label="File" value={node.file} mono />}
             {node.module && <InfoRow label="Module" value={node.module} mono />}
             {node.line && <InfoRow label="Line" value={`L${node.line}`} mono />}
+          </Card>
+        )}
+
+        {node.reachability === 'Detached' && (
+          <Card>
+            <SectionLabel label="Detached Source" />
+            <div style={{ fontSize: 11, color: 'var(--cc-text-muted)', lineHeight: 1.45 }}>
+              {node.detachedReason ?? 'This file is not reachable from crate roots or mod declarations.'}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
+              Add a <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>mod</span> declaration from main.rs/lib.rs, move it to examples/, or keep it as notes/scratch.
+            </div>
           </Card>
         )}
 

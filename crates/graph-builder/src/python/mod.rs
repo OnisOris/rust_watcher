@@ -10,6 +10,8 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use crate::is_ignored_source_dir;
+
 pub(crate) mod api_routes;
 pub(crate) mod imports;
 pub(crate) mod parser;
@@ -219,6 +221,9 @@ fn py_graph_node(file: &PyFile, symbol: &PySymbol) -> GraphNode {
         connections: None,
         range: Some(symbol.range),
         selection_range: Some(symbol.selection_range),
+        reachability: None,
+        reachable_from: None,
+        detached_reason: None,
         x: 760.0 + (symbol.line as f64 % 17.0) * 16.0,
         y: (symbol.line as f64 * 29.0) % 560.0 - 280.0,
         vx: 0.0,
@@ -400,20 +405,9 @@ fn collect_py_files(root: &Path, current: &Path, files: &mut Vec<PyFile>) {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if path.is_dir() {
-            if matches!(
-                name,
-                ".git"
-                    | ".mypy_cache"
-                    | ".pytest_cache"
-                    | ".ruff_cache"
-                    | ".venv"
-                    | "__pycache__"
-                    | "build"
-                    | "dist"
-                    | "node_modules"
-                    | "target"
-                    | "venv"
-            ) {
+            if is_ignored_source_dir(name)
+                || matches!(name, ".mypy_cache" | ".pytest_cache" | ".ruff_cache")
+            {
                 continue;
             }
             collect_py_files(root, &path, files);

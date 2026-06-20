@@ -10,6 +10,8 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use crate::is_ignored_source_dir;
+
 pub(crate) mod api_calls;
 pub(crate) mod imports;
 pub(crate) mod parser;
@@ -431,6 +433,9 @@ fn qml_graph_node(file: &QmlFile, symbol: &QmlSymbol) -> GraphNode {
         connections: None,
         range: Some(symbol.range),
         selection_range: Some(symbol.selection_range),
+        reachability: None,
+        reachable_from: None,
+        detached_reason: None,
         x: 880.0 + (symbol.line as f64 % 23.0) * 13.0,
         y: (symbol.line as f64 * 31.0) % 560.0 - 280.0,
         vx: 0.0,
@@ -449,10 +454,7 @@ fn collect_qml_files(root: &Path, current: &Path, files: &mut Vec<QmlFile>) {
             .and_then(|name| name.to_str())
             .unwrap_or_default();
         if path.is_dir() {
-            if matches!(
-                name,
-                ".git" | "build" | "dist" | "node_modules" | "target" | ".venv" | "venv"
-            ) {
+            if is_ignored_source_dir(name) {
                 continue;
             }
             collect_qml_files(root, &path, files);

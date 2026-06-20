@@ -214,6 +214,14 @@ pub enum DataFlowKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SourceReachability {
+    Active,
+    Detached,
+    Generated,
+    External,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteKey {
@@ -566,6 +574,12 @@ pub struct GraphNode {
     pub range: Option<LspRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_range: Option<LspRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<SourceReachability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reachable_from: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detached_reason: Option<String>,
     pub x: f64,
     pub y: f64,
     pub vx: f64,

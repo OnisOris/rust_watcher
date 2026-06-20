@@ -22,6 +22,7 @@ function filters(languages: LanguageFilter[]): GraphFilters {
     edgeVisibility: 'All',
     showTests: true,
     showExternal: true,
+    showDetached: false,
     onlyPublicAPI: false,
     depth: 'full',
     onlyCurrentFile: false,
@@ -69,6 +70,17 @@ describe('graph view helpers', () => {
       filters(['typescript']),
     )
     expect(visible.nodes.map(n => n.id)).toEqual(['js'])
+  })
+
+  it('hides detached nodes unless the detached filter is enabled', () => {
+    const detached = { ...node('scratch', 'rust', 'File'), reachability: 'Detached' as const }
+    const active = { ...node('main', 'rust', 'File'), reachability: 'Active' as const }
+
+    expect(applyGraphFilters({ nodes: [active, detached], edges: [] }, filters(['rust'])).nodes.map(n => n.id)).toEqual(['main'])
+
+    const withDetached = filters(['rust'])
+    withDetached.showDetached = true
+    expect(applyGraphFilters({ nodes: [active, detached], edges: [] }, withDetached).nodes.map(n => n.id)).toEqual(['main', 'scratch'])
   })
 
   it('collapses a file group while keeping external edges readable', () => {
@@ -170,6 +182,7 @@ describe('graph view helpers', () => {
     const nodes = [
       node('component', 'typescript', 'Component'),
       node('endpoint', undefined, 'Endpoint'),
+      { ...node('detached-endpoint', undefined, 'Endpoint'), reachability: 'Detached' as const },
       node('handler', 'rust', 'Function'),
       node('service', 'rust', 'Function'),
       node('model', 'rust', 'Struct'),
@@ -177,6 +190,7 @@ describe('graph view helpers', () => {
     ]
     const edges: GraphEdge[] = [
       { id: 'api', source: 'component', target: 'endpoint', type: 'ApiCall' },
+      { id: 'detached-api', source: 'component', target: 'detached-endpoint', type: 'ApiCall' },
       { id: 'request', source: 'component', target: 'endpoint', type: 'DataFlow', dataFlowKind: 'ApiRequest' },
       { id: 'handler', source: 'endpoint', target: 'handler', type: 'EndpointHandler' },
       { id: 'handler-response', source: 'handler', target: 'endpoint', type: 'DataFlow', dataFlowKind: 'ApiResponse' },

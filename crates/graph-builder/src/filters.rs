@@ -1,4 +1,6 @@
-use graph_core::{EdgeType, GraphEdge, GraphMode, GraphNode, GraphSnapshot, NodeType};
+use graph_core::{
+    EdgeType, GraphEdge, GraphMode, GraphNode, GraphSnapshot, NodeType, SourceReachability,
+};
 use std::collections::{HashSet, VecDeque};
 
 pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapshot {
@@ -137,7 +139,10 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
     let mut nodes: Vec<_> = snapshot
         .nodes
         .iter()
-        .filter(|node| node_types.contains(&node.node_type))
+        .filter(|node| {
+            node_types.contains(&node.node_type)
+                && !matches!(node.reachability, Some(SourceReachability::Detached))
+        })
         .cloned()
         .collect();
     let node_ids: HashSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();

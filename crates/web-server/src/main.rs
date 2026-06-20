@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use graph_builder::{
     build_fallback_graph, build_language_graph, enrich_api_routes_for_files, enrich_file_symbols,
     enrich_syntax_relationships_for_files, filter_snapshot, focus_subgraph,
-    push_unique_edge_with_confidence, python, qml, typescript,
+    mark_rust_source_reachability, push_unique_edge_with_confidence, python, qml, typescript,
 };
 use graph_core::{
     AnalysisEvent, AnalysisEventType, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
@@ -1561,17 +1561,25 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
             .all(|file| file.ends_with(".rs") || file.ends_with("Cargo.toml"));
 
     if only_rust {
-        match index_changed_rust_files(&state, &project_root, rust_files, changed_files.clone())
+        if let Some(index) = index.as_ref() {
+            match index_changed_rust_files(
+                &state,
+                &project_root,
+                index,
+                rust_files,
+                changed_files.clone(),
+            )
             .await
-        {
-            Ok(()) => {
-                state.is_indexing.store(false, Ordering::SeqCst);
-                return;
+            {
+                Ok(()) => {
+                    state.is_indexing.store(false, Ordering::SeqCst);
+                    return;
+                }
+                Err(error) => warn!(
+                    ?error,
+                    "incremental file patch failed; falling back to rebuild patch"
+                ),
             }
-            Err(error) => warn!(
-                ?error,
-                "incremental file patch failed; falling back to rebuild patch"
-            ),
         }
     }
     if only_typescript {
@@ -1688,6 +1696,7 @@ async fn rebuild_language_patch_snapshot(
 async fn index_changed_rust_files(
     state: &AppStateHandle,
     project_root: &Path,
+    index: &project_indexer::ProjectIndex,
     files: Vec<project_indexer::IndexedFile>,
     changed_files: Vec<String>,
 ) -> Result<()> {
@@ -1739,6 +1748,7 @@ async fn index_changed_rust_files(
         &changed_set,
     )
     .await;
+    mark_rust_source_reachability(&mut snapshot, index);
     restore_existing_positions(&mut snapshot, &old_positions);
     snapshot.status = ready_status(state, "Ready");
     let diagnostics = state
@@ -2734,6 +2744,9 @@ mod tests {
             connections: None,
             range: Some(range),
             selection_range: Some(range),
+            reachability: None,
+            reachable_from: None,
+            detached_reason: None,
             x: 0.0,
             y: 0.0,
             vx: 0.0,

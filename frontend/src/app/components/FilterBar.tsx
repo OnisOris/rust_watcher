@@ -132,6 +132,11 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
               onToggle={() => onFiltersChange({ ...filters, showExternal: !filters.showExternal })}
             />
             <QuickToggle
+              label="Detached"
+              active={filters.showDetached}
+              onToggle={() => onFiltersChange({ ...filters, showDetached: !filters.showDetached })}
+            />
+            <QuickToggle
               label="Pub only"
               active={filters.onlyPublicAPI}
               onToggle={() => onFiltersChange({ ...filters, onlyPublicAPI: !filters.onlyPublicAPI })}

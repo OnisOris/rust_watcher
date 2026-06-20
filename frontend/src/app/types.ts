@@ -45,6 +45,7 @@ export type DataFlowKind =
   | 'ApiResponse'
   | 'ModelUse'
   | 'Unknown'
+export type SourceReachability = 'Active' | 'Detached' | 'Generated' | 'External'
 export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
@@ -87,6 +88,9 @@ export interface GraphNode {
   connections?: number
   range?: LspRange
   selectionRange?: LspRange
+  reachability?: SourceReachability
+  reachableFrom?: string[]
+  detachedReason?: string
   x: number
   y: number
   vx: number
@@ -242,6 +246,7 @@ export interface GraphFilters {
   edgeVisibility: EdgeVisibilityLevel
   showTests: boolean
   showExternal: boolean
+  showDetached: boolean
   onlyPublicAPI: boolean
   depth: 1 | 2 | 3 | 'full'
   onlyCurrentFile: boolean

@@ -33,10 +33,13 @@ const DEFAULT_FILTERS: GraphFilters = {
   edgeVisibility: 'Semantic',
   showTests: true,
   showExternal: true,
+  showDetached: false,
   onlyPublicAPI: false,
   depth: 'full',
   onlyCurrentFile: false,
 }
+
+const DEFAULT_COLLAPSED_GROUPS = new Set(['module:detached-rust-files'])
 
 type GraphLens = 'all' | 'architecture' | 'api' | 'route'
 
@@ -75,7 +78,7 @@ export default function App() {
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
   const [pinnedNodeIds, setPinnedNodeIds] = useState<Set<string>>(new Set())
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(DEFAULT_COLLAPSED_GROUPS)
   const [userSavedViews, setUserSavedViews] = useState<SavedView[]>([])
   const {
     appState,

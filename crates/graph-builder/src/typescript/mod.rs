@@ -10,6 +10,8 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use crate::is_ignored_source_dir;
+
 pub(crate) mod api_calls;
 pub(crate) mod imports;
 pub(crate) mod parser;
@@ -267,6 +269,9 @@ fn ts_graph_node(file: &TsFile, symbol: &TsSymbol) -> GraphNode {
         connections: None,
         range: Some(symbol.range),
         selection_range: Some(symbol.selection_range),
+        reachability: None,
+        reachable_from: None,
+        detached_reason: None,
         x: 650.0 + (symbol.line as f64 % 19.0) * 18.0,
         y: (symbol.line as f64 * 23.0) % 560.0 - 280.0,
         vx: 0.0,
@@ -459,10 +464,7 @@ fn collect_ts_files(root: &Path, current: &Path, files: &mut Vec<TsFile>) {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if path.is_dir() {
-            if matches!(
-                name,
-                "node_modules" | "dist" | "build" | "coverage" | "target" | ".git" | ".vite"
-            ) {
+            if is_ignored_source_dir(name) {
                 continue;
             }
             collect_ts_files(root, &path, files);

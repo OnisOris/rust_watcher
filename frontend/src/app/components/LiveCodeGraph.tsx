@@ -732,7 +732,8 @@ function drawArrow(
 function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, isFocusContext: boolean, isFaded: boolean, theme: CanvasTheme) {
   const color = NODE_COLORS[n.type]
   const size = NODE_SIZES[n.type]
-  const alpha = isFaded ? 0.18 : isFocusContext ? 1 : 1
+  const isDetached = n.reachability === 'Detached'
+  const alpha = isFaded ? 0.18 : isDetached ? 0.48 : isFocusContext ? 1 : 1
 
   ctx.save()
   ctx.globalAlpha = alpha
@@ -751,7 +752,9 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
   ctx.strokeStyle = isSelected ? theme.text : isHovered ? color : color
   ctx.lineWidth = isSelected ? 2.5 : isHovered ? 2 : 1.5
 
-  if (n.type === 'ExternalCrate' || n.type === 'Interface') {
+  if (isDetached) {
+    ctx.setLineDash([6, 4])
+  } else if (n.type === 'ExternalCrate' || n.type === 'Interface') {
     ctx.setLineDash([4, 3])
   } else {
     ctx.setLineDash([])

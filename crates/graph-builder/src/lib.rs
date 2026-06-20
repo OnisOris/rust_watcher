@@ -1,12 +1,12 @@
 use graph_core::{
     edge_id, AnalysisEvent, AnalysisEventType, AppStatus, Complexity, DataFlowKind,
     DiscoveredSymbol, EdgeConfidence, EdgeType, GraphEdge, GraphNode, GraphSnapshot, LanguageId,
-    NodeType, ProjectFile, SymbolKindName, SymbolRecord, Visibility,
+    NodeType, ProjectFile, SourceReachability, SymbolKindName, SymbolRecord, Visibility,
 };
 use project_indexer::{IndexedFile, ProjectIndex};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 pub(crate) mod endpoints;
 pub mod filters;
@@ -184,6 +184,7 @@ pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> Grap
     }
     enrich_syntax_relationships(&mut snapshot, &index.files);
     let endpoint_count = enrich_api_routes(&mut snapshot, &index.files);
+    mark_rust_source_reachability(&mut snapshot, index);
     let python_count = python::enrich_python_graph(&mut snapshot, &index.root);
     let qml_count = qml::enrich_qml_graph(&mut snapshot, &index.root);
     let frontend_count = typescript::enrich_typescript_graph(&mut snapshot, &index.root);
@@ -231,10 +232,7 @@ fn collect_language_files(
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if path.is_dir() {
-            if matches!(
-                name,
-                "node_modules" | "dist" | "build" | "coverage" | "target" | ".git" | ".vite"
-            ) {
+            if is_ignored_source_dir(name) {
                 continue;
             }
             collect_language_files(&path, extensions, files);
@@ -246,6 +244,24 @@ fn collect_language_files(
         }
     }
     files.sort();
+}
+
+pub(crate) fn is_ignored_source_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "target"
+            | "node_modules"
+            | ".git"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".cache"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "coverage"
+            | ".vite"
+    )
 }
 
 fn symbol_record_from_discovered(
@@ -496,6 +512,9 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                     connections: None,
                     range: None,
                     selection_range: None,
+                    reachability: None,
+                    reachable_from: None,
+                    detached_reason: None,
                     x: 360.0 + (line_no as f64 % 23.0) * 11.0,
                     y: (line_no as f64 * 17.0) % 520.0 - 260.0,
                     vx: 0.0,
@@ -527,6 +546,233 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
     snapshot.edges.extend(new_edges);
     dedupe_graph(snapshot);
     count
+}
+
+const DETACHED_RUST_REASON: &str =
+    "Rust file is not referenced by any crate root or mod declaration";
+pub const DETACHED_RUST_GROUP_ID: &str = "module:detached-rust-files";
+
+pub fn mark_rust_source_reachability(snapshot: &mut GraphSnapshot, index: &ProjectIndex) {
+    snapshot
+        .nodes
+        .retain(|node| node.id != DETACHED_RUST_GROUP_ID);
+    snapshot.edges.retain(|edge| {
+        edge.source != DETACHED_RUST_GROUP_ID && edge.target != DETACHED_RUST_GROUP_ID
+    });
+    let active_by_file = rust_reachable_files(index);
+    for node in &mut snapshot.nodes {
+        if node.node_type == NodeType::ExternalCrate
+            || node.crate_name.as_deref() == Some("external")
+        {
+            node.reachability = Some(SourceReachability::External);
+            continue;
+        }
+        if node.language.as_deref() != Some(LanguageId::Rust.as_str()) {
+            continue;
+        }
+        let Some(file) = node.file.as_deref() else {
+            node.reachability = Some(SourceReachability::Active);
+            continue;
+        };
+        if let Some(roots) = active_by_file.get(file) {
+            node.reachability = Some(SourceReachability::Active);
+            node.reachable_from = Some(roots.iter().cloned().collect());
+            node.detached_reason = None;
+        } else {
+            node.reachability = Some(SourceReachability::Detached);
+            node.reachable_from = None;
+            node.detached_reason = Some(DETACHED_RUST_REASON.to_string());
+        }
+    }
+    add_detached_rust_group(snapshot);
+    dedupe_graph(snapshot);
+    update_connections(&mut snapshot.nodes, &snapshot.edges);
+    snapshot.files = build_project_files_from_snapshot(&snapshot.nodes, &snapshot.edges);
+}
+
+fn add_detached_rust_group(snapshot: &mut GraphSnapshot) {
+    let detached_file_ids = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.node_type == NodeType::File
+                && node.language.as_deref() == Some(LanguageId::Rust.as_str())
+                && node.reachability == Some(SourceReachability::Detached)
+        })
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    if detached_file_ids.is_empty() {
+        return;
+    }
+    snapshot.nodes.push(GraphNode {
+        id: DETACHED_RUST_GROUP_ID.to_string(),
+        language: Some(LanguageId::Rust.to_string()),
+        node_type: NodeType::Module,
+        label: "Detached Rust files".to_string(),
+        file: None,
+        module: Some("notes / scratch".to_string()),
+        crate_name: None,
+        line: None,
+        visibility: None,
+        is_async: None,
+        is_unsafe: None,
+        is_generic: None,
+        signature: None,
+        description: Some(
+            "Rust files not reachable from crate roots or mod declarations".to_string(),
+        ),
+        pinned: None,
+        bookmarked: None,
+        connections: None,
+        range: None,
+        selection_range: None,
+        reachability: Some(SourceReachability::Detached),
+        reachable_from: None,
+        detached_reason: Some(DETACHED_RUST_REASON.to_string()),
+        x: -360.0,
+        y: 260.0,
+        vx: 0.0,
+        vy: 0.0,
+    });
+    for file_id in detached_file_ids {
+        snapshot
+            .edges
+            .push(edge(EdgeType::Contains, DETACHED_RUST_GROUP_ID, &file_id));
+    }
+}
+
+fn rust_reachable_files(index: &ProjectIndex) -> HashMap<String, HashSet<String>> {
+    let files_by_abs = index
+        .files
+        .iter()
+        .map(|file| (normalize_path(&file.absolute_path), file))
+        .collect::<HashMap<_, _>>();
+    let package_roots = index
+        .packages
+        .iter()
+        .map(|package| (package.name.clone(), package.package_root.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut reachable: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for root in index.files.iter().filter(|file| {
+        package_roots
+            .get(&file.package_name)
+            .is_some_and(|package_root| is_rust_crate_root(package_root, &file.absolute_path))
+    }) {
+        let root_label = root.relative_path.clone();
+        let mut queue = VecDeque::from([root.absolute_path.clone()]);
+        let mut seen = HashSet::new();
+        while let Some(path) = queue.pop_front() {
+            let key = normalize_path(&path);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let Some(file) = files_by_abs.get(&key) else {
+                continue;
+            };
+            reachable
+                .entry(file.relative_path.clone())
+                .or_default()
+                .insert(root_label.clone());
+            let Ok(source) = fs::read_to_string(&file.absolute_path) else {
+                continue;
+            };
+            for module_path in rust_module_file_candidates(&file.absolute_path, &source) {
+                if files_by_abs.contains_key(&normalize_path(&module_path)) {
+                    queue.push_back(module_path);
+                }
+            }
+        }
+    }
+
+    reachable
+}
+
+fn is_rust_crate_root(package_root: &Path, file: &Path) -> bool {
+    let rel = file.strip_prefix(package_root).unwrap_or(file);
+    let parts = rel
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["src", "main.rs"] | ["src", "lib.rs"] | ["build.rs"] => true,
+        ["examples", name] | ["tests", name] | ["benches", name] => name.ends_with(".rs"),
+        _ => false,
+    }
+}
+
+fn rust_module_file_candidates(file: &Path, source: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut pending_path_attr: Option<String> = None;
+    for raw_line in source.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with("#[path") {
+            pending_path_attr = extract_first_string(line);
+            continue;
+        }
+        let Some(module_name) = parse_external_mod_decl(line) else {
+            pending_path_attr = None;
+            continue;
+        };
+        let parent = file.parent().unwrap_or_else(|| Path::new(""));
+        if let Some(path_attr) = pending_path_attr.take() {
+            candidates.push(parent.join(path_attr));
+            continue;
+        }
+        let base = rust_child_module_base_dir(file);
+        candidates.push(base.join(format!("{module_name}.rs")));
+        candidates.push(base.join(module_name).join("mod.rs"));
+    }
+    candidates
+}
+
+fn rust_child_module_base_dir(file: &Path) -> PathBuf {
+    let parent = file.parent().unwrap_or_else(|| Path::new(""));
+    if file.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+        return parent.to_path_buf();
+    }
+    let stem = file
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if matches!(stem, "main" | "lib" | "build") {
+        parent.to_path_buf()
+    } else {
+        parent.join(stem)
+    }
+}
+
+fn parse_external_mod_decl(line: &str) -> Option<String> {
+    if !line.ends_with(';') || line.contains('{') {
+        return None;
+    }
+    let mod_pos = line.find("mod ")?;
+    let before = &line[..mod_pos];
+    if !before.is_empty()
+        && !before.ends_with(' ')
+        && !before.ends_with("pub ")
+        && !before.ends_with("pub(crate) ")
+        && !before.ends_with("pub(super) ")
+    {
+        return None;
+    }
+    let name = line[mod_pos + 4..]
+        .trim_end_matches(';')
+        .split_whitespace()
+        .next()?;
+    name.chars()
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        .then(|| name.to_string())
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 pub fn enrich_api_routes_for_files(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usize {
@@ -913,6 +1159,9 @@ fn push_symbol(
         connections: None,
         range: symbol.range,
         selection_range: symbol.selection_range,
+        reachability: None,
+        reachable_from: None,
+        detached_reason: None,
         x: 120.0 + (depth as f64 * 60.0) + (symbol.line as f64 % 17.0) * 6.0,
         y: (symbol.line as f64 * 13.0) % 420.0 - 210.0,
         vx: 0.0,
@@ -1155,6 +1404,9 @@ fn node(
         connections: None,
         range: None,
         selection_range: None,
+        reachability: None,
+        reachable_from: None,
+        detached_reason: None,
         x,
         y,
         vx: 0.0,
@@ -1611,6 +1863,107 @@ export function App() {
         assert!(focused_edges
             .iter()
             .any(|edge| edge.edge_type == EdgeType::EndpointHandler));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rust_reachability_marks_mod_files_active_and_unreferenced_files_detached() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-reachability-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src/foo")).unwrap();
+        std::fs::create_dir_all(root.join("src/unused")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug/build/demo/out")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"reachability_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+mod foo;
+#[path = "custom.rs"]
+mod custom;
+
+fn main() {}
+"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("src/foo.rs"), "pub mod bar;\npub fn foo() {}\n").unwrap();
+        std::fs::write(root.join("src/foo/bar.rs"), "pub fn bar() {}\n").unwrap();
+        std::fs::write(root.join("src/custom.rs"), "pub fn custom() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/unused.rs"),
+            r#"
+fn unused_handler() {}
+fn wire() { app.route("/api/unused", get(unused_handler)); }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("target/debug/build/demo/out/private.rs"),
+            "fn generated() {}\n",
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        assert!(!index
+            .files
+            .iter()
+            .any(|file| file.relative_path.contains("target/")));
+        let snapshot = build_fallback_graph(&index, test_status());
+
+        let active_files = [
+            "src/main.rs",
+            "src/foo.rs",
+            "src/foo/bar.rs",
+            "src/custom.rs",
+        ];
+        for file in active_files {
+            let node = snapshot
+                .nodes
+                .iter()
+                .find(|node| node.node_type == NodeType::File && node.file.as_deref() == Some(file))
+                .unwrap_or_else(|| panic!("missing active file node {file}"));
+            assert_eq!(node.reachability, Some(SourceReachability::Active));
+            assert!(node
+                .reachable_from
+                .as_ref()
+                .is_some_and(|roots| roots.contains(&"src/main.rs".to_string())));
+        }
+
+        let detached_file = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_type == NodeType::File && node.file.as_deref() == Some("src/unused.rs")
+            })
+            .unwrap();
+        assert_eq!(
+            detached_file.reachability,
+            Some(SourceReachability::Detached)
+        );
+        assert_eq!(
+            detached_file.detached_reason.as_deref(),
+            Some(DETACHED_RUST_REASON)
+        );
+
+        let detached_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/unused")
+            .unwrap();
+        assert_eq!(
+            detached_endpoint.reachability,
+            Some(SourceReachability::Detached)
+        );
+
+        let route = filter_snapshot(&snapshot, GraphMode::CallFlow);
+        assert!(!route
+            .nodes
+            .iter()
+            .any(|node| node.id == detached_endpoint.id));
 
         let _ = std::fs::remove_dir_all(root);
     }
