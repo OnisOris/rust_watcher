@@ -164,6 +164,20 @@ impl RaClient {
         .await
     }
 
+    pub async fn did_open_with_language(
+        &self,
+        file: &Path,
+        text: String,
+        version: i32,
+        language_id: &str,
+    ) -> Result<()> {
+        self.notify(
+            "textDocument/didOpen",
+            did_open_params(file, text, version, language_id)?,
+        )
+        .await
+    }
+
     pub async fn did_change(&self, file: &Path, text: String, version: i32) -> Result<()> {
         self.notify(
             "textDocument/didChange",

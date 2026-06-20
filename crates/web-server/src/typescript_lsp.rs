@@ -2,11 +2,11 @@ use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
 use graph_builder::push_unique_edge_with_confidence;
 use graph_core::{
-    DiscoveredSymbol, EdgeConfidence, EdgeType, GraphSnapshot, LanguageId, NodeType,
-    PythonAnalyzerStatus, SymbolIndex, SymbolKindName, Visibility,
+    AnalyzerStatus, DiscoveredSymbol, EdgeConfidence, EdgeType, GraphSnapshot, LanguageId,
+    NodeType, SymbolIndex, SymbolKindName, Visibility,
 };
 use parking_lot::RwLock;
-use ra_client::{LspCallHierarchyItem, LspCallHierarchyOutgoingCall, LspLocation, LspNotification};
+use ra_client::{LspLocation, LspNotification};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -15,14 +15,15 @@ use tracing::warn;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum PythonAnalyzerMode {
+pub enum TypeScriptAnalyzerMode {
     Auto,
     Parser,
-    Ty,
+    #[value(name = "typescript-language-server")]
+    TypeScriptLanguageServer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TyRuntimeStatus {
+pub enum TypeScriptRuntimeStatus {
     ParserOnly,
     Ready,
     Unavailable,
@@ -30,35 +31,42 @@ pub enum TyRuntimeStatus {
     Error,
 }
 
-impl TyRuntimeStatus {
+impl TypeScriptRuntimeStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::ParserOnly => "parser only",
-            Self::Ready => "ty ready",
-            Self::Unavailable => "ty unavailable",
-            Self::Restarting => "ty restarting",
-            Self::Error => "ty error",
+            Self::Ready => "language server ready",
+            Self::Unavailable => "language server unavailable",
+            Self::Restarting => "language server restarting",
+            Self::Error => "language server error",
         }
     }
 }
 
-pub struct PythonTyState {
+#[derive(Debug, Clone)]
+pub struct TypeScriptAnalyzerStatus {
+    pub mode: String,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+pub struct TypeScriptLspState {
     binary: PathBuf,
-    mode: PythonAnalyzerMode,
+    mode: TypeScriptAnalyzerMode,
     root: RwLock<PathBuf>,
     client: AsyncMutex<Option<ra_client::RaClient>>,
     opened_files: RwLock<HashSet<PathBuf>>,
     file_versions: RwLock<HashMap<PathBuf, i32>>,
-    status: RwLock<TyRuntimeStatus>,
+    status: RwLock<TypeScriptRuntimeStatus>,
     message: RwLock<Option<String>>,
 }
 
-impl PythonTyState {
-    pub fn new(binary: PathBuf, mode: PythonAnalyzerMode, root: PathBuf) -> Self {
-        let initial = if mode == PythonAnalyzerMode::Parser {
-            TyRuntimeStatus::ParserOnly
+impl TypeScriptLspState {
+    pub fn new(binary: PathBuf, mode: TypeScriptAnalyzerMode, root: PathBuf) -> Self {
+        let initial = if mode == TypeScriptAnalyzerMode::Parser {
+            TypeScriptRuntimeStatus::ParserOnly
         } else {
-            TyRuntimeStatus::Unavailable
+            TypeScriptRuntimeStatus::Unavailable
         };
         Self {
             binary,
@@ -73,12 +81,17 @@ impl PythonTyState {
     }
 
     pub fn is_parser_only(&self) -> bool {
-        self.mode == PythonAnalyzerMode::Parser
+        self.mode == TypeScriptAnalyzerMode::Parser
     }
 
-    pub fn status_record(&self) -> PythonAnalyzerStatus {
-        PythonAnalyzerStatus {
-            mode: format!("{:?}", self.mode).to_ascii_lowercase(),
+    pub fn status_record(&self) -> TypeScriptAnalyzerStatus {
+        TypeScriptAnalyzerStatus {
+            mode: match self.mode {
+                TypeScriptAnalyzerMode::Auto => "auto",
+                TypeScriptAnalyzerMode::Parser => "parser",
+                TypeScriptAnalyzerMode::TypeScriptLanguageServer => "typescript-language-server",
+            }
+            .to_string(),
             status: self.status.read().as_str().to_string(),
             message: self.message.read().clone(),
         }
@@ -93,10 +106,10 @@ impl PythonTyState {
         *client = None;
         self.opened_files.write().clear();
         self.file_versions.write().clear();
-        *self.status.write() = if self.mode == PythonAnalyzerMode::Parser {
-            TyRuntimeStatus::ParserOnly
+        *self.status.write() = if self.mode == TypeScriptAnalyzerMode::Parser {
+            TypeScriptRuntimeStatus::ParserOnly
         } else {
-            TyRuntimeStatus::Unavailable
+            TypeScriptRuntimeStatus::Unavailable
         };
         *self.message.write() = None;
     }
@@ -126,7 +139,7 @@ impl PythonTyState {
         .await;
         if result.is_err() {
             *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
+            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
         }
         result.map(|_| version)
     }
@@ -138,41 +151,7 @@ impl PythonTyState {
         let result = guard.as_ref().unwrap().document_symbols(file).await;
         if result.is_err() {
             *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
-    }
-
-    pub async fn prepare_call_hierarchy(
-        &self,
-        file: &Path,
-        line: u32,
-        character: u32,
-    ) -> Result<Vec<LspCallHierarchyItem>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .prepare_call_hierarchy(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
-    }
-
-    pub async fn outgoing_calls(
-        &self,
-        item: &LspCallHierarchyItem,
-    ) -> Result<Vec<LspCallHierarchyOutgoingCall>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().outgoing_calls(item).await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
+            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
         }
         result
     }
@@ -192,12 +171,11 @@ impl PythonTyState {
             .await;
         if result.is_err() {
             *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
+            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
         }
         result
     }
 
-    #[allow(dead_code)]
     pub async fn definition(
         &self,
         file: &Path,
@@ -213,7 +191,6 @@ impl PythonTyState {
             .await
     }
 
-    #[allow(dead_code)]
     pub async fn type_definition(
         &self,
         file: &Path,
@@ -239,21 +216,25 @@ impl PythonTyState {
         let version = *self.file_versions.write().entry(file.clone()).or_insert(1);
         let mut guard = self.client.lock().await;
         self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().did_open(&file, text, version).await;
+        let result = guard
+            .as_ref()
+            .unwrap()
+            .did_open_with_language(&file, text, version, language_id_for_path(&file))
+            .await;
         if result.is_ok() {
             self.opened_files.write().insert(file);
         } else {
             *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
+            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
         }
         result
     }
 
     async fn ensure_started_locked(&self, client: &mut Option<ra_client::RaClient>) -> Result<()> {
-        if self.mode == PythonAnalyzerMode::Parser {
-            *self.status.write() = TyRuntimeStatus::ParserOnly;
+        if self.mode == TypeScriptAnalyzerMode::Parser {
+            *self.status.write() = TypeScriptRuntimeStatus::ParserOnly;
             return Err(anyhow!(
-                "Python analyzer is configured for parser-only mode"
+                "TypeScript analyzer is configured for parser-only mode"
             ));
         }
         if client.is_some() {
@@ -264,10 +245,10 @@ impl PythonTyState {
             Duration::from_secs(8),
             ra_client::RaClient::start_with_options(
                 &self.binary,
-                ["server"],
+                ["--stdio"],
                 &root,
-                "python",
-                "ty",
+                "typescript",
+                "typescript-language-server",
             ),
         )
         .await;
@@ -275,27 +256,31 @@ impl PythonTyState {
             Ok(Ok(started)) => {
                 *client = Some(started);
                 self.opened_files.write().clear();
-                *self.status.write() = TyRuntimeStatus::Ready;
+                *self.status.write() = TypeScriptRuntimeStatus::Ready;
                 *self.message.write() = None;
                 Ok(())
             }
             Ok(Err(error)) => self.handle_start_error(error),
-            Err(_) => self.handle_start_error(anyhow!("ty initialize timed out")),
+            Err(_) => self.handle_start_error(anyhow!("typescript-language-server timed out")),
         }
     }
 
     fn handle_start_error(&self, error: anyhow::Error) -> Result<()> {
         let message = error.to_string();
         *self.message.write() = Some(message.clone());
-        *self.status.write() = if self.mode == PythonAnalyzerMode::Auto {
-            TyRuntimeStatus::Unavailable
+        *self.status.write() = if self.mode == TypeScriptAnalyzerMode::Auto {
+            TypeScriptRuntimeStatus::Unavailable
         } else {
-            TyRuntimeStatus::Error
+            TypeScriptRuntimeStatus::Error
         };
-        if self.mode == PythonAnalyzerMode::Auto {
-            Err(anyhow!("ty unavailable; using parser fallback: {message}"))
+        if self.mode == TypeScriptAnalyzerMode::Auto {
+            Err(anyhow!(
+                "typescript-language-server unavailable; using parser fallback: {message}"
+            ))
         } else {
-            Err(anyhow!("ty is required but unavailable: {message}"))
+            Err(anyhow!(
+                "typescript-language-server is required but unavailable: {message}"
+            ))
         }
     }
 
@@ -307,145 +292,86 @@ impl PythonTyState {
     }
 }
 
-pub async fn enrich_python_with_ty(
+pub async fn enrich_typescript_with_lsp(
     snapshot: &mut GraphSnapshot,
     project_root: &Path,
-    ty: &PythonTyState,
+    lsp: &TypeScriptLspState,
 ) -> Result<()> {
-    if ty.is_parser_only() {
+    if lsp.is_parser_only() {
         return Ok(());
     }
     let files = snapshot
         .nodes
         .iter()
-        .filter(|node| node.language.as_deref() == Some(LanguageId::Python.as_str()))
+        .filter(|node| matches!(node.language.as_deref(), Some("typescript" | "javascript")))
         .filter(|node| node.node_type == NodeType::File)
         .filter_map(|node| node.file.clone())
         .collect::<HashSet<_>>();
-
     for file in files {
         let absolute = project_root.join(&file);
-        match timeout(Duration::from_secs(3), ty.document_symbols(&absolute)).await {
-            Ok(Ok(symbols)) => enrich_nodes_from_ty_symbols(snapshot, &file, &symbols),
-            Ok(Err(error)) => warn!(?error, file = %file, "ty documentSymbol failed"),
-            Err(_) => warn!(file = %file, "ty documentSymbol timed out"),
+        match timeout(Duration::from_secs(3), lsp.document_symbols(&absolute)).await {
+            Ok(Ok(symbols)) => enrich_nodes_from_lsp_symbols(snapshot, &file, &symbols),
+            Ok(Err(error)) => warn!(?error, file = %file, "typescript documentSymbol failed"),
+            Err(_) => warn!(file = %file, "typescript documentSymbol timed out"),
         }
     }
-
-    enrich_python_semantic_calls(snapshot, project_root, ty).await;
     Ok(())
 }
 
-pub async fn enrich_python_semantic_calls(
+pub async fn enrich_typescript_semantic_edges_for_files(
     snapshot: &mut GraphSnapshot,
     project_root: &Path,
-    ty: &PythonTyState,
-) {
-    if ty.is_parser_only() {
-        return;
-    }
-    let symbol_index = SymbolIndex::from_nodes(&snapshot.nodes);
-    let callable_symbols = symbol_index
-        .symbols
-        .iter()
-        .filter(|symbol| {
-            symbol.language == LanguageId::Python
-                && matches!(
-                    symbol.kind,
-                    SymbolKindName::Function | SymbolKindName::Method
-                )
-        })
-        .map(|symbol| {
-            (
-                symbol.node_id.clone(),
-                project_root.join(&symbol.file),
-                symbol.selection_range.start,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    for (source_id, file, position) in callable_symbols {
-        let items = match timeout(
-            Duration::from_secs(2),
-            ty.prepare_call_hierarchy(&file, position.line, position.character),
-        )
-        .await
-        {
-            Ok(Ok(items)) => items,
-            _ => continue,
-        };
-        for item in items {
-            let outgoing = match timeout(Duration::from_secs(2), ty.outgoing_calls(&item)).await {
-                Ok(Ok(outgoing)) => outgoing,
-                _ => continue,
-            };
-            for call in outgoing {
-                if let Some(target) = target_symbol_for_call(&symbol_index, &call) {
-                    push_unique_edge_with_confidence(
-                        &mut snapshot.edges,
-                        &HashSet::new(),
-                        EdgeType::Calls,
-                        &source_id,
-                        &target.node_id,
-                        EdgeConfidence::Semantic,
-                    );
-                }
-            }
-        }
-    }
-}
-
-pub async fn enrich_python_semantic_calls_for_files(
-    snapshot: &mut GraphSnapshot,
-    project_root: &Path,
-    ty: &PythonTyState,
+    lsp: &TypeScriptLspState,
     changed_files: &HashSet<String>,
 ) {
-    if ty.is_parser_only() {
+    if lsp.is_parser_only() {
         return;
     }
     let symbol_index = SymbolIndex::from_nodes(&snapshot.nodes);
-    let callable_symbols = symbol_index
+    let symbols = symbol_index
         .symbols
         .iter()
         .filter(|symbol| {
             changed_files.contains(&symbol.file)
-                && symbol.language == LanguageId::Python
                 && matches!(
-                    symbol.kind,
-                    SymbolKindName::Function | SymbolKindName::Method
+                    symbol.language,
+                    LanguageId::TypeScript | LanguageId::JavaScript
                 )
         })
         .map(|symbol| {
             (
                 symbol.node_id.clone(),
+                symbol.node_type,
                 project_root.join(&symbol.file),
                 symbol.selection_range.start,
             )
         })
         .collect::<Vec<_>>();
-
-    for (source_id, file, position) in callable_symbols {
-        let items = match timeout(
+    for (source_id, node_type, file, position) in symbols {
+        let target_locations = match timeout(
             Duration::from_secs(2),
-            ty.prepare_call_hierarchy(&file, position.line, position.character),
+            lsp.definition(&file, position.line, position.character),
         )
         .await
         {
-            Ok(Ok(items)) => items,
-            _ => continue,
+            Ok(Ok(response)) => locations_from_definition_response(response),
+            _ => Vec::new(),
         };
-        for item in items {
-            let outgoing = match timeout(Duration::from_secs(2), ty.outgoing_calls(&item)).await {
-                Ok(Ok(outgoing)) => outgoing,
-                _ => continue,
-            };
-            for call in outgoing {
-                if let Some(target) = target_symbol_for_call(&symbol_index, &call) {
+        for location in target_locations {
+            if let Some(target) = target_symbol_for_location(&symbol_index, &location) {
+                if target.node_id != source_id {
+                    let edge_type = if matches!(
+                        node_type,
+                        NodeType::Interface | NodeType::TypeAlias | NodeType::Class
+                    ) {
+                        EdgeType::TypeReference
+                    } else {
+                        EdgeType::Uses
+                    };
                     push_unique_edge_with_confidence(
                         &mut snapshot.edges,
                         &HashSet::new(),
-                        EdgeType::Calls,
+                        edge_type,
                         &source_id,
                         &target.node_id,
                         EdgeConfidence::Semantic,
@@ -456,24 +382,7 @@ pub async fn enrich_python_semantic_calls_for_files(
     }
 }
 
-#[cfg(test)]
-pub fn ty_diagnostic_record(
-    file: &str,
-    index: usize,
-    diagnostic: ra_client::LspDiagnostic,
-    symbol_index: &SymbolIndex,
-) -> graph_core::DiagnosticRecord {
-    super::diagnostic_from_lsp_with_language(
-        LanguageId::Python,
-        file,
-        index,
-        diagnostic,
-        symbol_index,
-        Some("ty"),
-    )
-}
-
-pub fn enrich_nodes_from_ty_symbols(
+pub fn enrich_nodes_from_lsp_symbols(
     snapshot: &mut GraphSnapshot,
     relative_file: &str,
     symbols: &[DiscoveredSymbol],
@@ -482,15 +391,20 @@ pub fn enrich_nodes_from_ty_symbols(
         let node_type = node_type_from_symbol_kind(symbol.kind);
         if !matches!(
             node_type,
-            NodeType::Function | NodeType::Method | NodeType::Class
+            NodeType::Function
+                | NodeType::Method
+                | NodeType::Class
+                | NodeType::Interface
+                | NodeType::TypeAlias
+                | NodeType::Component
+                | NodeType::Hook
         ) {
             continue;
         }
         let name = symbol.name.as_str();
         let Some(node) = snapshot.nodes.iter_mut().find(|node| {
-            node.language.as_deref() == Some(LanguageId::Python.as_str())
+            matches!(node.language.as_deref(), Some("typescript" | "javascript"))
                 && node.file.as_deref() == Some(relative_file)
-                && node.node_type == node_type
                 && (node.label == name || node.label.ends_with(&format!("::{name}")))
         }) else {
             continue;
@@ -509,17 +423,66 @@ pub fn enrich_nodes_from_ty_symbols(
     }
 }
 
-fn target_symbol_for_call<'a>(
+pub fn status_to_analyzer_status(status: &str) -> AnalyzerStatus {
+    let status = status.to_ascii_lowercase();
+    if status.contains("ready") {
+        AnalyzerStatus::Ready
+    } else if status.contains("restart") || status.contains("starting") {
+        AnalyzerStatus::Starting
+    } else if status.contains("error") {
+        AnalyzerStatus::Error
+    } else if status.contains("unavailable") || status.contains("parser only") {
+        AnalyzerStatus::Fallback
+    } else {
+        AnalyzerStatus::Stale
+    }
+}
+
+pub fn language_for_path(path: &str) -> LanguageId {
+    if path.ends_with(".js") || path.ends_with(".jsx") {
+        LanguageId::JavaScript
+    } else {
+        LanguageId::TypeScript
+    }
+}
+
+pub fn language_id_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("tsx") => "typescriptreact",
+        Some("jsx") => "javascriptreact",
+        Some("js") => "javascript",
+        _ => "typescript",
+    }
+}
+
+pub fn locations_from_definition_response(
+    response: Option<ra_client::LspGotoDefinitionResponse>,
+) -> Vec<LspLocation> {
+    match response {
+        Some(ra_client::LspGotoDefinitionResponse::Scalar(location)) => vec![location],
+        Some(ra_client::LspGotoDefinitionResponse::Array(locations)) => locations,
+        Some(ra_client::LspGotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|link| LspLocation {
+                uri: link.target_uri,
+                range: link.target_range,
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn target_symbol_for_location<'a>(
     symbol_index: &'a SymbolIndex,
-    call: &LspCallHierarchyOutgoingCall,
+    location: &LspLocation,
 ) -> Option<&'a graph_core::SymbolRecord> {
-    let path = Url::parse(call.to.uri.as_str())
+    let path = Url::parse(location.uri.as_str())
         .ok()
         .and_then(|uri| uri.to_file_path().ok())?;
     symbol_index.find_by_uri_path_position(
         &path,
-        call.to.selection_range.start.line,
-        call.to.selection_range.start.character,
+        location.range.start.line,
+        location.range.start.character,
     )
 }
 
@@ -537,6 +500,8 @@ fn node_type_from_symbol_kind(kind: SymbolKindName) -> NodeType {
         SymbolKindName::Class => NodeType::Class,
         SymbolKindName::Method => NodeType::Method,
         SymbolKindName::Function | SymbolKindName::Constructor => NodeType::Function,
+        SymbolKindName::Trait => NodeType::Interface,
+        SymbolKindName::Struct => NodeType::TypeAlias,
         _ => NodeType::Property,
     }
 }
@@ -564,16 +529,16 @@ mod tests {
     }
 
     #[test]
-    fn ty_document_symbols_enrich_python_node_ranges() {
+    fn lsp_document_symbols_enrich_typescript_node_ranges() {
         let mut snapshot = GraphSnapshot {
             nodes: vec![GraphNode {
-                id: "py-fn:app.py::users@10".into(),
-                language: Some("python".into()),
-                node_type: NodeType::Function,
-                label: "users".into(),
-                file: Some("app.py".into()),
-                module: Some("app".into()),
-                crate_name: Some("python".into()),
+                id: "component:src/App.tsx::App@10".into(),
+                language: Some("typescript".into()),
+                node_type: NodeType::Component,
+                label: "App".into(),
+                file: Some("src/App.tsx".into()),
+                module: Some("src::App".into()),
+                crate_name: Some("frontend".into()),
                 line: Some(10),
                 visibility: None,
                 is_async: None,
@@ -599,49 +564,45 @@ mod tests {
             events: Vec::new(),
             status: graph_core::AppStatus::empty(),
         };
-        enrich_nodes_from_ty_symbols(
+        enrich_nodes_from_lsp_symbols(
             &mut snapshot,
-            "app.py",
+            "src/App.tsx",
             &[DiscoveredSymbol {
-                name: "users".into(),
-                detail: Some("def users() -> list[User]".into()),
+                name: "App".into(),
+                detail: Some("const App: FC".into()),
                 kind: SymbolKindName::Function,
-                file: Some("app.py".into()),
+                file: Some("src/App.tsx".into()),
                 line: 4,
                 range: Some(range(3, 0, 24)),
-                selection_range: Some(range(3, 4, 9)),
+                selection_range: Some(range(3, 6, 9)),
                 children: Vec::new(),
             }],
         );
         let node = &snapshot.nodes[0];
         assert_eq!(node.line, Some(4));
-        assert_eq!(node.selection_range.unwrap().start.character, 4);
-        assert_eq!(node.signature.as_deref(), Some("def users() -> list[User]"));
+        assert_eq!(node.selection_range.unwrap().start.character, 6);
+        assert_eq!(node.signature.as_deref(), Some("const App: FC"));
     }
 
     #[test]
-    fn ty_diagnostics_use_python_language_and_source() {
-        let symbol_index = SymbolIndex::new(Vec::new());
-        let diagnostic: ra_client::LspDiagnostic = serde_json::from_value(serde_json::json!({
-            "range": {
-                "start": { "line": 2, "character": 4 },
-                "end": { "line": 2, "character": 8 }
-            },
-            "severity": 1,
-            "source": "ty",
-            "message": "unknown symbol"
-        }))
-        .unwrap();
-        let record = ty_diagnostic_record("app.py", 0, diagnostic, &symbol_index);
-        assert_eq!(record.language, LanguageId::Python);
-        assert_eq!(record.source.as_deref(), Some("ty"));
+    fn language_ids_match_ts_js_extensions() {
+        assert_eq!(
+            language_id_for_path(Path::new("App.tsx")),
+            "typescriptreact"
+        );
+        assert_eq!(language_id_for_path(Path::new("hook.ts")), "typescript");
+        assert_eq!(
+            language_id_for_path(Path::new("main.jsx")),
+            "javascriptreact"
+        );
+        assert_eq!(language_for_path("main.js"), LanguageId::JavaScript);
     }
 
     #[test]
     fn parser_mode_reports_parser_only_status() {
-        let state = PythonTyState::new(
-            PathBuf::from("ty"),
-            PythonAnalyzerMode::Parser,
+        let state = TypeScriptLspState::new(
+            PathBuf::from("typescript-language-server"),
+            TypeScriptAnalyzerMode::Parser,
             PathBuf::from("."),
         );
         let status = state.status_record();

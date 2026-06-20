@@ -44,6 +44,7 @@ use uuid::Uuid;
 mod context_pack;
 mod python_ty;
 mod trace;
+mod typescript_lsp;
 use context_pack::{
     build_edge_context_pack, build_node_context_pack, build_route_context_pack,
     build_trace_context_pack,
@@ -53,6 +54,11 @@ use python_ty::{
     PythonTyState,
 };
 use trace::{active_trace_node, build_edge_trace, build_node_trace, build_route_trace};
+use typescript_lsp::{
+    enrich_typescript_semantic_edges_for_files, enrich_typescript_with_lsp, language_for_path,
+    locations_from_definition_response, status_to_analyzer_status, TypeScriptAnalyzerMode,
+    TypeScriptAnalyzerStatus, TypeScriptLspState,
+};
 
 type NodeLayoutState = (f64, f64, f64, f64, Option<bool>);
 
@@ -91,6 +97,12 @@ struct ServeArgs {
     ty_path: PathBuf,
     #[arg(long)]
     disable_ty: bool,
+    #[arg(long, value_enum, default_value_t = TypeScriptAnalyzerMode::Auto)]
+    typescript_analyzer: TypeScriptAnalyzerMode,
+    #[arg(long, default_value = "typescript-language-server")]
+    typescript_language_server_path: PathBuf,
+    #[arg(long)]
+    disable_typescript_language_server: bool,
 }
 
 #[derive(Clone)]
@@ -101,6 +113,7 @@ struct AppStateHandle {
     ws_tx: broadcast::Sender<ServerMessage>,
     analyzer: Arc<AnalyzerState>,
     python_ty: Arc<PythonTyState>,
+    typescript_lsp: Arc<TypeScriptLspState>,
     diagnostics_by_file: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     diagnostics_by_node: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     watcher: Arc<RwLock<Option<notify::RecommendedWatcher>>>,
@@ -487,6 +500,16 @@ async fn serve(args: ServeArgs) -> Result<()> {
         python_analyzer_mode,
         project_root.clone(),
     ));
+    let typescript_analyzer_mode = if args.disable_typescript_language_server {
+        TypeScriptAnalyzerMode::Parser
+    } else {
+        args.typescript_analyzer
+    };
+    let typescript_lsp = Arc::new(TypeScriptLspState::new(
+        args.typescript_language_server_path.clone(),
+        typescript_analyzer_mode,
+        project_root.clone(),
+    ));
 
     let initial_status = AppStatus {
         app_state: AppState::Empty,
@@ -494,6 +517,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         analyzers: initial_analyzer_services(
             AnalyzerStatus::Starting,
             Some(python_ty.status_record()),
+            Some(typescript_lsp.status_record()),
             0,
             None,
         ),
@@ -529,6 +553,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         ws_tx,
         analyzer,
         python_ty,
+        typescript_lsp,
         diagnostics_by_file: Arc::new(RwLock::new(HashMap::new())),
         diagnostics_by_node: Arc::new(RwLock::new(HashMap::new())),
         watcher: Arc::new(RwLock::new(None)),
@@ -537,7 +562,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     install_watcher(&state, project_root.clone());
 
-    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %args.rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), "starting Rust Code Command Center");
+    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %args.rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), typescript_analyzer = ?typescript_analyzer_mode, typescript_language_server = %args.typescript_language_server_path.display(), "starting Rust Code Command Center");
 
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -875,6 +900,7 @@ async fn node_details(
     let mut references = graph_reference_records(&incoming_edges, &node_by_id);
     references.extend(resolve_rust_references(&state, &graph, &node).await);
     references.extend(resolve_python_references(&state, &graph, &node).await);
+    references.extend(resolve_typescript_references(&state, &graph, &node).await);
     dedupe_references(&mut references);
     let related_types = related_type_nodes(&incoming_edges, &outgoing_edges, &node_by_id);
     let diagnostics = state
@@ -1205,6 +1231,7 @@ async fn open_project(
     *state.project_root.write() = root.clone();
     state.analyzer.set_root(root.clone()).await;
     state.python_ty.set_root(root.clone()).await;
+    state.typescript_lsp.set_root(root.clone()).await;
     install_watcher(&state, root.clone());
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -1626,6 +1653,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
             start_python_ty_if_available(&state).await;
             let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+            enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
             snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
             publish_snapshot(&state, snapshot);
             state.is_indexing.store(false, Ordering::SeqCst);
@@ -1696,6 +1724,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
         enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
         start_python_ty_if_available(&state).await;
         let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+        enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
         snapshot.status = ready_status(&state, "Ready");
         publish_snapshot(&state, snapshot);
     }
@@ -1795,6 +1824,7 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
     }
     if only_typescript {
         match index_changed_typescript_files(&state, &project_root, ts_files, changed_files.clone())
+            .await
         {
             Ok(()) => {
                 state.is_indexing.store(false, Ordering::SeqCst);
@@ -1870,6 +1900,7 @@ async fn rebuild_patch_snapshot(
     }
     start_python_ty_if_available(&state).await;
     let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+    enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
     snapshot.status = ready_status(&state, "Ready");
     let diagnostics = state
         .diagnostics_by_file
@@ -1894,6 +1925,7 @@ async fn rebuild_language_patch_snapshot(
     let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
     start_python_ty_if_available(&state).await;
     let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+    enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
     snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
     let diagnostics = state
         .diagnostics_by_file
@@ -1981,7 +2013,7 @@ async fn index_changed_rust_files(
     Ok(())
 }
 
-fn index_changed_typescript_files(
+async fn index_changed_typescript_files(
     state: &AppStateHandle,
     project_root: &Path,
     files: Vec<String>,
@@ -1997,11 +2029,47 @@ fn index_changed_typescript_files(
         .collect::<HashMap<_, _>>();
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
+    if !state.typescript_lsp.is_parser_only() {
+        for file in &changed_set {
+            let absolute = project_root.join(file);
+            if let Err(error) = state.typescript_lsp.sync_changed_file(&absolute).await {
+                warn!(?error, file = %file, "typescript didChange failed; keeping parser TypeScript incremental path");
+            }
+        }
+    }
     graph_builder::typescript::enrich_typescript_graph_for_files(
         &mut snapshot,
         project_root,
         &changed_set,
     );
+    if !state.typescript_lsp.is_parser_only() {
+        for file in &changed_set {
+            let absolute = project_root.join(file);
+            match timeout(
+                Duration::from_secs(3),
+                state.typescript_lsp.document_symbols(&absolute),
+            )
+            .await
+            {
+                Ok(Ok(symbols)) => {
+                    typescript_lsp::enrich_nodes_from_lsp_symbols(&mut snapshot, file, &symbols)
+                }
+                Ok(Err(error)) => {
+                    warn!(?error, file = %file, "typescript documentSymbol failed for changed file")
+                }
+                Err(_) => {
+                    warn!(file = %file, "typescript documentSymbol timed out for changed file")
+                }
+            }
+        }
+        enrich_typescript_semantic_edges_for_files(
+            &mut snapshot,
+            project_root,
+            &state.typescript_lsp,
+            &changed_set,
+        )
+        .await;
+    }
     restore_existing_positions(&mut snapshot, &old_positions);
     snapshot.status = ready_status(state, "Ready");
     let diagnostics = state
@@ -2249,7 +2317,7 @@ fn spawn_diagnostics_listener(
             ) else {
                 continue;
             };
-            apply_lsp_diagnostics(&state, LanguageId::Rust, params);
+            apply_lsp_diagnostics(&state, Some(LanguageId::Rust), None, params);
         }
     });
 }
@@ -2282,6 +2350,66 @@ async fn start_python_ty_if_available(state: &AppStateHandle) -> bool {
     }
 }
 
+async fn start_typescript_lsp_if_available(state: &AppStateHandle) -> bool {
+    if state.typescript_lsp.is_parser_only() {
+        update_status(state, |_| {});
+        return false;
+    }
+    match state.typescript_lsp.subscribe_notifications().await {
+        Ok(rx) => {
+            spawn_typescript_diagnostics_listener(state.clone(), rx);
+            update_status(state, |_| {});
+            true
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                "typescript-language-server unavailable; TypeScript parser fallback remains active"
+            );
+            let status_record = state.typescript_lsp.status_record();
+            update_status(state, |status| {
+                if status_record.mode == "typescript-language-server" {
+                    status.analyzer_status = AnalyzerStatus::Error;
+                    status.message =
+                        Some(format!("TypeScript language server unavailable: {error}"));
+                }
+            });
+            false
+        }
+    }
+}
+
+async fn enrich_typescript_lsp_snapshot(
+    state: &AppStateHandle,
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+) {
+    if !start_typescript_lsp_if_available(state).await {
+        return;
+    }
+    if let Err(error) =
+        enrich_typescript_with_lsp(snapshot, project_root, &state.typescript_lsp).await
+    {
+        warn!(
+            ?error,
+            "typescript-language-server symbol enrichment failed"
+        );
+    }
+    let changed_files = snapshot
+        .files
+        .iter()
+        .filter(|file| typescript::is_typescript_path(&file.path))
+        .map(|file| file.path.clone())
+        .collect::<HashSet<_>>();
+    enrich_typescript_semantic_edges_for_files(
+        snapshot,
+        project_root,
+        &state.typescript_lsp,
+        &changed_files,
+    )
+    .await;
+}
+
 fn spawn_python_diagnostics_listener(
     state: AppStateHandle,
     mut rx: broadcast::Receiver<ra_client::LspNotification>,
@@ -2296,14 +2424,34 @@ fn spawn_python_diagnostics_listener(
             ) else {
                 continue;
             };
-            apply_lsp_diagnostics(&state, LanguageId::Python, params);
+            apply_lsp_diagnostics(&state, Some(LanguageId::Python), None, params);
+        }
+    });
+}
+
+fn spawn_typescript_diagnostics_listener(
+    state: AppStateHandle,
+    mut rx: broadcast::Receiver<ra_client::LspNotification>,
+) {
+    tokio::spawn(async move {
+        while let Ok(notification) = rx.recv().await {
+            if notification.method != "textDocument/publishDiagnostics" {
+                continue;
+            }
+            let Ok(params) = serde_json::from_value::<ra_client::LspPublishDiagnosticsParams>(
+                notification.params,
+            ) else {
+                continue;
+            };
+            apply_lsp_diagnostics(&state, None, Some("typescript-language-server"), params);
         }
     });
 }
 
 fn apply_lsp_diagnostics(
     state: &AppStateHandle,
-    language: LanguageId,
+    language: Option<LanguageId>,
+    source_override: Option<&str>,
     params: ra_client::LspPublishDiagnosticsParams,
 ) {
     let Some(path) = Url::parse(params.uri.as_str())
@@ -2316,6 +2464,7 @@ fn apply_lsp_diagnostics(
     let file = project_indexer::relative_to(&root, &path);
     let graph = state.graph.read().clone();
     let symbol_index = SymbolIndex::from_nodes(&graph.nodes);
+    let language = language.unwrap_or_else(|| language_for_path(&file));
     let diagnostics = params
         .diagnostics
         .into_iter()
@@ -2327,6 +2476,7 @@ fn apply_lsp_diagnostics(
                 idx,
                 diagnostic,
                 &symbol_index,
+                source_override,
             )
         })
         .collect::<Vec<_>>();
@@ -2352,7 +2502,14 @@ fn diagnostic_from_lsp(
     diagnostic: ra_client::LspDiagnostic,
     symbol_index: &SymbolIndex,
 ) -> DiagnosticRecord {
-    diagnostic_from_lsp_with_language(LanguageId::Rust, file, index, diagnostic, symbol_index)
+    diagnostic_from_lsp_with_language(
+        LanguageId::Rust,
+        file,
+        index,
+        diagnostic,
+        symbol_index,
+        None,
+    )
 }
 
 fn diagnostic_from_lsp_with_language(
@@ -2361,6 +2518,7 @@ fn diagnostic_from_lsp_with_language(
     index: usize,
     diagnostic: ra_client::LspDiagnostic,
     symbol_index: &SymbolIndex,
+    source_override: Option<&str>,
 ) -> DiagnosticRecord {
     let range = graph_core::TextRange {
         start: graph_core::TextPosition {
@@ -2386,7 +2544,7 @@ fn diagnostic_from_lsp_with_language(
         file: file.to_string(),
         range: Some(range),
         severity: diagnostic_severity(diagnostic.severity),
-        source: diagnostic.source,
+        source: source_override.map(str::to_string).or(diagnostic.source),
         message: diagnostic.message,
         code,
         related_node_ids,
@@ -2761,6 +2919,90 @@ async fn resolve_python_references(
     references_from_locations(graph, &project_root, locations)
 }
 
+async fn resolve_typescript_references(
+    state: &AppStateHandle,
+    graph: &GraphSnapshot,
+    node: &GraphNode,
+) -> Vec<ReferenceRecord> {
+    if state.typescript_lsp.is_parser_only()
+        || !matches!(
+            node.language.as_deref(),
+            Some("typescript" | "javascript")
+                | Some("TypeScript")
+                | Some("JavaScript")
+                | Some("ts")
+                | Some("js")
+        )
+        || !matches!(
+            node.node_type,
+            graph_core::NodeType::Function
+                | graph_core::NodeType::Method
+                | graph_core::NodeType::Class
+                | graph_core::NodeType::Interface
+                | graph_core::NodeType::TypeAlias
+                | graph_core::NodeType::Component
+                | graph_core::NodeType::Hook
+        )
+    {
+        return Vec::new();
+    }
+    let Some(file) = node.file.as_ref() else {
+        return Vec::new();
+    };
+    let Some(selection_range) = node.selection_range else {
+        return Vec::new();
+    };
+    let project_root = state.project_root.read().clone();
+    let absolute_file = project_root.join(file);
+    let mut locations = match timeout(
+        Duration::from_secs(4),
+        state.typescript_lsp.references(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(locations)) => locations,
+        Ok(Err(error)) => {
+            warn!(?error, node = %node.id, "typescript-language-server references failed");
+            Vec::new()
+        }
+        Err(_) => {
+            warn!(node = %node.id, "typescript-language-server references timed out");
+            Vec::new()
+        }
+    };
+
+    if let Ok(Ok(response)) = timeout(
+        Duration::from_secs(3),
+        state.typescript_lsp.definition(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        locations.extend(locations_from_definition_response(response));
+    }
+    if let Ok(Ok(response)) = timeout(
+        Duration::from_secs(3),
+        state.typescript_lsp.type_definition(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        locations.extend(locations_from_definition_response(response));
+    }
+
+    references_from_locations(graph, &project_root, locations)
+}
+
 fn references_from_locations(
     graph: &GraphSnapshot,
     project_root: &Path,
@@ -2864,6 +3106,7 @@ fn decorate_app_status_for_snapshot(
         status.analyzer_status,
         status.message.clone(),
         Some(python),
+        Some(state.typescript_lsp.status_record()),
         snapshot,
         status.last_updated.clone(),
     );
@@ -2872,6 +3115,7 @@ fn decorate_app_status_for_snapshot(
 fn initial_analyzer_services(
     rust_status: AnalyzerStatus,
     python: Option<PythonAnalyzerStatus>,
+    typescript: Option<TypeScriptAnalyzerStatus>,
     files_indexed: u32,
     last_updated: Option<String>,
 ) -> Vec<AnalyzerServiceStatus> {
@@ -2879,6 +3123,7 @@ fn initial_analyzer_services(
         rust_status,
         None,
         python,
+        typescript,
         AnalyzerFileCounts {
             rust: files_indexed,
             typescript: 0,
@@ -2901,6 +3146,7 @@ fn analyzer_services_from_snapshot(
     rust_status: AnalyzerStatus,
     rust_message: Option<String>,
     python: Option<PythonAnalyzerStatus>,
+    typescript: Option<TypeScriptAnalyzerStatus>,
     snapshot: &GraphSnapshot,
     last_updated: Option<String>,
 ) -> Vec<AnalyzerServiceStatus> {
@@ -2916,13 +3162,21 @@ fn analyzer_services_from_snapshot(
             counts.qml += 1;
         }
     }
-    analyzer_services_from_counts(rust_status, rust_message, python, counts, last_updated)
+    analyzer_services_from_counts(
+        rust_status,
+        rust_message,
+        python,
+        typescript,
+        counts,
+        last_updated,
+    )
 }
 
 fn analyzer_services_from_counts(
     rust_status: AnalyzerStatus,
     rust_message: Option<String>,
     python: Option<PythonAnalyzerStatus>,
+    typescript: Option<TypeScriptAnalyzerStatus>,
     counts: AnalyzerFileCounts,
     last_updated: Option<String>,
 ) -> Vec<AnalyzerServiceStatus> {
@@ -2998,18 +3252,60 @@ fn analyzer_services_from_counts(
         }
     }
 
-    services.push(AnalyzerServiceStatus {
-        id: "typescript-parser".into(),
-        kind: AnalyzerKind::TypeScript,
-        engine: AnalyzerEngine::TypeScriptParser,
-        label: "TypeScript parser".into(),
-        status: AnalyzerStatus::Ready,
-        mode: Some("parser".into()),
+    let typescript = typescript.unwrap_or(TypeScriptAnalyzerStatus {
+        mode: "parser".into(),
+        status: "parser only".into(),
         message: None,
-        capabilities: vec![AnalyzerCapability::Symbols],
-        files_indexed: counts.typescript,
-        last_updated: last_updated.clone(),
     });
+    let ts_status = status_to_analyzer_status(&typescript.status);
+    let ts_ready = ts_status == AnalyzerStatus::Ready;
+    let ts_unavailable_auto = typescript.mode == "auto"
+        && matches!(ts_status, AnalyzerStatus::Fallback | AnalyzerStatus::Error);
+    if typescript.mode == "typescript-language-server" || ts_ready || ts_unavailable_auto {
+        services.push(AnalyzerServiceStatus {
+            id: "typescript-language-server".into(),
+            kind: AnalyzerKind::TypeScript,
+            engine: AnalyzerEngine::TypeScriptLanguageServer,
+            label: "TypeScript language server".into(),
+            status: ts_status,
+            mode: Some(typescript.mode.clone()),
+            message: typescript.message.clone(),
+            capabilities: if ts_ready {
+                vec![
+                    AnalyzerCapability::Symbols,
+                    AnalyzerCapability::Diagnostics,
+                    AnalyzerCapability::References,
+                    AnalyzerCapability::Definitions,
+                    AnalyzerCapability::TypeDefinitions,
+                ]
+            } else {
+                Vec::new()
+            },
+            files_indexed: counts.typescript,
+            last_updated: last_updated.clone(),
+        });
+    }
+    if typescript.mode == "parser" || ts_unavailable_auto || typescript.status == "parser only" {
+        services.push(AnalyzerServiceStatus {
+            id: "typescript-parser".into(),
+            kind: AnalyzerKind::TypeScript,
+            engine: AnalyzerEngine::TypeScriptParser,
+            label: "TypeScript parser".into(),
+            status: AnalyzerStatus::Ready,
+            mode: Some("parser".into()),
+            message: if ts_unavailable_auto {
+                Some(
+                    "Using parser fallback because typescript-language-server is unavailable."
+                        .into(),
+                )
+            } else {
+                None
+            },
+            capabilities: vec![AnalyzerCapability::Symbols],
+            files_indexed: counts.typescript,
+            last_updated: last_updated.clone(),
+        });
+    }
     services.push(AnalyzerServiceStatus {
         id: "qml-parser".into(),
         kind: AnalyzerKind::Qml,
@@ -3057,11 +3353,13 @@ fn publish_snapshot(state: &AppStateHandle, mut snapshot: GraphSnapshot) {
     let project_root = state.project_root.read().clone();
     apply_saved_layout(&mut snapshot, &project_root);
     let python = state.python_ty.status_record();
+    let typescript = state.typescript_lsp.status_record();
     snapshot.status.python_analyzer = Some(python.clone());
     snapshot.status.analyzers = analyzer_services_from_snapshot(
         snapshot.status.analyzer_status,
         snapshot.status.message.clone(),
         Some(python),
+        Some(typescript),
         &snapshot,
         snapshot.status.last_updated.clone(),
     );
@@ -3336,6 +3634,7 @@ mod tests {
             AnalyzerStatus::Ready,
             Some("Ready".into()),
             None,
+            None,
             AnalyzerFileCounts {
                 rust: 2,
                 typescript: 3,
@@ -3366,6 +3665,7 @@ mod tests {
                 status: "ty ready".into(),
                 message: None,
             }),
+            None,
             AnalyzerFileCounts {
                 python: 5,
                 ..AnalyzerFileCounts::default()
@@ -3392,6 +3692,7 @@ mod tests {
                 status: "ty unavailable".into(),
                 message: Some("missing ty".into()),
             }),
+            None,
             AnalyzerFileCounts {
                 python: 7,
                 ..AnalyzerFileCounts::default()
@@ -3406,6 +3707,68 @@ mod tests {
             service.id == "python-parser"
                 && service.status == AnalyzerStatus::Ready
                 && service.capabilities == vec![AnalyzerCapability::Symbols]
+        }));
+    }
+
+    #[test]
+    fn analyzer_services_report_typescript_language_server_when_ready() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            None,
+            None,
+            Some(TypeScriptAnalyzerStatus {
+                mode: "auto".into(),
+                status: "language server ready".into(),
+                message: None,
+            }),
+            AnalyzerFileCounts {
+                typescript: 9,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+        let service = services
+            .iter()
+            .find(|service| service.id == "typescript-language-server")
+            .expect("typescript language server analyzer record");
+
+        assert_eq!(service.status, AnalyzerStatus::Ready);
+        assert_eq!(service.engine, AnalyzerEngine::TypeScriptLanguageServer);
+        assert!(service
+            .capabilities
+            .contains(&AnalyzerCapability::References));
+        assert!(!services
+            .iter()
+            .any(|service| service.id == "typescript-parser"));
+    }
+
+    #[test]
+    fn analyzer_services_report_typescript_parser_fallback() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            None,
+            None,
+            Some(TypeScriptAnalyzerStatus {
+                mode: "auto".into(),
+                status: "language server unavailable".into(),
+                message: Some("missing typescript-language-server".into()),
+            }),
+            AnalyzerFileCounts {
+                typescript: 4,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+
+        assert!(services.iter().any(|service| {
+            service.id == "typescript-language-server" && service.status == AnalyzerStatus::Fallback
+        }));
+        assert!(services.iter().any(|service| {
+            service.id == "typescript-parser"
+                && service.status == AnalyzerStatus::Ready
+                && service.message.as_deref().is_some_and(|message| {
+                    message.contains("typescript-language-server is unavailable")
+                })
         }));
     }
 

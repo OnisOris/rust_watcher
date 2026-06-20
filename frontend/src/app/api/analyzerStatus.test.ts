@@ -38,11 +38,13 @@ describe('analyzer status helpers', () => {
       analyzer({ id: 'python-parser', kind: 'Python', engine: 'Parser', status: 'Ready' }),
       analyzer({ id: 'python-ty', kind: 'Python', engine: 'Ty', status: 'Ready' }),
       analyzer({ id: 'rust-analyzer', kind: 'Rust', engine: 'RustAnalyzer', status: 'Ready' }),
+      analyzer({ id: 'typescript-language-server', kind: 'TypeScript', engine: 'TypeScriptLanguageServer', status: 'Ready' }),
       analyzer({ id: 'typescript-parser', kind: 'TypeScript', engine: 'TypeScriptParser', status: 'Ready' }),
     ])
 
     expect(sorted.map(item => item.id)).toEqual([
       'rust-analyzer',
+      'typescript-language-server',
       'typescript-parser',
       'python-ty',
       'python-parser',
