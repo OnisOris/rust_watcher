@@ -44,6 +44,7 @@ use uuid::Uuid;
 mod analyzer_paths;
 mod context_pack;
 mod python_ty;
+mod qml_lsp;
 mod trace;
 mod typescript_lsp;
 use analyzer_paths::resolve_rust_analyzer;
@@ -54,6 +55,10 @@ use context_pack::{
 use python_ty::{
     enrich_python_semantic_calls_for_files, enrich_python_with_ty, PythonAnalyzerMode,
     PythonTyState,
+};
+use qml_lsp::{
+    status_to_analyzer_status as qml_status_to_analyzer_status, QmlAnalyzerMode, QmlAnalyzerStatus,
+    QmlLspState,
 };
 use trace::{active_trace_node, build_edge_trace, build_node_trace, build_route_trace};
 use typescript_lsp::{
@@ -105,6 +110,16 @@ struct ServeArgs {
     typescript_language_server_path: PathBuf,
     #[arg(long)]
     disable_typescript_language_server: bool,
+    #[arg(long, value_enum, default_value_t = QmlAnalyzerMode::Auto)]
+    qml_analyzer: QmlAnalyzerMode,
+    #[arg(long, default_value = "qmlls")]
+    qmlls_path: PathBuf,
+    #[arg(long)]
+    disable_qmlls: bool,
+    #[arg(long)]
+    qmlls_build_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = true)]
+    qmlls_no_cmake_calls: bool,
 }
 
 #[derive(Clone)]
@@ -116,6 +131,7 @@ struct AppStateHandle {
     analyzer: Arc<AnalyzerState>,
     python_ty: Arc<PythonTyState>,
     typescript_lsp: Arc<TypeScriptLspState>,
+    qml_lsp: Arc<QmlLspState>,
     diagnostics_by_file: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     diagnostics_by_node: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     watcher: Arc<RwLock<Option<notify::RecommendedWatcher>>>,
@@ -516,6 +532,18 @@ async fn serve(args: ServeArgs) -> Result<()> {
         typescript_analyzer_mode,
         project_root.clone(),
     ));
+    let qml_analyzer_mode = if args.disable_qmlls {
+        QmlAnalyzerMode::Parser
+    } else {
+        args.qml_analyzer
+    };
+    let qml_lsp = Arc::new(QmlLspState::new(
+        args.qmlls_path.clone(),
+        qml_analyzer_mode,
+        args.qmlls_build_dir.clone(),
+        args.qmlls_no_cmake_calls,
+        project_root.clone(),
+    ));
     let rust_analyzer = resolve_rust_analyzer(&args.rust_analyzer, &project_root);
 
     let initial_status = AppStatus {
@@ -525,6 +553,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             AnalyzerStatus::Starting,
             Some(python_ty.status_record()),
             Some(typescript_lsp.status_record()),
+            Some(qml_lsp.status_record()),
             0,
             None,
         ),
@@ -561,6 +590,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         analyzer,
         python_ty,
         typescript_lsp,
+        qml_lsp,
         diagnostics_by_file: Arc::new(RwLock::new(HashMap::new())),
         diagnostics_by_node: Arc::new(RwLock::new(HashMap::new())),
         watcher: Arc::new(RwLock::new(None)),
@@ -569,7 +599,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     install_watcher(&state, project_root.clone());
 
-    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), typescript_analyzer = ?typescript_analyzer_mode, typescript_language_server = %args.typescript_language_server_path.display(), "starting Rust Code Command Center");
+    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), typescript_analyzer = ?typescript_analyzer_mode, typescript_language_server = %args.typescript_language_server_path.display(), qml_analyzer = ?qml_analyzer_mode, qmlls = %args.qmlls_path.display(), "starting Rust Code Command Center");
 
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -908,6 +938,7 @@ async fn node_details(
     references.extend(resolve_rust_references(&state, &graph, &node).await);
     references.extend(resolve_python_references(&state, &graph, &node).await);
     references.extend(resolve_typescript_references(&state, &graph, &node).await);
+    references.extend(resolve_qml_references(&state, &graph, &node).await);
     dedupe_references(&mut references);
     let related_types = related_type_nodes(&incoming_edges, &outgoing_edges, &node_by_id);
     let diagnostics = state
@@ -1239,6 +1270,7 @@ async fn open_project(
     state.analyzer.set_root(root.clone()).await;
     state.python_ty.set_root(root.clone()).await;
     state.typescript_lsp.set_root(root.clone()).await;
+    state.qml_lsp.set_root(root.clone()).await;
     install_watcher(&state, root.clone());
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -1663,6 +1695,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
             start_python_ty_if_available(&state).await;
             let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+            sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
             enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
             snapshot.status = fallback_status(
                 &state,
@@ -1737,6 +1770,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
         enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
         start_python_ty_if_available(&state).await;
         let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+        sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
         enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
         snapshot.status = ready_status(&state, "Ready");
         publish_snapshot(&state, snapshot);
@@ -1864,7 +1898,8 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         }
     }
     if only_qml {
-        match index_changed_qml_files(&state, &project_root, qml_files, changed_files.clone()) {
+        match index_changed_qml_files(&state, &project_root, qml_files, changed_files.clone()).await
+        {
             Ok(()) => {
                 state.is_indexing.store(false, Ordering::SeqCst);
                 return;
@@ -1913,6 +1948,7 @@ async fn rebuild_patch_snapshot(
     }
     start_python_ty_if_available(&state).await;
     let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+    sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
     enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
     snapshot.status = ready_status(&state, "Ready");
     let diagnostics = state
@@ -1938,6 +1974,7 @@ async fn rebuild_language_patch_snapshot(
     let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
     start_python_ty_if_available(&state).await;
     let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
+    sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
     enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
     snapshot.status = fallback_status(
         &state,
@@ -2150,7 +2187,7 @@ async fn index_changed_python_files(
     Ok(())
 }
 
-fn index_changed_qml_files(
+async fn index_changed_qml_files(
     state: &AppStateHandle,
     project_root: &Path,
     files: Vec<String>,
@@ -2167,6 +2204,14 @@ fn index_changed_qml_files(
 
     remove_file_symbols_and_edges(&mut snapshot, &changed_set);
     graph_builder::qml::enrich_qml_graph_for_files(&mut snapshot, project_root, &changed_set);
+    if !state.qml_lsp.is_parser_only() {
+        for file in &changed_set {
+            let absolute = project_root.join(file);
+            if let Err(error) = state.qml_lsp.sync_changed_file(&absolute).await {
+                warn!(?error, file = %file, "qmlls didChange failed; keeping parser QML incremental path");
+            }
+        }
+    }
     restore_existing_positions(&mut snapshot, &old_positions);
     snapshot.status = ready_status(state, "Ready");
     let diagnostics = state
@@ -2399,6 +2444,58 @@ async fn start_typescript_lsp_if_available(state: &AppStateHandle) -> bool {
     }
 }
 
+async fn start_qml_lsp_if_available(state: &AppStateHandle) -> bool {
+    if state.qml_lsp.is_parser_only() {
+        update_status(state, |_| {});
+        return false;
+    }
+    match state.qml_lsp.subscribe_notifications().await {
+        Ok(rx) => {
+            spawn_qml_diagnostics_listener(state.clone(), rx);
+            update_status(state, |_| {});
+            true
+        }
+        Err(error) => {
+            if state.qml_lsp.should_log_start_failure() {
+                warn!(
+                    ?error,
+                    "qmlls unavailable; QML parser fallback remains active"
+                );
+            }
+            let status_record = state.qml_lsp.status_record();
+            update_status(state, |status| {
+                if status_record.mode == "qmlls" {
+                    status.analyzer_status = AnalyzerStatus::Error;
+                    status.message = Some(format!("QML language server unavailable: {error}"));
+                }
+            });
+            false
+        }
+    }
+}
+
+async fn sync_qml_lsp_snapshot(
+    state: &AppStateHandle,
+    snapshot: &GraphSnapshot,
+    project_root: &Path,
+) {
+    if !start_qml_lsp_if_available(state).await {
+        return;
+    }
+    let files = snapshot
+        .files
+        .iter()
+        .filter(|file| qml::is_qml_path(&file.path))
+        .map(|file| file.path.clone())
+        .collect::<HashSet<_>>();
+    for file in files {
+        let absolute = project_root.join(&file);
+        if let Err(error) = state.qml_lsp.open_document(&absolute).await {
+            warn!(?error, file = %file, "qmlls didOpen failed");
+        }
+    }
+}
+
 async fn enrich_typescript_lsp_snapshot(
     state: &AppStateHandle,
     snapshot: &mut GraphSnapshot,
@@ -2464,6 +2561,25 @@ fn spawn_typescript_diagnostics_listener(
                 continue;
             };
             apply_lsp_diagnostics(&state, None, Some("typescript-language-server"), params);
+        }
+    });
+}
+
+fn spawn_qml_diagnostics_listener(
+    state: AppStateHandle,
+    mut rx: broadcast::Receiver<ra_client::LspNotification>,
+) {
+    tokio::spawn(async move {
+        while let Ok(notification) = rx.recv().await {
+            if notification.method != "textDocument/publishDiagnostics" {
+                continue;
+            }
+            let Ok(params) = serde_json::from_value::<ra_client::LspPublishDiagnosticsParams>(
+                notification.params,
+            ) else {
+                continue;
+            };
+            apply_lsp_diagnostics(&state, Some(LanguageId::Qml), Some("qmlls"), params);
         }
     });
 }
@@ -3023,6 +3139,71 @@ async fn resolve_typescript_references(
     references_from_locations(graph, &project_root, locations)
 }
 
+async fn resolve_qml_references(
+    state: &AppStateHandle,
+    graph: &GraphSnapshot,
+    node: &GraphNode,
+) -> Vec<ReferenceRecord> {
+    if state.qml_lsp.is_parser_only()
+        || node.language.as_deref() != Some(LanguageId::Qml.as_str())
+        || !matches!(
+            node.node_type,
+            graph_core::NodeType::Object
+                | graph_core::NodeType::Property
+                | graph_core::NodeType::Signal
+                | graph_core::NodeType::Handler
+                | graph_core::NodeType::Function
+                | graph_core::NodeType::Component
+                | graph_core::NodeType::File
+        )
+    {
+        return Vec::new();
+    }
+    let Some(file) = node.file.as_ref() else {
+        return Vec::new();
+    };
+    let Some(selection_range) = node.selection_range.or(node.range) else {
+        return Vec::new();
+    };
+    let project_root = state.project_root.read().clone();
+    let absolute_file = project_root.join(file);
+    let mut locations = match timeout(
+        Duration::from_secs(4),
+        state.qml_lsp.references(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(locations)) => locations,
+        Ok(Err(error)) => {
+            warn!(?error, node = %node.id, "qmlls references failed");
+            Vec::new()
+        }
+        Err(_) => {
+            warn!(node = %node.id, "qmlls references timed out");
+            Vec::new()
+        }
+    };
+
+    if let Ok(Ok(response)) = timeout(
+        Duration::from_secs(3),
+        state.qml_lsp.definition(
+            &absolute_file,
+            selection_range.start.line,
+            selection_range.start.character,
+        ),
+    )
+    .await
+    {
+        locations.extend(locations_from_definition_response(response));
+    }
+
+    references_from_locations(graph, &project_root, locations)
+}
+
 fn references_from_locations(
     graph: &GraphSnapshot,
     project_root: &Path,
@@ -3127,6 +3308,7 @@ fn decorate_app_status_for_snapshot(
         status.message.clone(),
         Some(python),
         Some(state.typescript_lsp.status_record()),
+        Some(state.qml_lsp.status_record()),
         snapshot,
         status.last_updated.clone(),
     );
@@ -3136,6 +3318,7 @@ fn initial_analyzer_services(
     rust_status: AnalyzerStatus,
     python: Option<PythonAnalyzerStatus>,
     typescript: Option<TypeScriptAnalyzerStatus>,
+    qml_status: Option<QmlAnalyzerStatus>,
     files_indexed: u32,
     last_updated: Option<String>,
 ) -> Vec<AnalyzerServiceStatus> {
@@ -3144,6 +3327,7 @@ fn initial_analyzer_services(
         None,
         python,
         typescript,
+        qml_status,
         AnalyzerFileCounts {
             rust: files_indexed,
             typescript: 0,
@@ -3167,6 +3351,7 @@ fn analyzer_services_from_snapshot(
     rust_message: Option<String>,
     python: Option<PythonAnalyzerStatus>,
     typescript: Option<TypeScriptAnalyzerStatus>,
+    qml_status: Option<QmlAnalyzerStatus>,
     snapshot: &GraphSnapshot,
     last_updated: Option<String>,
 ) -> Vec<AnalyzerServiceStatus> {
@@ -3187,6 +3372,7 @@ fn analyzer_services_from_snapshot(
         rust_message,
         python,
         typescript,
+        qml_status,
         counts,
         last_updated,
     )
@@ -3197,6 +3383,7 @@ fn analyzer_services_from_counts(
     rust_message: Option<String>,
     python: Option<PythonAnalyzerStatus>,
     typescript: Option<TypeScriptAnalyzerStatus>,
+    qml_status: Option<QmlAnalyzerStatus>,
     counts: AnalyzerFileCounts,
     last_updated: Option<String>,
 ) -> Vec<AnalyzerServiceStatus> {
@@ -3328,18 +3515,63 @@ fn analyzer_services_from_counts(
             last_updated: last_updated.clone(),
         });
     }
-    services.push(AnalyzerServiceStatus {
-        id: "qml-parser".into(),
-        kind: AnalyzerKind::Qml,
-        engine: AnalyzerEngine::QmlParser,
-        label: "QML parser".into(),
-        status: AnalyzerStatus::Ready,
-        mode: Some("parser".into()),
+    let qml_status = qml_status.unwrap_or(QmlAnalyzerStatus {
+        mode: "parser".into(),
+        status: "parser only".into(),
         message: None,
-        capabilities: vec![AnalyzerCapability::Symbols],
-        files_indexed: counts.qml,
-        last_updated,
     });
+    let qmlls_status = qml_status_to_analyzer_status(&qml_status.status);
+    let qmlls_ready = qmlls_status == AnalyzerStatus::Ready;
+    let qmlls_unavailable_auto = qml_status.mode == "auto"
+        && matches!(
+            qmlls_status,
+            AnalyzerStatus::Fallback | AnalyzerStatus::Error
+        );
+    if qml_status.mode == "qmlls" || qmlls_ready || qmlls_unavailable_auto {
+        services.push(AnalyzerServiceStatus {
+            id: "qmlls".into(),
+            kind: AnalyzerKind::Qml,
+            engine: AnalyzerEngine::QmlLanguageServer,
+            label: "qmlls".into(),
+            status: qmlls_status,
+            mode: Some(qml_status.mode.clone()),
+            message: qml_status.message.clone(),
+            capabilities: if qmlls_ready {
+                vec![
+                    AnalyzerCapability::Symbols,
+                    AnalyzerCapability::Diagnostics,
+                    AnalyzerCapability::References,
+                    AnalyzerCapability::Definitions,
+                ]
+            } else {
+                Vec::new()
+            },
+            files_indexed: counts.qml,
+            last_updated: last_updated.clone(),
+        });
+    }
+    if qml_status.mode == "parser" || qmlls_unavailable_auto || qml_status.status == "parser only" {
+        services.push(AnalyzerServiceStatus {
+            id: "qml-parser".into(),
+            kind: AnalyzerKind::Qml,
+            engine: AnalyzerEngine::QmlParser,
+            label: "QML parser".into(),
+            status: if qmlls_unavailable_auto {
+                AnalyzerStatus::Fallback
+            } else {
+                AnalyzerStatus::Ready
+            },
+            mode: Some("parser".into()),
+            message: if qmlls_unavailable_auto {
+                Some("qmlls not found, parser fallback active. Install Qt/qmlls or pass --qmlls-path.".into())
+            } else {
+                None
+            },
+            capabilities: vec![AnalyzerCapability::Symbols],
+            files_indexed: counts.qml,
+            last_updated,
+        });
+    }
     services
 }
 
@@ -3376,12 +3608,14 @@ fn publish_snapshot(state: &AppStateHandle, mut snapshot: GraphSnapshot) {
     apply_saved_layout(&mut snapshot, &project_root);
     let python = state.python_ty.status_record();
     let typescript = state.typescript_lsp.status_record();
+    let qml_status = state.qml_lsp.status_record();
     snapshot.status.python_analyzer = Some(python.clone());
     snapshot.status.analyzers = analyzer_services_from_snapshot(
         snapshot.status.analyzer_status,
         snapshot.status.message.clone(),
         Some(python),
         Some(typescript),
+        Some(qml_status),
         &snapshot,
         snapshot.status.last_updated.clone(),
     );
@@ -3657,6 +3891,7 @@ mod tests {
             Some("Ready".into()),
             None,
             None,
+            None,
             AnalyzerFileCounts {
                 rust: 2,
                 typescript: 3,
@@ -3688,6 +3923,7 @@ mod tests {
                 message: None,
             }),
             None,
+            None,
             AnalyzerFileCounts {
                 python: 5,
                 ..AnalyzerFileCounts::default()
@@ -3714,6 +3950,7 @@ mod tests {
                 status: "ty unavailable".into(),
                 message: Some("missing ty".into()),
             }),
+            None,
             None,
             AnalyzerFileCounts {
                 python: 7,
@@ -3743,6 +3980,7 @@ mod tests {
                 status: "language server ready".into(),
                 message: None,
             }),
+            None,
             AnalyzerFileCounts {
                 typescript: 9,
                 ..AnalyzerFileCounts::default()
@@ -3775,6 +4013,7 @@ mod tests {
                 status: "language server unavailable".into(),
                 message: Some("missing typescript-language-server".into()),
             }),
+            None,
             AnalyzerFileCounts {
                 typescript: 4,
                 ..AnalyzerFileCounts::default()
@@ -3795,6 +4034,69 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_services_report_qmlls_when_ready() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            None,
+            None,
+            None,
+            Some(QmlAnalyzerStatus {
+                mode: "auto".into(),
+                status: "qmlls ready".into(),
+                message: None,
+            }),
+            AnalyzerFileCounts {
+                qml: 3,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+        let service = services
+            .iter()
+            .find(|service| service.id == "qmlls")
+            .expect("qmlls analyzer record");
+
+        assert_eq!(service.status, AnalyzerStatus::Ready);
+        assert_eq!(service.engine, AnalyzerEngine::QmlLanguageServer);
+        assert!(service
+            .capabilities
+            .contains(&AnalyzerCapability::Diagnostics));
+        assert!(!services.iter().any(|service| service.id == "qml-parser"));
+    }
+
+    #[test]
+    fn analyzer_services_report_qml_parser_fallback() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            None,
+            None,
+            None,
+            Some(QmlAnalyzerStatus {
+                mode: "auto".into(),
+                status: "qmlls unavailable".into(),
+                message: Some("missing qmlls".into()),
+            }),
+            AnalyzerFileCounts {
+                qml: 2,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+
+        assert!(services
+            .iter()
+            .any(|service| service.id == "qmlls" && service.status == AnalyzerStatus::Fallback));
+        assert!(services.iter().any(|service| {
+            service.id == "qml-parser"
+                && service.status == AnalyzerStatus::Fallback
+                && service
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("qmlls not found"))
+        }));
+    }
+
+    #[test]
     fn readme_documents_analyzer_setup() {
         let readme =
             std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"))
@@ -3805,6 +4107,8 @@ mod tests {
         assert!(readme.contains("uv tool install ty"));
         assert!(readme.contains("pnpm add -D typescript typescript-language-server"));
         assert!(readme.contains("--typescript-analyzer auto|parser|typescript-language-server"));
+        assert!(readme.contains("--qml-analyzer auto|parser|qmlls"));
+        assert!(readme.contains("--qmlls-no-cmake-calls"));
     }
 
     #[test]

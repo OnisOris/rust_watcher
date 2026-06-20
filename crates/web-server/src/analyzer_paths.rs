@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub const TYPESCRIPT_LS_COMMAND: &str = "typescript-language-server";
 pub const TY_COMMAND: &str = "ty";
 pub const RUST_ANALYZER_COMMAND: &str = "rust-analyzer";
+pub const QMLLS_COMMAND: &str = "qmlls";
 
 pub fn resolve_typescript_language_server(configured: &Path, project_root: &Path) -> PathBuf {
     if is_default_command(configured, TYPESCRIPT_LS_COMMAND) {
@@ -30,6 +31,17 @@ pub fn resolve_ty(configured: &Path, project_root: &Path) -> PathBuf {
 pub fn resolve_rust_analyzer(configured: &Path, project_root: &Path) -> PathBuf {
     if is_default_command(configured, RUST_ANALYZER_COMMAND) {
         find_in_path(RUST_ANALYZER_COMMAND).unwrap_or_else(|| PathBuf::from(RUST_ANALYZER_COMMAND))
+    } else {
+        resolve_explicit_path(configured, project_root)
+    }
+}
+
+pub fn resolve_qmlls(configured: &Path, project_root: &Path) -> PathBuf {
+    if is_default_command(configured, QMLLS_COMMAND) {
+        find_nearest_project_binary(project_root, ".qt/bin", QMLLS_COMMAND)
+            .or_else(find_qt_install_qmlls)
+            .or_else(|| find_in_path(QMLLS_COMMAND))
+            .unwrap_or_else(|| PathBuf::from(QMLLS_COMMAND))
     } else {
         resolve_explicit_path(configured, project_root)
     }
@@ -79,6 +91,30 @@ fn repo_frontend_binary(command: &str) -> Option<PathBuf> {
 fn find_in_path(command: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     find_in_paths(command, env::split_paths(&paths))
+}
+
+fn find_qt_install_qmlls() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let qt = home.join("Qt");
+    let Ok(versions) = std::fs::read_dir(qt) else {
+        return None;
+    };
+    let mut candidates = Vec::new();
+    for version in versions.flatten() {
+        let Ok(kits) = std::fs::read_dir(version.path()) else {
+            continue;
+        };
+        for kit in kits.flatten() {
+            candidates.push(kit.path().join("gcc_64/bin"));
+        }
+    }
+    candidates.sort();
+    candidates
+        .into_iter()
+        .find_map(|directory| executable_candidate(directory, QMLLS_COMMAND))
 }
 
 fn find_in_paths(command: &str, paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -169,6 +205,15 @@ mod tests {
         touch(&binary);
 
         assert_eq!(resolve_ty(Path::new(TY_COMMAND), &root), binary);
+    }
+
+    #[test]
+    fn resolves_project_qmlls() {
+        let root = temp_root();
+        let binary = root.join(".qt/bin").join(QMLLS_COMMAND);
+        touch(&binary);
+
+        assert_eq!(resolve_qmlls(Path::new(QMLLS_COMMAND), &root), binary);
     }
 
     #[test]

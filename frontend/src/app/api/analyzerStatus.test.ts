@@ -35,6 +35,7 @@ describe('analyzer status helpers', () => {
   it('sorts analyzers by language and semantic engines before parser fallbacks', () => {
     const sorted = sortAnalyzers([
       analyzer({ id: 'qml-parser', kind: 'Qml', engine: 'QmlParser', status: 'Ready' }),
+      analyzer({ id: 'qmlls', kind: 'Qml', engine: 'QmlLanguageServer', status: 'Ready' }),
       analyzer({ id: 'python-parser', kind: 'Python', engine: 'Parser', status: 'Ready' }),
       analyzer({ id: 'python-ty', kind: 'Python', engine: 'Ty', status: 'Ready' }),
       analyzer({ id: 'rust-analyzer', kind: 'Rust', engine: 'RustAnalyzer', status: 'Ready' }),
@@ -48,6 +49,7 @@ describe('analyzer status helpers', () => {
       'typescript-parser',
       'python-ty',
       'python-parser',
+      'qmlls',
       'qml-parser',
     ])
   })

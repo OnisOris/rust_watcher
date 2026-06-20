@@ -68,8 +68,12 @@ The backend automatically checks project `node_modules/.bin`, parent `node_modul
 
 QML:
 
-- The QML parser works without external tools for now.
-- QML language server support can be added later as an optional semantic analyzer.
+- The QML parser works without external tools.
+- Optional semantic analyzer: `qmlls`
+- `qmlls` is installed with Qt and is usually under `<Qt installation>/bin/qmlls`. You can pass an explicit path with `--qmlls-path`.
+- If your QML project needs build information, pass it with `--qmlls-build-dir /path/to/build`.
+- `--qmlls-no-cmake-calls` is enabled by default to avoid surprising rebuild/configure steps.
+- `qmlls` is still evolving and may need build information for accurate module/type resolution.
 
 Analyzer mode flags:
 
@@ -79,6 +83,11 @@ Analyzer mode flags:
 - `--typescript-analyzer auto|parser|typescript-language-server`
 - `--typescript-language-server-path /path/to/typescript-language-server`
 - `--disable-typescript-language-server`
+- `--qml-analyzer auto|parser|qmlls`
+- `--qmlls-path /path/to/qmlls`
+- `--disable-qmlls`
+- `--qmlls-build-dir /path/to/build`
+- `--qmlls-no-cmake-calls`
 - `--rust-analyzer /path/to/rust-analyzer`
 
 ## Run A Project
