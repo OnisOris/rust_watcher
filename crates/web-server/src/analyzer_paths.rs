@@ -5,6 +5,7 @@ pub const TYPESCRIPT_LS_COMMAND: &str = "typescript-language-server";
 pub const TY_COMMAND: &str = "ty";
 pub const RUST_ANALYZER_COMMAND: &str = "rust-analyzer";
 pub const QMLLS_COMMAND: &str = "qmlls";
+const QMLLS_VERSIONED_COMMAND: &str = "qmlls6";
 
 pub fn resolve_typescript_language_server(configured: &Path, project_root: &Path) -> PathBuf {
     if is_default_command(configured, TYPESCRIPT_LS_COMMAND) {
@@ -39,8 +40,13 @@ pub fn resolve_rust_analyzer(configured: &Path, project_root: &Path) -> PathBuf 
 pub fn resolve_qmlls(configured: &Path, project_root: &Path) -> PathBuf {
     if is_default_command(configured, QMLLS_COMMAND) {
         find_nearest_project_binary(project_root, ".qt/bin", QMLLS_COMMAND)
+            .or_else(|| {
+                find_nearest_project_binary(project_root, ".qt/bin", QMLLS_VERSIONED_COMMAND)
+            })
             .or_else(find_qt_install_qmlls)
             .or_else(|| find_in_path(QMLLS_COMMAND))
+            .or_else(|| find_in_path(QMLLS_VERSIONED_COMMAND))
+            .or_else(find_system_qt_qmlls)
             .unwrap_or_else(|| PathBuf::from(QMLLS_COMMAND))
     } else {
         resolve_explicit_path(configured, project_root)
@@ -112,9 +118,21 @@ fn find_qt_install_qmlls() -> Option<PathBuf> {
         }
     }
     candidates.sort();
-    candidates
+    candidates.into_iter().find_map(|directory| {
+        executable_candidate_any(directory, &[QMLLS_COMMAND, QMLLS_VERSIONED_COMMAND])
+    })
+}
+
+fn find_system_qt_qmlls() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    ["/usr/lib/qt6/bin", "/usr/lib/qt/bin"]
         .into_iter()
-        .find_map(|directory| executable_candidate(directory, QMLLS_COMMAND))
+        .map(PathBuf::from)
+        .find_map(|directory| {
+            executable_candidate_any(directory, &[QMLLS_COMMAND, QMLLS_VERSIONED_COMMAND])
+        })
 }
 
 fn find_in_paths(command: &str, paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -131,6 +149,12 @@ fn executable_candidate(directory: PathBuf, command: &str) -> Option<PathBuf> {
         .into_iter()
         .map(|name| directory.join(name))
         .find(|path| path.is_file())
+}
+
+fn executable_candidate_any(directory: PathBuf, commands: &[&str]) -> Option<PathBuf> {
+    commands
+        .iter()
+        .find_map(|command| executable_candidate(directory.clone(), command))
 }
 
 fn executable_names(command: &str) -> Vec<String> {
@@ -235,6 +259,18 @@ mod tests {
 
         assert_eq!(
             find_in_paths("sample-analyzer", [root.join("bin")]),
+            Some(binary)
+        );
+    }
+
+    #[test]
+    fn path_lookup_finds_arch_versioned_qmlls() {
+        let root = temp_root();
+        let binary = root.join("bin").join(QMLLS_VERSIONED_COMMAND);
+        touch(&binary);
+
+        assert_eq!(
+            find_in_paths(QMLLS_VERSIONED_COMMAND, [root.join("bin")]),
             Some(binary)
         );
     }

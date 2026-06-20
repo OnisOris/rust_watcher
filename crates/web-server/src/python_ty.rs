@@ -1,23 +1,20 @@
 use crate::analyzer_paths::resolve_ty;
-use anyhow::{anyhow, Context, Result};
+use crate::lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus};
+use anyhow::Result;
 use clap::ValueEnum;
 use graph_builder::push_unique_edge_with_confidence;
 use graph_core::{
     DiscoveredSymbol, EdgeConfidence, EdgeType, GraphSnapshot, LanguageId, NodeType,
     PythonAnalyzerStatus, SymbolIndex, SymbolKindName, Visibility,
 };
-use parking_lot::RwLock;
 use ra_client::{LspCallHierarchyItem, LspCallHierarchyOutgoingCall, LspLocation, LspNotification};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 use url::Url;
 
-const START_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const TY_AUTO_FALLBACK_MESSAGE: &str =
     "ty not found, parser fallback active. Install with: uv tool install ty";
 
@@ -50,128 +47,70 @@ impl TyRuntimeStatus {
 }
 
 pub struct PythonTyState {
-    binary: PathBuf,
     mode: PythonAnalyzerMode,
-    root: RwLock<PathBuf>,
-    client: AsyncMutex<Option<ra_client::RaClient>>,
-    opened_files: RwLock<HashSet<PathBuf>>,
-    file_versions: RwLock<HashMap<PathBuf, i32>>,
-    status: RwLock<TyRuntimeStatus>,
-    message: RwLock<Option<String>>,
-    last_start_failure: RwLock<Option<Instant>>,
-    last_warning: RwLock<Option<Instant>>,
-    start_attempts: AtomicUsize,
+    runtime: LspRuntime,
 }
 
 impl PythonTyState {
     pub fn new(binary: PathBuf, mode: PythonAnalyzerMode, root: PathBuf) -> Self {
-        let initial = if mode == PythonAnalyzerMode::Parser {
-            TyRuntimeStatus::ParserOnly
-        } else {
-            TyRuntimeStatus::Unavailable
+        let runtime_mode = match mode {
+            PythonAnalyzerMode::Auto => LspRuntimeMode::Auto,
+            PythonAnalyzerMode::Parser => LspRuntimeMode::ParserOnly,
+            PythonAnalyzerMode::Ty => LspRuntimeMode::Required,
         };
         Self {
-            binary,
             mode,
-            root: RwLock::new(root),
-            client: AsyncMutex::new(None),
-            opened_files: RwLock::new(HashSet::new()),
-            file_versions: RwLock::new(HashMap::new()),
-            status: RwLock::new(initial),
-            message: RwLock::new(None),
-            last_start_failure: RwLock::new(None),
-            last_warning: RwLock::new(None),
-            start_attempts: AtomicUsize::new(0),
+            runtime: LspRuntime::new(LspRuntimeConfig {
+                analyzer_id: "ty",
+                process_name: "ty",
+                default_language_id: "python",
+                binary,
+                args: vec!["server".to_string()],
+                mode: runtime_mode,
+                fallback_message: TY_AUTO_FALLBACK_MESSAGE,
+                resolver: resolve_ty,
+                root,
+            }),
         }
     }
 
     pub fn is_parser_only(&self) -> bool {
-        self.mode == PythonAnalyzerMode::Parser
+        self.runtime.is_parser_only()
     }
 
     pub fn status_record(&self) -> PythonAnalyzerStatus {
         PythonAnalyzerStatus {
             mode: format!("{:?}", self.mode).to_ascii_lowercase(),
-            status: self.status.read().as_str().to_string(),
-            message: self.message.read().clone(),
+            status: TyRuntimeStatus::from(self.runtime.status())
+                .as_str()
+                .to_string(),
+            message: self.runtime.message(),
         }
     }
 
     pub fn should_log_start_failure(&self) -> bool {
-        let mut last_warning = self.last_warning.write();
-        let should_log = last_warning
-            .as_ref()
-            .is_none_or(|instant| instant.elapsed() >= START_RETRY_COOLDOWN);
-        if should_log {
-            *last_warning = Some(Instant::now());
-        }
-        should_log
+        self.runtime.should_log_start_failure()
     }
 
     #[cfg(test)]
     fn start_attempts(&self) -> usize {
-        self.start_attempts.load(Ordering::SeqCst)
+        self.runtime.start_attempts()
     }
 
     pub async fn set_root(&self, root: PathBuf) {
-        *self.root.write() = root;
-        let mut client = self.client.lock().await;
-        if let Some(client) = client.as_mut() {
-            let _ = client.shutdown().await;
-        }
-        *client = None;
-        self.opened_files.write().clear();
-        self.file_versions.write().clear();
-        *self.status.write() = if self.mode == PythonAnalyzerMode::Parser {
-            TyRuntimeStatus::ParserOnly
-        } else {
-            TyRuntimeStatus::Unavailable
-        };
-        *self.message.write() = None;
-        *self.last_start_failure.write() = None;
-        *self.last_warning.write() = None;
+        self.runtime.set_root(root).await;
     }
 
     pub async fn subscribe_notifications(&self) -> Result<broadcast::Receiver<LspNotification>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        Ok(guard.as_ref().unwrap().subscribe_notifications())
+        self.runtime.subscribe_notifications().await
     }
 
     pub async fn sync_changed_file(&self, file: &Path) -> Result<i32> {
-        let file = normalize_path(file);
-        let text = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        if !self.opened_files.read().contains(&file) {
-            self.ensure_document_open(&file).await?;
-            return Ok(*self.file_versions.read().get(&file).unwrap_or(&1));
-        }
-        let version = self.increment_file_version(&file);
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = async {
-            let client = guard.as_ref().unwrap();
-            client.did_change(&file, text.clone(), version).await?;
-            client.did_save(&file, Some(text)).await
-        }
-        .await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result.map(|_| version)
+        self.runtime.sync_changed_file(file, Some("python")).await
     }
 
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<DiscoveredSymbol>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().document_symbols(file).await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
+        self.runtime.document_symbols(file, Some("python")).await
     }
 
     pub async fn prepare_call_hierarchy(
@@ -180,32 +119,16 @@ impl PythonTyState {
         line: u32,
         character: u32,
     ) -> Result<Vec<LspCallHierarchyItem>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .prepare_call_hierarchy(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
+        self.runtime
+            .prepare_call_hierarchy(file, line, character, Some("python"))
+            .await
     }
 
     pub async fn outgoing_calls(
         &self,
         item: &LspCallHierarchyItem,
     ) -> Result<Vec<LspCallHierarchyOutgoingCall>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().outgoing_calls(item).await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
+        self.runtime.outgoing_calls(item).await
     }
 
     pub async fn references(
@@ -214,18 +137,9 @@ impl PythonTyState {
         line: u32,
         character: u32,
     ) -> Result<Vec<LspLocation>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .references(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
+        self.runtime
+            .references(file, line, character, Some("python"))
+            .await
     }
 
     #[allow(dead_code)]
@@ -235,12 +149,8 @@ impl PythonTyState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        guard
-            .as_ref()
-            .unwrap()
-            .definition(file, line, character)
+        self.runtime
+            .definition(file, line, character, Some("python"))
             .await
     }
 
@@ -251,108 +161,21 @@ impl PythonTyState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        guard
-            .as_ref()
-            .unwrap()
-            .type_definition(file, line, character)
+        self.runtime
+            .type_definition(file, line, character, Some("python"))
             .await
     }
+}
 
-    async fn ensure_document_open(&self, file: &Path) -> Result<()> {
-        let file = normalize_path(file);
-        if self.opened_files.read().contains(&file) {
-            return Ok(());
+impl From<LspRuntimeStatus> for TyRuntimeStatus {
+    fn from(status: LspRuntimeStatus) -> Self {
+        match status {
+            LspRuntimeStatus::ParserOnly => Self::ParserOnly,
+            LspRuntimeStatus::Ready => Self::Ready,
+            LspRuntimeStatus::Unavailable => Self::Unavailable,
+            LspRuntimeStatus::Restarting => Self::Restarting,
+            LspRuntimeStatus::Error => Self::Error,
         }
-        let text = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        let version = *self.file_versions.write().entry(file.clone()).or_insert(1);
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().did_open(&file, text, version).await;
-        if result.is_ok() {
-            self.opened_files.write().insert(file);
-        } else {
-            *guard = None;
-            *self.status.write() = TyRuntimeStatus::Restarting;
-        }
-        result
-    }
-
-    async fn ensure_started_locked(&self, client: &mut Option<ra_client::RaClient>) -> Result<()> {
-        if self.mode == PythonAnalyzerMode::Parser {
-            *self.status.write() = TyRuntimeStatus::ParserOnly;
-            return Err(anyhow!(
-                "Python analyzer is configured for parser-only mode"
-            ));
-        }
-        if client.is_some() {
-            return Ok(());
-        }
-        if self.mode == PythonAnalyzerMode::Auto
-            && self
-                .last_start_failure
-                .read()
-                .as_ref()
-                .is_some_and(|instant| instant.elapsed() < START_RETRY_COOLDOWN)
-        {
-            return Err(anyhow!(
-                "{}",
-                self.message
-                    .read()
-                    .clone()
-                    .unwrap_or_else(|| TY_AUTO_FALLBACK_MESSAGE.into())
-            ));
-        }
-        let root = self.root.read().clone();
-        let binary = resolve_ty(&self.binary, &root);
-        self.start_attempts.fetch_add(1, Ordering::SeqCst);
-        let started = timeout(
-            Duration::from_secs(8),
-            ra_client::RaClient::start_with_options(&binary, ["server"], &root, "python", "ty"),
-        )
-        .await;
-        match started {
-            Ok(Ok(started)) => {
-                *client = Some(started);
-                self.opened_files.write().clear();
-                *self.status.write() = TyRuntimeStatus::Ready;
-                *self.message.write() = None;
-                *self.last_start_failure.write() = None;
-                *self.last_warning.write() = None;
-                Ok(())
-            }
-            Ok(Err(error)) => self.handle_start_error(error),
-            Err(_) => self.handle_start_error(anyhow!("ty initialize timed out")),
-        }
-    }
-
-    fn handle_start_error(&self, error: anyhow::Error) -> Result<()> {
-        let message = error.to_string();
-        *self.message.write() = Some(if self.mode == PythonAnalyzerMode::Auto {
-            TY_AUTO_FALLBACK_MESSAGE.into()
-        } else {
-            message.clone()
-        });
-        *self.last_start_failure.write() = Some(Instant::now());
-        *self.status.write() = if self.mode == PythonAnalyzerMode::Auto {
-            TyRuntimeStatus::Unavailable
-        } else {
-            TyRuntimeStatus::Error
-        };
-        if self.mode == PythonAnalyzerMode::Auto {
-            Err(anyhow!("ty unavailable; using parser fallback: {message}"))
-        } else {
-            Err(anyhow!("ty is required but unavailable: {message}"))
-        }
-    }
-
-    fn increment_file_version(&self, file: &Path) -> i32 {
-        let mut versions = self.file_versions.write();
-        let version = versions.entry(normalize_path(file)).or_insert(1);
-        *version += 1;
-        *version
     }
 }
 
@@ -588,10 +411,6 @@ fn node_type_from_symbol_kind(kind: SymbolKindName) -> NodeType {
         SymbolKindName::Function | SymbolKindName::Constructor => NodeType::Function,
         _ => NodeType::Property,
     }
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]

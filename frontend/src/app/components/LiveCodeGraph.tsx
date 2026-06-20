@@ -1225,6 +1225,10 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   onUpdateNodesRef.current = onUpdateNodes
   selectedNodeIdRef.current = selectedNodeId
 
+  const canAutoFitRef = useCallback(() => {
+    return !userNavigatedRef.current && !dragNodeRef.current && !isDraggingRef.current
+  }, [])
+
   const fitCurrentGraph = useCallback((force = false) => {
     const canvas = canvasRef.current
     if (!canvas || nodesRef.current.length === 0) return
@@ -1247,8 +1251,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         physicsTicksRef.current = 0
         settleStartedAtRef.current = null
         settledRef.current = false
-        userNavigatedRef.current = false
-        requestAnimationFrame(() => fitCurrentGraph(true))
+        if (canAutoFitRef()) {
+          requestAnimationFrame(() => fitCurrentGraph(true))
+        }
       }
     } catch (error) {
       console.warn('Graph layout worker is unavailable, falling back to main-thread layout.', error)
@@ -1261,7 +1266,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         layoutWorkerRef.current = null
       }
     }
-  }, [fitCurrentGraph])
+  }, [canAutoFitRef, fitCurrentGraph])
 
   // keep nodesRef in sync
   useEffect(() => {
@@ -1289,8 +1294,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       physicsTicksRef.current = 0
       settleStartedAtRef.current = null
       settledRef.current = false
-      userNavigatedRef.current = false
-      requestAnimationFrame(() => fitCurrentGraph(true))
+      if (canAutoFitRef()) {
+        requestAnimationFrame(() => fitCurrentGraph(true))
+      }
     } else {
       const current = new Map(nodesRef.current.map(node => [node.id, node]))
       nodesRef.current = nodes.map(node => {
@@ -1308,9 +1314,10 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     physicsTicksRef.current = 0
     settleStartedAtRef.current = null
     settledRef.current = false
-    userNavigatedRef.current = false
-    requestAnimationFrame(() => fitCurrentGraph(true))
-  }, [edges, filters, fitCurrentGraph])
+    if (canAutoFitRef()) {
+      requestAnimationFrame(() => fitCurrentGraph(true))
+    }
+  }, [canAutoFitRef, edges, filters, fitCurrentGraph])
 
   useEffect(() => {
     physicsTicksRef.current = 0

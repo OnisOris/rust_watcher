@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::broadcast;
 use tokio::time::{sleep, timeout, Duration};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 mod analyzer_paths;
 mod context_pack;
+mod lsp_runtime;
 mod python_ty;
 mod qml_lsp;
 mod trace;
@@ -52,6 +53,7 @@ use context_pack::{
     build_edge_context_pack, build_node_context_pack, build_route_context_pack,
     build_trace_context_pack,
 };
+use lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use python_ty::{
     enrich_python_semantic_calls_for_files, enrich_python_with_ty, PythonAnalyzerMode,
     PythonTyState,
@@ -140,105 +142,41 @@ struct AppStateHandle {
 }
 
 struct AnalyzerState {
-    binary: PathBuf,
-    root: RwLock<PathBuf>,
-    client: AsyncMutex<Option<ra_client::RaClient>>,
-    opened_files: RwLock<HashSet<PathBuf>>,
-    file_versions: RwLock<HashMap<PathBuf, i32>>,
+    runtime: LspRuntime,
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+fn rust_analyzer_state(binary: PathBuf, root: PathBuf) -> AnalyzerState {
+    AnalyzerState {
+        runtime: LspRuntime::new(LspRuntimeConfig {
+            analyzer_id: "rust-analyzer",
+            process_name: "rust-analyzer",
+            default_language_id: "rust",
+            binary,
+            args: Vec::new(),
+            mode: LspRuntimeMode::Required,
+            fallback_message: "rust-analyzer unavailable.",
+            resolver: resolve_rust_analyzer,
+            root,
+        }),
+    }
 }
 
 #[allow(dead_code)]
 impl AnalyzerState {
     async fn set_root(&self, root: PathBuf) {
-        *self.root.write() = root;
-        let mut client = self.client.lock().await;
-        if let Some(client) = client.as_mut() {
-            let _ = client.shutdown().await;
-        }
-        *client = None;
-        self.opened_files.write().clear();
-        self.file_versions.write().clear();
-    }
-
-    async fn ensure_started_locked(&self, client: &mut Option<ra_client::RaClient>) -> Result<()> {
-        if client.is_some() {
-            return Ok(());
-        }
-        let root = self.root.read().clone();
-        let started = timeout(
-            Duration::from_secs(8),
-            ra_client::RaClient::start(&self.binary, &root),
-        )
-        .await
-        .context("rust-analyzer initialize timed out")??;
-        *client = Some(started);
-        self.opened_files.write().clear();
-        Ok(())
+        self.runtime.set_root(root).await;
     }
 
     async fn ensure_document_open(&self, file: &Path) -> Result<()> {
-        let file = normalize_path(file);
-        if self.opened_files.read().contains(&file) {
-            return Ok(());
-        }
-        let text = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        let version = *self.file_versions.write().entry(file.clone()).or_insert(1);
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().did_open(&file, text, version).await;
-        if result.is_ok() {
-            self.opened_files.write().insert(file);
-        } else {
-            *guard = None;
-        }
-        result
+        self.runtime.open_document(file, Some("rust")).await
     }
 
     async fn sync_changed_file(&self, file: &Path) -> Result<i32> {
-        let file = normalize_path(file);
-        let text = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        let was_open = self.opened_files.read().contains(&file);
-        if !was_open {
-            self.ensure_document_open(&file).await?;
-            return Ok(*self.file_versions.read().get(&file).unwrap_or(&1));
-        }
-        let version = self.increment_file_version(&file);
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = async {
-            let client = guard.as_ref().unwrap();
-            client.did_change(&file, text.clone(), version).await?;
-            client.did_save(&file, Some(text)).await
-        }
-        .await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result.map(|_| version)
-    }
-
-    fn increment_file_version(&self, file: &Path) -> i32 {
-        let mut versions = self.file_versions.write();
-        let version = versions.entry(normalize_path(file)).or_insert(1);
-        *version += 1;
-        *version
+        self.runtime.sync_changed_file(file, Some("rust")).await
     }
 
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<graph_core::DiscoveredSymbol>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().document_symbols(file).await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime.document_symbols(file, Some("rust")).await
     }
 
     pub async fn prepare_call_hierarchy(
@@ -247,44 +185,23 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Vec<ra_client::LspCallHierarchyItem>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .prepare_call_hierarchy(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime
+            .prepare_call_hierarchy(file, line, character, Some("rust"))
+            .await
     }
 
     pub async fn outgoing_calls(
         &self,
         item: &ra_client::LspCallHierarchyItem,
     ) -> Result<Vec<ra_client::LspCallHierarchyOutgoingCall>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().outgoing_calls(item).await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime.outgoing_calls(item).await
     }
 
     pub async fn incoming_calls(
         &self,
         item: &ra_client::LspCallHierarchyItem,
     ) -> Result<Vec<ra_client::LspCallHierarchyIncomingCall>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().incoming_calls(item).await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime.incoming_calls(item).await
     }
 
     pub async fn references(
@@ -293,18 +210,9 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Vec<ra_client::LspLocation>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .references(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime
+            .references(file, line, character, Some("rust"))
+            .await
     }
 
     pub async fn definition(
@@ -313,18 +221,9 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .definition(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime
+            .definition(file, line, character, Some("rust"))
+            .await
     }
 
     pub async fn type_definition(
@@ -333,26 +232,15 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .type_definition(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-        }
-        result
+        self.runtime
+            .type_definition(file, line, character, Some("rust"))
+            .await
     }
 
     async fn subscribe_notifications(
         &self,
     ) -> Result<broadcast::Receiver<ra_client::LspNotification>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        Ok(guard.as_ref().unwrap().subscribe_notifications())
+        self.runtime.subscribe_notifications().await
     }
 }
 
@@ -575,13 +463,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         status: initial_status.clone(),
     };
     let (ws_tx, _) = broadcast::channel(64);
-    let analyzer = Arc::new(AnalyzerState {
-        binary: rust_analyzer.clone(),
-        root: RwLock::new(project_root.clone()),
-        client: AsyncMutex::new(None),
-        opened_files: RwLock::new(HashSet::new()),
-        file_versions: RwLock::new(HashMap::new()),
-    });
+    let analyzer = Arc::new(rust_analyzer_state(
+        rust_analyzer.clone(),
+        project_root.clone(),
+    ));
     let state = AppStateHandle {
         project_root: Arc::new(RwLock::new(project_root.clone())),
         graph: Arc::new(RwLock::new(initial_snapshot)),
@@ -4568,20 +4453,6 @@ mod tests {
         assert_eq!(patch.updated_nodes.len(), 1);
         assert!(patch.updated_nodes.len() < new.nodes.len());
         assert_eq!(patch.changed_files, vec!["src/main.rs"]);
-    }
-
-    #[test]
-    fn analyzer_file_versions_increment_without_restart() {
-        let analyzer = AnalyzerState {
-            binary: PathBuf::from("rust-analyzer"),
-            root: RwLock::new(PathBuf::from("/tmp/project")),
-            client: AsyncMutex::new(None),
-            opened_files: RwLock::new(HashSet::new()),
-            file_versions: RwLock::new(HashMap::new()),
-        };
-        let file = Path::new("/tmp/project/src/main.rs");
-        assert_eq!(analyzer.increment_file_version(file), 2);
-        assert_eq!(analyzer.increment_file_version(file), 3);
     }
 
     fn temp_project_root(name: &str) -> PathBuf {

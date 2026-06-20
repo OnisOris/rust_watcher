@@ -1,23 +1,20 @@
 use crate::analyzer_paths::resolve_typescript_language_server;
-use anyhow::{anyhow, Context, Result};
+use crate::lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus};
+use anyhow::Result;
 use clap::ValueEnum;
 use graph_builder::push_unique_edge_with_confidence;
 use graph_core::{
     AnalyzerStatus, DiscoveredSymbol, EdgeConfidence, EdgeType, GraphSnapshot, LanguageId,
     NodeType, SymbolIndex, SymbolKindName, Visibility,
 };
-use parking_lot::RwLock;
 use ra_client::{LspLocation, LspNotification};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 use url::Url;
 
-const START_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const TYPESCRIPT_LS_AUTO_FALLBACK_MESSAGE: &str =
     "Not installed, parser fallback active. Install with: cd frontend && pnpm add -D typescript typescript-language-server";
 
@@ -58,43 +55,35 @@ pub struct TypeScriptAnalyzerStatus {
 }
 
 pub struct TypeScriptLspState {
-    binary: PathBuf,
     mode: TypeScriptAnalyzerMode,
-    root: RwLock<PathBuf>,
-    client: AsyncMutex<Option<ra_client::RaClient>>,
-    opened_files: RwLock<HashSet<PathBuf>>,
-    file_versions: RwLock<HashMap<PathBuf, i32>>,
-    status: RwLock<TypeScriptRuntimeStatus>,
-    message: RwLock<Option<String>>,
-    last_start_failure: RwLock<Option<Instant>>,
-    last_warning: RwLock<Option<Instant>>,
-    start_attempts: AtomicUsize,
+    runtime: LspRuntime,
 }
 
 impl TypeScriptLspState {
     pub fn new(binary: PathBuf, mode: TypeScriptAnalyzerMode, root: PathBuf) -> Self {
-        let initial = if mode == TypeScriptAnalyzerMode::Parser {
-            TypeScriptRuntimeStatus::ParserOnly
-        } else {
-            TypeScriptRuntimeStatus::Unavailable
+        let runtime_mode = match mode {
+            TypeScriptAnalyzerMode::Auto => LspRuntimeMode::Auto,
+            TypeScriptAnalyzerMode::Parser => LspRuntimeMode::ParserOnly,
+            TypeScriptAnalyzerMode::TypeScriptLanguageServer => LspRuntimeMode::Required,
         };
         Self {
-            binary,
             mode,
-            root: RwLock::new(root),
-            client: AsyncMutex::new(None),
-            opened_files: RwLock::new(HashSet::new()),
-            file_versions: RwLock::new(HashMap::new()),
-            status: RwLock::new(initial),
-            message: RwLock::new(None),
-            last_start_failure: RwLock::new(None),
-            last_warning: RwLock::new(None),
-            start_attempts: AtomicUsize::new(0),
+            runtime: LspRuntime::new(LspRuntimeConfig {
+                analyzer_id: "typescript-language-server",
+                process_name: "typescript-language-server",
+                default_language_id: "typescript",
+                binary,
+                args: vec!["--stdio".to_string()],
+                mode: runtime_mode,
+                fallback_message: TYPESCRIPT_LS_AUTO_FALLBACK_MESSAGE,
+                resolver: resolve_typescript_language_server,
+                root,
+            }),
         }
     }
 
     pub fn is_parser_only(&self) -> bool {
-        self.mode == TypeScriptAnalyzerMode::Parser
+        self.runtime.is_parser_only()
     }
 
     pub fn status_record(&self) -> TypeScriptAnalyzerStatus {
@@ -105,86 +94,40 @@ impl TypeScriptLspState {
                 TypeScriptAnalyzerMode::TypeScriptLanguageServer => "typescript-language-server",
             }
             .to_string(),
-            status: self.status.read().as_str().to_string(),
-            message: self.message.read().clone(),
+            status: TypeScriptRuntimeStatus::from(self.runtime.status())
+                .as_str()
+                .to_string(),
+            message: self.runtime.message(),
         }
     }
 
     pub fn should_log_start_failure(&self) -> bool {
-        let mut last_warning = self.last_warning.write();
-        let should_log = last_warning
-            .as_ref()
-            .is_none_or(|instant| instant.elapsed() >= START_RETRY_COOLDOWN);
-        if should_log {
-            *last_warning = Some(Instant::now());
-        }
-        should_log
+        self.runtime.should_log_start_failure()
     }
 
     #[cfg(test)]
     fn start_attempts(&self) -> usize {
-        self.start_attempts.load(Ordering::SeqCst)
+        self.runtime.start_attempts()
     }
 
     pub async fn set_root(&self, root: PathBuf) {
-        *self.root.write() = root;
-        let mut client = self.client.lock().await;
-        if let Some(client) = client.as_mut() {
-            let _ = client.shutdown().await;
-        }
-        *client = None;
-        self.opened_files.write().clear();
-        self.file_versions.write().clear();
-        *self.status.write() = if self.mode == TypeScriptAnalyzerMode::Parser {
-            TypeScriptRuntimeStatus::ParserOnly
-        } else {
-            TypeScriptRuntimeStatus::Unavailable
-        };
-        *self.message.write() = None;
-        *self.last_start_failure.write() = None;
-        *self.last_warning.write() = None;
+        self.runtime.set_root(root).await;
     }
 
     pub async fn subscribe_notifications(&self) -> Result<broadcast::Receiver<LspNotification>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        Ok(guard.as_ref().unwrap().subscribe_notifications())
+        self.runtime.subscribe_notifications().await
     }
 
     pub async fn sync_changed_file(&self, file: &Path) -> Result<i32> {
-        let file = normalize_path(file);
-        let text = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        if !self.opened_files.read().contains(&file) {
-            self.ensure_document_open(&file).await?;
-            return Ok(*self.file_versions.read().get(&file).unwrap_or(&1));
-        }
-        let version = self.increment_file_version(&file);
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = async {
-            let client = guard.as_ref().unwrap();
-            client.did_change(&file, text.clone(), version).await?;
-            client.did_save(&file, Some(text)).await
-        }
-        .await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
-        }
-        result.map(|_| version)
+        self.runtime
+            .sync_changed_file(file, Some(language_id_for_path(file)))
+            .await
     }
 
     pub async fn document_symbols(&self, file: &Path) -> Result<Vec<DiscoveredSymbol>> {
-        self.ensure_document_open(file).await?;
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard.as_ref().unwrap().document_symbols(file).await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
-        }
-        result
+        self.runtime
+            .document_symbols(file, Some(language_id_for_path(file)))
+            .await
     }
 
     pub async fn references(
@@ -193,18 +136,9 @@ impl TypeScriptLspState {
         line: u32,
         character: u32,
     ) -> Result<Vec<LspLocation>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .references(file, line, character)
-            .await;
-        if result.is_err() {
-            *guard = None;
-            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
-        }
-        result
+        self.runtime
+            .references(file, line, character, Some(language_id_for_path(file)))
+            .await
     }
 
     pub async fn definition(
@@ -213,12 +147,8 @@ impl TypeScriptLspState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        guard
-            .as_ref()
-            .unwrap()
-            .definition(file, line, character)
+        self.runtime
+            .definition(file, line, character, Some(language_id_for_path(file)))
             .await
     }
 
@@ -228,122 +158,21 @@ impl TypeScriptLspState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        guard
-            .as_ref()
-            .unwrap()
-            .type_definition(file, line, character)
+        self.runtime
+            .type_definition(file, line, character, Some(language_id_for_path(file)))
             .await
     }
+}
 
-    async fn ensure_document_open(&self, file: &Path) -> Result<()> {
-        let file = normalize_path(file);
-        if self.opened_files.read().contains(&file) {
-            return Ok(());
+impl From<LspRuntimeStatus> for TypeScriptRuntimeStatus {
+    fn from(status: LspRuntimeStatus) -> Self {
+        match status {
+            LspRuntimeStatus::ParserOnly => Self::ParserOnly,
+            LspRuntimeStatus::Ready => Self::Ready,
+            LspRuntimeStatus::Unavailable => Self::Unavailable,
+            LspRuntimeStatus::Restarting => Self::Restarting,
+            LspRuntimeStatus::Error => Self::Error,
         }
-        let text = std::fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        let version = *self.file_versions.write().entry(file.clone()).or_insert(1);
-        let mut guard = self.client.lock().await;
-        self.ensure_started_locked(&mut guard).await?;
-        let result = guard
-            .as_ref()
-            .unwrap()
-            .did_open_with_language(&file, text, version, language_id_for_path(&file))
-            .await;
-        if result.is_ok() {
-            self.opened_files.write().insert(file);
-        } else {
-            *guard = None;
-            *self.status.write() = TypeScriptRuntimeStatus::Restarting;
-        }
-        result
-    }
-
-    async fn ensure_started_locked(&self, client: &mut Option<ra_client::RaClient>) -> Result<()> {
-        if self.mode == TypeScriptAnalyzerMode::Parser {
-            *self.status.write() = TypeScriptRuntimeStatus::ParserOnly;
-            return Err(anyhow!(
-                "TypeScript analyzer is configured for parser-only mode"
-            ));
-        }
-        if client.is_some() {
-            return Ok(());
-        }
-        if self.mode == TypeScriptAnalyzerMode::Auto
-            && self
-                .last_start_failure
-                .read()
-                .as_ref()
-                .is_some_and(|instant| instant.elapsed() < START_RETRY_COOLDOWN)
-        {
-            return Err(anyhow!(
-                "{}",
-                self.message
-                    .read()
-                    .clone()
-                    .unwrap_or_else(|| TYPESCRIPT_LS_AUTO_FALLBACK_MESSAGE.into())
-            ));
-        }
-        let root = self.root.read().clone();
-        let binary = resolve_typescript_language_server(&self.binary, &root);
-        self.start_attempts.fetch_add(1, Ordering::SeqCst);
-        let started = timeout(
-            Duration::from_secs(8),
-            ra_client::RaClient::start_with_options(
-                &binary,
-                ["--stdio"],
-                &root,
-                "typescript",
-                "typescript-language-server",
-            ),
-        )
-        .await;
-        match started {
-            Ok(Ok(started)) => {
-                *client = Some(started);
-                self.opened_files.write().clear();
-                *self.status.write() = TypeScriptRuntimeStatus::Ready;
-                *self.message.write() = None;
-                *self.last_start_failure.write() = None;
-                *self.last_warning.write() = None;
-                Ok(())
-            }
-            Ok(Err(error)) => self.handle_start_error(error),
-            Err(_) => self.handle_start_error(anyhow!("typescript-language-server timed out")),
-        }
-    }
-
-    fn handle_start_error(&self, error: anyhow::Error) -> Result<()> {
-        let message = error.to_string();
-        *self.message.write() = Some(if self.mode == TypeScriptAnalyzerMode::Auto {
-            TYPESCRIPT_LS_AUTO_FALLBACK_MESSAGE.into()
-        } else {
-            message.clone()
-        });
-        *self.last_start_failure.write() = Some(Instant::now());
-        *self.status.write() = if self.mode == TypeScriptAnalyzerMode::Auto {
-            TypeScriptRuntimeStatus::Unavailable
-        } else {
-            TypeScriptRuntimeStatus::Error
-        };
-        if self.mode == TypeScriptAnalyzerMode::Auto {
-            Err(anyhow!(
-                "typescript-language-server unavailable; using parser fallback: {message}"
-            ))
-        } else {
-            Err(anyhow!(
-                "typescript-language-server is required but unavailable: {message}"
-            ))
-        }
-    }
-
-    fn increment_file_version(&self, file: &Path) -> i32 {
-        let mut versions = self.file_versions.write();
-        let version = versions.entry(normalize_path(file)).or_insert(1);
-        *version += 1;
-        *version
     }
 }
 
@@ -561,10 +390,6 @@ fn node_type_from_symbol_kind(kind: SymbolKindName) -> NodeType {
     }
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +510,16 @@ mod tests {
 
         assert!(state.subscribe_notifications().await.is_err());
         assert_eq!(state.start_attempts(), 1);
+    }
+
+    #[test]
+    fn typescript_language_server_startup_args_include_stdio() {
+        let state = TypeScriptLspState::new(
+            PathBuf::from("typescript-language-server"),
+            TypeScriptAnalyzerMode::Auto,
+            PathBuf::from("."),
+        );
+
+        assert_eq!(state.runtime.args(), &["--stdio".to_string()]);
     }
 }

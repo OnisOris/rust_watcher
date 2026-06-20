@@ -38,7 +38,7 @@ pub struct LspNotification {
     pub params: Value,
 }
 
-pub struct RaClient {
+pub struct LspClient {
     child: Child,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     pending: PendingMap,
@@ -48,7 +48,17 @@ pub struct RaClient {
     process_name: String,
 }
 
-impl RaClient {
+pub type RaClient = LspClient;
+
+#[derive(Debug, Clone)]
+pub struct LspClientOptions {
+    pub language_id: String,
+    pub process_name: String,
+}
+
+pub type LspServerId = String;
+
+impl LspClient {
     pub async fn start(binary: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<Self> {
         Self::start_with_options(
             binary,
