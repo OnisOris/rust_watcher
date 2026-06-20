@@ -62,12 +62,15 @@ export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, onS
   const [activeSection, setActiveSection] = useState<'workspace' | 'recent' | 'bookmarks' | 'hotspots'>('workspace')
 
   const tree = useMemo(() => files.length > 0 ? buildFileTree(files, nodes) : FALLBACK_TREE, [files, nodes])
+  const treeSignature = useMemo(() => (
+    tree.map(crate => `${crate.id}:${crate.children.map(child => isModule(child) ? `${child.id}(${child.children.map(file => file.id).join(',')})` : child.id).join('|')}`).join('::')
+  ), [tree])
 
   useEffect(() => {
     if (!tree.length) return
-    setExpandedCrates(prev => prev.size ? prev : new Set(tree.map(crate => crate.id)))
-    setExpandedModules(prev => prev.size ? prev : new Set(tree.flatMap(crate => crate.children.filter(isModule).map(module => module.id))))
-  }, [tree])
+    setExpandedCrates(new Set(tree.map(crate => crate.id)))
+    setExpandedModules(new Set(tree.flatMap(crate => crate.children.filter(isModule).map(module => module.id))))
+  }, [treeSignature])
 
   const fileNodeById = useMemo(() => new Map(nodes.filter(node => node.type === 'File').map(node => [node.id, node])), [nodes])
   const recent = files.slice(0, 8).map(file => ({ label: file.path, nodeId: resolveFileNodeId(file, nodes), ago: 'indexed' }))

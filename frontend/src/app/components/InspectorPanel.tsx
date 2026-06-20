@@ -79,6 +79,14 @@ export function InspectorPanel({
   return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} onTraceLoaded={onTraceLoaded} onClearTraceHighlight={onClearTraceHighlight} />
 }
 
+
+function sourceBucket(node: GraphNode) {
+  if (node.type === 'ExternalCrate' || node.reachability === 'External') return 'External'
+  if (node.reachability === 'Detached') return 'Detached'
+  if (node.reachability === 'Generated') return 'Generated'
+  return 'Active'
+}
+
 // ── Project overview (nothing selected) ────────────────────────────────────
 function ProjectOverview({
   nodes,
@@ -125,10 +133,10 @@ function ProjectOverview({
     External: nodes.filter(node => node.type === 'ExternalCrate').length,
   }
   const sourceCounts = {
-    Active: nodes.filter(node => node.type === 'File' && (node.reachability === 'Active' || !node.reachability)).length,
-    Detached: nodes.filter(node => node.type === 'File' && node.reachability === 'Detached').length,
-    Generated: nodes.filter(node => node.type === 'File' && node.reachability === 'Generated').length,
-    External: nodes.filter(node => node.reachability === 'External' || node.type === 'ExternalCrate').length,
+    Active: nodes.filter(node => sourceBucket(node) === 'Active').length,
+    Detached: nodes.filter(node => sourceBucket(node) === 'Detached').length,
+    Generated: nodes.filter(node => sourceBucket(node) === 'Generated').length,
+    External: nodes.filter(node => sourceBucket(node) === 'External').length,
   }
   const hiddenNodes = Math.max(0, totalNodes - visibleNodes)
   const hiddenEdges = Math.max(0, totalEdges - visibleEdges)

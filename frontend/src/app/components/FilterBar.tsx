@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Filter, X, ChevronDown } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { Filter, ChevronDown, Save, PinOff } from 'lucide-react'
 import type { EdgeVisibilityLevel, GraphFilters, NodeType, EdgeType, LanguageFilter, SavedView } from '../types'
 
 interface FilterBarProps {
@@ -22,8 +22,17 @@ const NODE_COLORS: Record<NodeType, string> = {
   Endpoint: '#E11D48', Macro: '#EF4444', ExternalCrate: '#7D8795',
 }
 
-const DEPTH_OPTIONS: Array<1 | 2 | 3 | 'full'> = [1, 2, 3, 'full']
-const EDGE_VISIBILITY_OPTIONS: EdgeVisibilityLevel[] = ['Essential', 'Semantic', 'All']
+const DEPTH_OPTIONS: Array<{ value: 1 | 2 | 3 | 'full'; label: string; title: string }> = [
+  { value: 1, label: '1', title: 'Show one-hop neighborhood' },
+  { value: 2, label: '2', title: 'Show two-hop neighborhood' },
+  { value: 3, label: '3', title: 'Show three-hop neighborhood' },
+  { value: 'full', label: 'Full', title: 'Show the full current graph' },
+]
+const EDGE_VISIBILITY_OPTIONS: Array<{ value: EdgeVisibilityLevel; label: string; title: string }> = [
+  { value: 'Essential', label: 'Ess', title: 'Essential containment and high-confidence edges only' },
+  { value: 'Semantic', label: 'Sem', title: 'Semantic edges: calls, uses, route handlers and type references' },
+  { value: 'All', label: 'All', title: 'All detected edge types' },
+]
 const LANGUAGE_FILTERS: Array<{ id: LanguageFilter; label: string; color: string }> = [
   { id: 'rust', label: 'Rust', color: '#EC4899' },
   { id: 'typescript', label: 'TS/JS', color: '#14B8A6' },
@@ -54,119 +63,105 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
     onFiltersChange({ ...filters, languages: next })
   }
 
-  const activeFilterCount = (ALL_NODE_TYPES.length - filters.nodeTypes.size)
+  const hiddenFilterCount = (ALL_NODE_TYPES.length - filters.nodeTypes.size)
     + (ALL_EDGE_TYPES.length - filters.edgeTypes.size)
     + (LANGUAGE_FILTERS.length - filters.languages.size)
+    + (!filters.showTests ? 1 : 0)
+    + (!filters.showExternal ? 1 : 0)
+    + (!filters.showDetached ? 1 : 0)
+    + (filters.onlyPublicAPI ? 1 : 0)
 
   return (
     <div
       className="absolute top-3 left-1/2 -translate-x-1/2 z-10"
-      style={{ fontFamily: 'Inter, sans-serif' }}
+      style={{ fontFamily: 'Inter, sans-serif', width: 'min(980px, calc(100% - 48px))' }}
     >
       <div
-        className="rounded-xl shadow-2xl"
+        className="rounded-xl"
         style={{
-          background: 'var(--cc-panel)',
+          background: 'var(--cc-overlay)',
           border: '1px solid var(--cc-border)',
           boxShadow: 'var(--cc-shadow)',
-          minWidth: 620,
+          backdropFilter: 'blur(14px)',
+          overflow: 'hidden',
         }}
       >
-        {/* collapsed bar */}
         <div
-          className="flex items-center gap-2 px-3 cursor-pointer"
-          style={{ height: 36 }}
+          className="flex items-center gap-2 px-3"
+          style={{ minHeight: 36 }}
           onClick={() => setExpanded(!expanded)}
         >
           <Filter size={13} color="var(--cc-text-subtle)" />
-          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontWeight: 700 }}>Filters</span>
-
-          {activeFilterCount > 0 && (
-            <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 10, background: 'rgba(6,182,212,0.15)', color: '#06B6D4', border: '1px solid rgba(6,182,212,0.25)' }}>
-              {activeFilterCount} hidden
+          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontWeight: 750 }}>Filters</span>
+          {hiddenFilterCount > 0 && (
+            <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 999, background: 'rgba(100,116,139,0.10)', color: 'var(--cc-text-subtle)', border: '1px solid var(--cc-border)' }}>
+              {hiddenFilterCount} hidden
             </span>
           )}
 
-          {/* quick depth pills */}
-          <div className="flex items-center gap-0.5 ml-2" onClick={e => e.stopPropagation()}>
-            {DEPTH_OPTIONS.map(d => (
-              <button
-                key={d}
-                onClick={() => onFiltersChange({ ...filters, depth: d })}
-                style={{
-                  padding: '3px 8px',
-                  fontSize: 10,
-                  borderRadius: 999,
-                  background: filters.depth === d ? 'var(--cc-selected-soft)' : 'transparent',
-                  color: filters.depth === d ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
-                  border: filters.depth === d ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
-                  cursor: 'pointer',
-                  fontWeight: filters.depth === d ? 600 : 400,
-                }}
-              >
-                {d === 'full' ? 'Depth: Full' : `Depth: ${d}`}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex-1" />
-
-          {/* quick toggles */}
-          <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-            {EDGE_VISIBILITY_OPTIONS.map(level => (
-              <QuickToggle
-                key={level}
-                label={level === 'Essential' ? 'Edges: Essential' : level === 'Semantic' ? 'Edges: Semantic' : 'Edges: All'}
-                active={filters.edgeVisibility === level}
-                onToggle={() => onFiltersChange({ ...filters, edgeVisibility: level })}
-              />
-            ))}
-            <QuickToggle
-              label="Hide tests"
-              active={!filters.showTests}
+          <div
+            className="flex items-center gap-2 min-w-0 flex-1 overflow-x-auto"
+            style={{ scrollbarWidth: 'none' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <SegmentGroup
+              label="Depth"
+              options={DEPTH_OPTIONS}
+              value={filters.depth}
+              onChange={value => onFiltersChange({ ...filters, depth: value })}
+            />
+            <SegmentGroup
+              label="Edges"
+              options={EDGE_VISIBILITY_OPTIONS}
+              value={filters.edgeVisibility}
+              onChange={value => onFiltersChange({ ...filters, edgeVisibility: value })}
+            />
+            <ToggleChip
+              label="Tests"
+              enabled={filters.showTests}
+              title={filters.showTests ? 'Tests are visible' : 'Tests are hidden'}
               onToggle={() => onFiltersChange({ ...filters, showTests: !filters.showTests })}
             />
-            <QuickToggle
-              label="Hide external"
-              active={!filters.showExternal}
+            <ToggleChip
+              label="External"
+              enabled={filters.showExternal}
+              title={filters.showExternal ? 'External crates are visible' : 'External crates are hidden'}
               onToggle={() => onFiltersChange({ ...filters, showExternal: !filters.showExternal })}
             />
-            <QuickToggle
-              label="Show detached"
-              active={filters.showDetached}
+            <ToggleChip
+              label="Detached"
+              enabled={filters.showDetached}
+              title={filters.showDetached ? 'Detached files are visible' : 'Detached files are hidden'}
               onToggle={() => onFiltersChange({ ...filters, showDetached: !filters.showDetached })}
             />
-            <QuickToggle
-              label="Public only"
-              active={filters.onlyPublicAPI}
+            <ToggleChip
+              label="Public API"
+              enabled={filters.onlyPublicAPI}
+              title={filters.onlyPublicAPI ? 'Only public API nodes are visible' : 'All visibility levels are visible'}
               onToggle={() => onFiltersChange({ ...filters, onlyPublicAPI: !filters.onlyPublicAPI })}
+              inverse
             />
-            {onUnpinAll && (
-              <QuickToggle
-                label="Unpin all"
-                active={false}
-                onToggle={onUnpinAll}
-              />
-            )}
-            {onSaveView && (
-              <QuickToggle
-                label="Save view"
-                active={false}
-                onToggle={onSaveView}
-              />
-            )}
           </div>
 
-          <ChevronDown size={13} color="var(--cc-text-subtle)" style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+          <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+            {onUnpinAll && <IconAction title="Unpin all nodes" onClick={onUnpinAll}><PinOff size={12} /></IconAction>}
+            {onSaveView && <IconAction title="Save current view" onClick={onSaveView}><Save size={12} /></IconAction>}
+            <button
+              title={expanded ? 'Collapse advanced filters' : 'Expand advanced filters'}
+              onClick={() => setExpanded(!expanded)}
+              className="flex items-center justify-center rounded-lg"
+              style={{ width: 26, height: 26, border: '1px solid var(--cc-border)', color: 'var(--cc-text-subtle)', background: 'var(--cc-surface)' }}
+            >
+              <ChevronDown size={13} style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+            </button>
+          </div>
         </div>
 
-        {/* expanded panel */}
         {expanded && (
-          <div style={{ borderTop: '1px solid var(--cc-border)', padding: '10px 12px' }}>
-            <div className="flex gap-6">
-              {/* languages */}
-              <div style={{ maxWidth: 170 }}>
-                <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Languages</p>
+          <div style={{ borderTop: '1px solid var(--cc-border)', padding: '10px 12px', maxHeight: 360, overflow: 'auto' }}>
+            <div className="grid gap-4" style={{ gridTemplateColumns: '180px minmax(220px, 1fr) minmax(220px, 1fr)' }}>
+              <div>
+                <GroupTitle>Languages</GroupTitle>
                 <div className="flex flex-wrap gap-1.5">
                   {LANGUAGE_FILTERS.map(language => (
                     <FilterChip
@@ -180,70 +175,30 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
                 </div>
                 {!!savedViews.length && onApplyView && (
                   <div style={{ marginTop: 10 }}>
-                    <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Views</p>
+                    <GroupTitle>Saved views</GroupTitle>
                     <div className="flex flex-wrap gap-1.5">
                       {savedViews.map(view => (
-                        <FilterChip
-                          key={view.id}
-                          label={view.name}
-                          active
-                          color="#64748B"
-                          onToggle={() => onApplyView(view)}
-                        />
+                        <FilterChip key={view.id} label={view.name} active color="#64748B" onToggle={() => onApplyView(view)} />
                       ))}
                     </div>
                   </div>
                 )}
-                <div style={{ marginTop: 10 }}>
-                  <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Quick</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {LANGUAGE_FILTERS.filter(language => language.id !== 'external').map(language => (
-                      <FilterChip
-                        key={`quick-${language.id}`}
-                        label={language.label}
-                        active={filters.languages.size === 1 && filters.languages.has(language.id)}
-                        color={language.color}
-                        onToggle={() => onFiltersChange({ ...filters, languages: new Set([language.id]) })}
-                      />
-                    ))}
-                    <FilterChip
-                      label="Diagnostics"
-                      active={filters.edgeVisibility === 'Essential'}
-                      color="#F59E0B"
-                      onToggle={() => onFiltersChange({ ...filters, edgeVisibility: 'Essential' })}
-                    />
-                  </div>
-                </div>
               </div>
 
-              {/* node types */}
               <div>
-                <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Node Types</p>
+                <GroupTitle>Node types</GroupTitle>
                 <div className="flex flex-wrap gap-1.5">
                   {ALL_NODE_TYPES.map(t => (
-                    <FilterChip
-                      key={t}
-                      label={t}
-                      active={filters.nodeTypes.has(t)}
-                      color={NODE_COLORS[t]}
-                      onToggle={() => toggleNodeType(t)}
-                    />
+                    <FilterChip key={t} label={t} active={filters.nodeTypes.has(t)} color={NODE_COLORS[t]} onToggle={() => toggleNodeType(t)} />
                   ))}
                 </div>
               </div>
 
-              {/* edge types */}
               <div>
-                <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Edge Types</p>
+                <GroupTitle>Edge types</GroupTitle>
                 <div className="flex flex-wrap gap-1.5">
                   {ALL_EDGE_TYPES.map(t => (
-                    <FilterChip
-                      key={t}
-                      label={t}
-                      active={filters.edgeTypes.has(t)}
-                      color="#7D8795"
-                      onToggle={() => toggleEdgeType(t)}
-                    />
+                    <FilterChip key={t} label={t} active={filters.edgeTypes.has(t)} color="#64748B" onToggle={() => toggleEdgeType(t)} />
                   ))}
                 </div>
               </div>
@@ -255,21 +210,62 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
   )
 }
 
-function FilterChip({ label, active, color, onToggle }: { label: string; active: boolean; color: string; onToggle: () => void }) {
+function SegmentGroup<T extends string | number>({ label, options, value, onChange }: {
+  label: string
+  options: Array<{ value: T; label: string; title: string }>
+  value: T
+  onChange: (value: T) => void
+}) {
+  return (
+    <div className="flex items-center shrink-0 rounded-lg" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', padding: 2 }}>
+      <span style={{ fontSize: 10, color: 'var(--cc-text-faint)', padding: '0 6px', fontWeight: 700 }}>{label}</span>
+      {options.map(option => {
+        const active = option.value === value
+        return (
+          <button
+            key={String(option.value)}
+            title={option.title}
+            onClick={() => onChange(option.value)}
+            className="rounded-md"
+            style={{
+              height: 24,
+              minWidth: option.label === 'Full' ? 38 : 25,
+              padding: '0 7px',
+              fontSize: 10,
+              lineHeight: 1,
+              background: active ? 'var(--cc-selected-soft)' : 'transparent',
+              color: active ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+              border: active ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
+              fontWeight: active ? 750 : 600,
+              cursor: 'pointer',
+            }}
+          >
+            {option.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function ToggleChip({ label, enabled, onToggle, title, inverse }: { label: string; enabled: boolean; onToggle: () => void; title: string; inverse?: boolean }) {
+  const highlighted = inverse ? enabled : enabled
   return (
     <button
+      title={title}
       onClick={onToggle}
+      className="rounded-lg shrink-0"
       style={{
-        padding: '3px 8px',
+        height: 28,
+        padding: '0 9px',
         fontSize: 10,
-        borderRadius: 4,
-        background: active ? `${color}18` : 'var(--cc-surface)',
-        color: active ? color : 'var(--cc-text-faint)',
-        border: `1px solid ${active ? color + '40' : 'var(--cc-border)'}`,
+        background: highlighted ? 'var(--cc-selected-soft)' : 'var(--cc-surface)',
+        color: highlighted ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+        border: highlighted ? '1px solid rgba(14,165,233,0.30)' : '1px solid var(--cc-border)',
         cursor: 'pointer',
-        transition: 'all 0.15s',
-        textDecoration: active ? 'none' : 'line-through',
-        opacity: active ? 1 : 0.55,
+        fontWeight: highlighted ? 700 : 600,
+        opacity: enabled ? 1 : 0.72,
+        whiteSpace: 'nowrap',
       }}
     >
       {label}
@@ -277,23 +273,46 @@ function FilterChip({ label, active, color, onToggle }: { label: string; active:
   )
 }
 
-function QuickToggle({ label, active, onToggle }: { label: string; active: boolean; onToggle: () => void }) {
+function IconAction({ children, title, onClick }: { children: ReactNode; title: string; onClick: () => void }) {
   return (
     <button
-      title={label}
+      title={title}
+      onClick={onClick}
+      className="flex items-center justify-center rounded-lg"
+      style={{ width: 26, height: 26, border: '1px solid var(--cc-border)', color: 'var(--cc-text-subtle)', background: 'var(--cc-surface)', cursor: 'pointer' }}
+    >
+      {children}
+    </button>
+  )
+}
+
+function FilterChip({ label, active, color, onToggle }: { label: string; active: boolean; color: string; onToggle: () => void }) {
+  return (
+    <button
       onClick={onToggle}
+      title={active ? `${label} is visible` : `${label} is hidden`}
       style={{
         padding: '3px 8px',
         fontSize: 10,
-        borderRadius: 999,
-        background: active ? 'var(--cc-selected-soft)' : 'transparent',
-        color: active ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
-        border: `1px solid ${active ? 'rgba(14,165,233,0.35)' : 'transparent'}`,
+        borderRadius: 6,
+        background: active ? `${color}16` : 'var(--cc-surface)',
+        color: active ? color : 'var(--cc-text-faint)',
+        border: `1px solid ${active ? color + '40' : 'var(--cc-border)'}`,
         cursor: 'pointer',
+        transition: 'all 0.15s',
+        opacity: active ? 1 : 0.58,
         whiteSpace: 'nowrap',
       }}
     >
-      {active ? <><X size={9} className="inline mr-0.5" />{label}</> : label}
+      {label}
     </button>
+  )
+}
+
+function GroupTitle({ children }: { children: ReactNode }) {
+  return (
+    <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 750, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>
+      {children}
+    </p>
   )
 }

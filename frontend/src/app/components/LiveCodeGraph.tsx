@@ -59,7 +59,7 @@ const EDGE_COLORS: Record<EdgeType, string> = {
 
 const NODE_SIZES: Record<NodeType, number> = {
   Module: 26,
-  ExternalCrate: 24,
+  ExternalCrate: 18,
   File: 18,
   Struct: 18,
   Class: 18,
@@ -155,10 +155,12 @@ function getNodeBounds(nodes: GraphNode[]) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
   for (const n of nodes) {
     const size = NODE_SIZES[n.type] ?? 16
-    minX = Math.min(minX, n.x - size)
-    maxX = Math.max(maxX, n.x + size)
-    minY = Math.min(minY, n.y - size)
-    maxY = Math.max(maxY, n.y + size)
+    const labelWidthPad = Math.min(110, Math.max(34, n.label.length * 4))
+    const labelHeightPad = n.file ? 42 : 26
+    minX = Math.min(minX, n.x - size - labelWidthPad)
+    maxX = Math.max(maxX, n.x + size + labelWidthPad)
+    minY = Math.min(minY, n.y - size - 10)
+    maxY = Math.max(maxY, n.y + size + labelHeightPad)
   }
   return { minX, maxX, minY, maxY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) }
 }
@@ -978,7 +980,15 @@ function shortPath(path: string) {
 function nodeLabelLines(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
   const important = isSelected || isHovered || n.type === 'Endpoint' || n.type === 'File' || n.type === 'Struct' || n.type === 'Trait'
   const lines = wrapLabel(ctx, n.label, important)
-  const shouldShowPath = !!n.file && n.file !== n.label && (isSelected || isHovered || n.type === 'Endpoint' || n.type === 'File' || n.type === 'Struct')
+  const shouldShowPath = !!n.file && n.file !== n.label && (
+    isSelected
+    || isHovered
+    || n.type === 'Endpoint'
+    || n.type === 'File'
+    || n.type === 'Struct'
+    || n.type === 'Trait'
+    || (n.type === 'Function' && n.label === 'main')
+  )
   if (shouldShowPath) {
     lines.push(fitLabelLine(ctx, shortPath(n.file!), important ? 170 : 118))
   }

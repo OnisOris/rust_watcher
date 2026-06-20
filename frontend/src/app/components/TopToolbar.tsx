@@ -13,6 +13,7 @@ import {
   Wifi,
 } from 'lucide-react'
 import type { AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
+import { formatUpdatedLabel } from '../utils/time'
 
 interface TopToolbarProps {
   appState: AppState
@@ -117,7 +118,7 @@ export function TopToolbar({
         </span>
         <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>
           <Clock size={10} className="inline mr-1" />
-          {lastUpdated ? `Updated ${lastUpdated}` : 'Waiting for backend'}
+          {formatUpdatedLabel(lastUpdated)}
         </span>
         <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>
           · {filesCount} files

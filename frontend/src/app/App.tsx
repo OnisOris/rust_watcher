@@ -21,6 +21,7 @@ import {
 import { applySavedViewState, normalizeSavedView, serializableFilters } from './api/savedViews'
 import { deriveTraceHighlights, type TraceHighlights } from './api/trace'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
+import { formatUpdatedLabel } from './utils/time'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView, TraceExplanation } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
@@ -419,9 +420,11 @@ export default function App() {
             style={{ pointerEvents: 'none' }}
           >
             <div className="flex items-center gap-2 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{graphNodes.length} nodes</span>
+              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>Visible {visibleGraphNodes.length} nodes</span>
               <span style={{ color: 'var(--cc-border)' }}>·</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{edges.length} edges</span>
+              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{visibleGraphEdges.length} edges</span>
+              <span style={{ color: 'var(--cc-border)' }}>·</span>
+              <span style={{ fontSize: 10, color: 'var(--cc-text-faint)' }}>Total {graphNodes.length}/{edges.length}</span>
               {graphLens !== 'all' && (
                 <>
                   <span style={{ color: 'var(--cc-border)' }}>·</span>
@@ -435,7 +438,7 @@ export default function App() {
             </div>
             <div className="flex items-center gap-1.5 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' ? '#F59E0B' : '#34D399' }} />
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{message ?? 'Live'} · {lastUpdated ? `Updated ${lastUpdated}` : 'Waiting for backend'}</span>
+              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{message ?? 'Live'} · {formatUpdatedLabel(lastUpdated)}</span>
             </div>
           </div>
         </div>
