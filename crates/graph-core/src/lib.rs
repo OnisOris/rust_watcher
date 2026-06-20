@@ -583,6 +583,7 @@ pub enum Visibility {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphEdge {
     pub id: String,
     pub source: String,
@@ -595,7 +596,7 @@ pub struct GraphEdge {
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "data_flow_kind", skip_serializing_if = "Option::is_none")]
     pub data_flow_kind: Option<DataFlowKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,

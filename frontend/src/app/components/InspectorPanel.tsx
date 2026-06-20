@@ -206,7 +206,6 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   const renderedBy = incoming.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
   const contained = outgoing.filter(e => e.type === 'Contains').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const typeRefs = details?.relatedTypes.length ? details.relatedTypes : outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
-  const dataFlowTargets = outgoing.filter(e => e.type === 'DataFlow').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
   const incomingDataFlow = incoming.filter(e => e.type === 'DataFlow')
   const outgoingDataFlow = outgoing.filter(e => e.type === 'DataFlow')
   const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
@@ -295,6 +294,11 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
                 </div>
               </button>
             ))}
+            <EndpointDataFlowSummary
+              incoming={incoming}
+              outgoing={outgoing}
+              nodeMap={nodeMap}
+            />
           </Card>
         )}
 
@@ -525,7 +529,12 @@ function DataFlowList({
 }) {
   return (
     <div>
-      <SectionHeader title="Data flow" icon={<GitBranch size={11} color="#8B5CF6" />} />
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <GitBranch size={11} color="#8B5CF6" />
+        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>
+          Data flow ({incoming.length + outgoing.length})
+        </span>
+      </div>
       {incoming.length > 0 && (
         <div className="mb-2">
           <div style={{ fontSize: 10, color: 'var(--cc-text-faint)', marginBottom: 4 }}>Incoming</div>
@@ -547,24 +556,74 @@ function DataFlowList({
 }
 
 function DataFlowRow({ edge, node, direction, onSelect }: { edge: GraphEdge; node?: GraphNode; direction: 'from' | 'to'; onSelect: (id: string) => void }) {
+  const confidence = edge.confidence ?? 'SyntaxFallback'
+  const nodeMeta = [node?.type, node?.language].filter(Boolean).join(' · ')
+  const evidence = shortEvidence(edge.evidence)
   return (
     <button
       onClick={() => node && onSelect(node.id)}
       className="mb-1.5 w-full rounded px-2 py-1.5 text-left"
       style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', cursor: node ? 'pointer' : 'default' }}
     >
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5 min-w-0">
         <Badge color="#8B5CF6">{edge.dataFlowKind ?? 'Unknown'}</Badge>
+        <ConfidenceBadge confidence={confidence} />
         <span style={{ fontSize: 10, color: 'var(--cc-text-muted)' }}>{direction}</span>
-        <span style={{ fontSize: 10, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node?.label ?? 'unresolved'}</span>
+        <span style={{ fontSize: 10, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{node?.label ?? 'unresolved'}</span>
       </div>
-      {(edge.label || edge.evidence) && (
+      {nodeMeta && (
+        <div style={{ marginTop: 3, fontSize: 9, color: 'var(--cc-text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {nodeMeta}
+        </div>
+      )}
+      {(edge.label || evidence) && (
         <div style={{ marginTop: 4, fontSize: 10, color: 'var(--cc-text-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {edge.label}{edge.label && edge.evidence ? ' · ' : ''}{edge.evidence}
+          {edge.label}{edge.label && evidence ? ' · ' : ''}{evidence}
         </div>
       )}
     </button>
   )
+}
+
+function EndpointDataFlowSummary({
+  incoming,
+  outgoing,
+  nodeMap,
+}: {
+  incoming: GraphEdge[]
+  outgoing: GraphEdge[]
+  nodeMap: Map<string, GraphNode>
+}) {
+  const dataFlows = [...incoming, ...outgoing].filter(edge => edge.type === 'DataFlow')
+  const requests = dataFlows.filter(edge => edge.dataFlowKind === 'ApiRequest')
+  const responses = dataFlows.filter(edge => edge.dataFlowKind === 'ApiResponse' || edge.dataFlowKind === 'ReturnValue')
+  const models = dataFlows.filter(edge => edge.dataFlowKind === 'ModelUse')
+  const callerLanguages = languageCounts(incoming.filter(edge => edge.type === 'ApiCall').map(edge => nodeMap.get(edge.source)))
+  if (!requests.length && !responses.length && !models.length && !callerLanguages.length) return null
+  return (
+    <div className="mt-2 rounded p-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+      <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 600, marginBottom: 6 }}>Data Flow Summary</div>
+      {requests.length > 0 && <InfoRow label="Requests" value={`${requests.length} ApiRequest`} mono />}
+      {responses.length > 0 && <InfoRow label="Responses" value={`${responses.length} response/return`} mono />}
+      {models.length > 0 && <InfoRow label="Models" value={`${models.length} model flow`} mono />}
+      {callerLanguages.length > 0 && <InfoRow label="Callers" value={callerLanguages.join(', ')} mono />}
+    </div>
+  )
+}
+
+function languageCounts(nodes: Array<GraphNode | undefined>) {
+  const counts = new Map<string, number>()
+  for (const node of nodes) {
+    const language = node?.language ?? (node?.type === 'Endpoint' ? 'endpoint' : 'unknown')
+    counts.set(language, (counts.get(language) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([language, count]) => `${language}:${count}`)
+}
+
+function shortEvidence(evidence?: string) {
+  if (!evidence) return ''
+  const compact = evidence.replace(/\s+/g, ' ').trim()
+  return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact
 }
 
 function DiagnosticsList({ diagnostics }: { diagnostics: DiagnosticRecord[] }) {

@@ -73,7 +73,10 @@ export function applyEdgeVisibilityLevel(edges: GraphEdge[], filters: Pick<Graph
 export function bundleEdges(edges: GraphEdge[]) {
   const byKey = new Map<string, GraphEdge[]>()
   for (const edge of edges) {
-    const key = `${edge.source}::${edge.target}::${edge.type}`
+    const dataFlowPart = edge.type === 'DataFlow'
+      ? `::${edge.dataFlowKind ?? 'Unknown'}::${edge.label ?? ''}`
+      : ''
+    const key = `${edge.source}::${edge.target}::${edge.type}${dataFlowPart}`
     const group = byKey.get(key) ?? []
     group.push(edge)
     byKey.set(key, group)
@@ -175,20 +178,25 @@ export function buildRouteFlowGraph(graph: { nodes: GraphNode[]; edges: GraphEdg
   const keepNodes = new Set<string>()
   const nodesById = new Map(graph.nodes.map(node => [node.id, node]))
   const outgoing = edgesBySource(graph.edges)
+  const byPair = edgesByPair(graph.edges)
 
   for (const edge of graph.edges) {
     if (edge.type !== 'ApiCall') continue
     keepEdges.add(edge.id)
     keepNodes.add(edge.source)
     keepNodes.add(edge.target)
+    keepDataFlowBetween(keepEdges, byPair, edge.source, edge.target, ['ApiRequest'])
     for (const handler of outgoing.get(edge.target) ?? []) {
       if (handler.type !== 'EndpointHandler') continue
       keepEdges.add(handler.id)
       keepNodes.add(handler.target)
+      keepDataFlowBetween(keepEdges, byPair, handler.target, edge.target, ['ApiResponse', 'ReturnValue'])
       for (const call of outgoing.get(handler.target) ?? []) {
         if (call.type === 'Calls') {
           keepEdges.add(call.id)
           keepNodes.add(call.target)
+          keepDataFlowBetween(keepEdges, byPair, call.target, handler.target, ['ReturnValue', 'Assignment', 'ModelUse'])
+          keepDataFlowBetween(keepEdges, byPair, handler.target, call.target, ['Argument', 'ModelUse'])
         }
       }
     }
@@ -300,6 +308,21 @@ function isEssentialEdge(edge: GraphEdge) {
     || (edge.type === 'Calls' && (edge.confidence === 'Exact' || edge.confidence === 'Semantic'))
 }
 
+function keepDataFlowBetween(
+  keepEdges: Set<string>,
+  byPair: Map<string, GraphEdge[]>,
+  source: string,
+  target: string,
+  kinds: string[],
+) {
+  for (const edge of byPair.get(`${source}->${target}`) ?? []) {
+    if (edge.type !== 'DataFlow') continue
+    if (!edge.dataFlowKind || kinds.includes(edge.dataFlowKind)) {
+      keepEdges.add(edge.id)
+    }
+  }
+}
+
 function hiddenNodesByCollapsedGroup(edges: GraphEdge[], collapsedGroups: Set<string>) {
   const containsBySource = new Map<string, string[]>()
   for (const edge of edges) {
@@ -331,6 +354,17 @@ function edgesBySource(edges: GraphEdge[]) {
     bySource.set(edge.source, list)
   }
   return bySource
+}
+
+function edgesByPair(edges: GraphEdge[]) {
+  const byPair = new Map<string, GraphEdge[]>()
+  for (const edge of edges) {
+    const key = `${edge.source}->${edge.target}`
+    const list = byPair.get(key) ?? []
+    list.push(edge)
+    byPair.set(key, list)
+  }
+  return byPair
 }
 
 function hasApiEdge(edges: GraphEdge[], nodeId: string) {

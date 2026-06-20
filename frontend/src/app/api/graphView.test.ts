@@ -140,6 +140,18 @@ describe('graph view helpers', () => {
     expect(bundled.find(edge => edge.type === 'Calls')?.bundledEdgeIds).toEqual(['a', 'b'])
   })
 
+  it('does not bundle different DataFlow kinds between the same nodes', () => {
+    const bundled = bundleEdges([
+      { id: 'request', source: 's', target: 't', type: 'DataFlow', dataFlowKind: 'ApiRequest', label: 'fetch' },
+      { id: 'response', source: 's', target: 't', type: 'DataFlow', dataFlowKind: 'ApiResponse', label: 'json' },
+      { id: 'request-2', source: 's', target: 't', type: 'DataFlow', dataFlowKind: 'ApiRequest', label: 'fetch' },
+    ])
+
+    expect(bundled).toHaveLength(2)
+    expect(bundled.find(edge => edge.dataFlowKind === 'ApiRequest')?.bundledCount).toBe(2)
+    expect(bundled.find(edge => edge.dataFlowKind === 'ApiResponse')?.bundledCount).toBeUndefined()
+  })
+
   it('Essential mode hides noisy fallback edges', () => {
     const essential = applyEdgeVisibilityLevel([
       { id: 'contains', source: 'a', target: 'b', type: 'Contains' },
@@ -165,7 +177,9 @@ describe('graph view helpers', () => {
     ]
     const edges: GraphEdge[] = [
       { id: 'api', source: 'component', target: 'endpoint', type: 'ApiCall' },
+      { id: 'request', source: 'component', target: 'endpoint', type: 'DataFlow', dataFlowKind: 'ApiRequest' },
       { id: 'handler', source: 'endpoint', target: 'handler', type: 'EndpointHandler' },
+      { id: 'handler-response', source: 'handler', target: 'endpoint', type: 'DataFlow', dataFlowKind: 'ApiResponse' },
       { id: 'call', source: 'handler', target: 'service', type: 'Calls' },
       { id: 'response', source: 'service', target: 'model', type: 'DataFlow', dataFlowKind: 'ReturnValue' },
       { id: 'noise', source: 'noise', target: 'service', type: 'Calls' },
@@ -174,7 +188,7 @@ describe('graph view helpers', () => {
     const route = buildRouteFlowGraph({ nodes, edges })
 
     expect(route.nodes.map(n => n.id)).toEqual(['component', 'endpoint', 'handler', 'service', 'model'])
-    expect(route.edges.map(e => e.id)).toEqual(['api', 'handler', 'call', 'response'])
+    expect(route.edges.map(e => e.id)).toEqual(['api', 'request', 'handler', 'handler-response', 'call', 'response'])
   })
 
   it('collapsed group stats count hidden diagnostics', () => {

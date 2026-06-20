@@ -768,17 +768,16 @@ pub fn push_unique_data_flow_edge(
     label: impl Into<String>,
     evidence: impl Into<String>,
 ) {
-    let id = edge_id(EdgeType::DataFlow, source, target);
+    let label = label.into();
+    let evidence = evidence.into();
+    let id = data_flow_edge_id(source, target, kind, &label, &evidence);
     if let Some(edge) = edges.iter_mut().find(|edge| edge.id == id) {
         edge.confidence = strongest_confidence(edge.confidence, confidence);
-        edge.data_flow_kind = Some(kind);
         return;
     }
     if existing_edges.contains(&id) {
         return;
     }
-    let label = label.into();
-    let evidence = evidence.into();
     edges.push(GraphEdge {
         id,
         source: source.to_string(),
@@ -790,6 +789,36 @@ pub fn push_unique_data_flow_edge(
         data_flow_kind: Some(kind),
         evidence: (!evidence.is_empty()).then_some(evidence),
     });
+}
+
+fn data_flow_edge_id(
+    source: &str,
+    target: &str,
+    kind: DataFlowKind,
+    label: &str,
+    evidence: &str,
+) -> String {
+    let label = normalize_data_flow_identity(label);
+    let evidence = normalize_data_flow_identity(evidence);
+    let meaning = if label.is_empty() && evidence.is_empty() {
+        "flow".to_string()
+    } else {
+        stable_hex_hash(&format!("{label}\n{evidence}"))
+    };
+    format!("DataFlow:{source}->{target}:{kind:?}:{meaning}")
+}
+
+fn normalize_data_flow_identity(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn stable_hex_hash(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn strongest_confidence(left: EdgeConfidence, right: EdgeConfidence) -> EdgeConfidence {
@@ -1258,6 +1287,124 @@ mod tests {
         }
     }
 
+    #[test]
+    fn data_flow_edges_keep_distinct_kinds_between_same_nodes() {
+        let mut edges = Vec::new();
+        push_unique_data_flow_edge(
+            &mut edges,
+            &HashSet::new(),
+            "source",
+            "target",
+            EdgeConfidence::Semantic,
+            DataFlowKind::ApiRequest,
+            "fetch /api/users",
+            "fetch('/api/users')",
+        );
+        push_unique_data_flow_edge(
+            &mut edges,
+            &HashSet::new(),
+            "source",
+            "target",
+            EdgeConfidence::Semantic,
+            DataFlowKind::ApiResponse,
+            "response json",
+            "response.json()",
+        );
+
+        assert_eq!(edges.len(), 2);
+        assert_ne!(edges[0].id, edges[1].id);
+        assert!(edges
+            .iter()
+            .any(|edge| edge.data_flow_kind == Some(DataFlowKind::ApiRequest)));
+        assert!(edges
+            .iter()
+            .any(|edge| edge.data_flow_kind == Some(DataFlowKind::ApiResponse)));
+    }
+
+    #[test]
+    fn data_flow_edges_dedupe_same_kind_label_and_evidence_with_confidence_upgrade() {
+        let mut edges = Vec::new();
+        push_unique_data_flow_edge(
+            &mut edges,
+            &HashSet::new(),
+            "source",
+            "target",
+            EdgeConfidence::Heuristic,
+            DataFlowKind::StateUpdate,
+            "set users",
+            "setUsers(data)",
+        );
+        push_unique_data_flow_edge(
+            &mut edges,
+            &HashSet::new(),
+            "source",
+            "target",
+            EdgeConfidence::Semantic,
+            DataFlowKind::StateUpdate,
+            "set users",
+            "setUsers(data)",
+        );
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].confidence, EdgeConfidence::Semantic);
+        assert_eq!(edges[0].data_flow_kind, Some(DataFlowKind::StateUpdate));
+        assert_eq!(edges[0].label.as_deref(), Some("set users"));
+        assert_eq!(edges[0].evidence.as_deref(), Some("setUsers(data)"));
+    }
+
+    #[test]
+    fn data_flow_edges_keep_distinct_evidence_for_same_kind_when_meaning_differs() {
+        let mut edges = Vec::new();
+        push_unique_data_flow_edge(
+            &mut edges,
+            &HashSet::new(),
+            "source",
+            "target",
+            EdgeConfidence::Semantic,
+            DataFlowKind::Assignment,
+            "assign",
+            "users = list_users()",
+        );
+        push_unique_data_flow_edge(
+            &mut edges,
+            &HashSet::new(),
+            "source",
+            "target",
+            EdgeConfidence::Semantic,
+            DataFlowKind::Assignment,
+            "assign",
+            "people = list_users()",
+        );
+
+        assert_eq!(edges.len(), 2);
+        assert_ne!(edges[0].id, edges[1].id);
+    }
+
+    #[test]
+    fn regular_edges_keep_source_target_dedupe_behavior() {
+        let mut edges = Vec::new();
+        push_unique_edge_with_confidence(
+            &mut edges,
+            &HashSet::new(),
+            EdgeType::Calls,
+            "source",
+            "target",
+            EdgeConfidence::Heuristic,
+        );
+        push_unique_edge_with_confidence(
+            &mut edges,
+            &HashSet::new(),
+            EdgeType::Calls,
+            "source",
+            "target",
+            EdgeConfidence::Semantic,
+        );
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].confidence, EdgeConfidence::Semantic);
+        assert_eq!(edges[0].id, edge_id(EdgeType::Calls, "source", "target"));
+    }
+
     fn test_snapshot() -> GraphSnapshot {
         let nodes = vec![
             node(
@@ -1504,9 +1651,12 @@ export default function App() {
             root.join("frontend/src/UserList.tsx"),
             r#"
 import { useUsers } from './useUsers'
+import { useState } from 'react'
 
 export function UserList() {
   const users = useUsers()
+  const [, setUsers] = useState([])
+  setUsers(users)
   return <ul>{users.map(user => <li key={user.id}>{user.name}</li>)}</ul>
 }
 "#,
@@ -1526,8 +1676,9 @@ export function useUsers() {
         std::fs::write(
             root.join("frontend/src/api.ts"),
             r#"
-export function getUsers() {
-  return fetch('/api/users')
+export async function getUsers() {
+  const response = await fetch('/api/users')
+  return response.json()
 }
 "#,
         )
@@ -1637,6 +1788,20 @@ export type UserId = User['id']
                 && edge.source == use_users.id
                 && edge.target == user_list.id
                 && edge.data_flow_kind == Some(DataFlowKind::ReturnValue)
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == user_list.id
+                && edge.target == user_list.id
+                && edge.data_flow_kind == Some(DataFlowKind::StateUpdate)
+                && edge.label.as_deref() == Some("setUsers")
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::DataFlow
+                && edge.source == get_users.id
+                && edge.target == get_users.id
+                && edge.data_flow_kind == Some(DataFlowKind::ApiResponse)
+                && edge.label.as_deref() == Some("response.json()")
         }));
 
         let _ = std::fs::remove_dir_all(root);
