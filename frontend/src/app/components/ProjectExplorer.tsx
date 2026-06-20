@@ -16,13 +16,15 @@ import {
   Link2,
   FunctionSquare,
 } from 'lucide-react'
-import type { ProjectFile, GraphNode, SourceReachability } from '../types'
+import { diagnosticColor, diagnosticSeverityCountsForFile } from '../api/diagnostics'
+import type { DiagnosticRecord, ProjectFile, GraphNode, SourceReachability } from '../types'
 
 interface ProjectExplorerProps {
   files: ProjectFile[]
   nodes: GraphNode[]
   projectName?: string
   selectedNodeId: string | null
+  diagnosticsByFile?: Map<string, DiagnosticRecord[]>
   onSelectNode: (id: string) => void
   onFocusFile: (path: string) => void
 }
@@ -57,7 +59,7 @@ const FALLBACK_TREE: TreeCrate[] = [
   },
 ]
 
-export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, onSelectNode, onFocusFile }: ProjectExplorerProps) {
+export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, diagnosticsByFile = new Map(), onSelectNode, onFocusFile }: ProjectExplorerProps) {
   const [expandedCrates, setExpandedCrates] = useState<Set<string>>(new Set())
   const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set())
   const [activeSection, setActiveSection] = useState<'workspace' | 'recent' | 'bookmarks' | 'hotspots'>('workspace')
@@ -190,6 +192,7 @@ export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, onS
                                 depth={3}
                                 selected={selectedNodeId === file.nodeId}
                                 node={fileNodeById.get(file.nodeId)}
+                                diagnosticColor={diagnosticColor(diagnosticSeverityCountsForFile(diagnosticsByFile, file.path).worst)}
                                 onClick={() => onSelectNode(file.nodeId)}
                                 onDoubleClick={() => onFocusFile(file.path)}
                               />
@@ -201,6 +204,7 @@ export function ProjectExplorer({ files, nodes, projectName, selectedNodeId, onS
                             depth={2}
                             selected={selectedNodeId === child.nodeId}
                             node={fileNodeById.get(child.nodeId)}
+                            diagnosticColor={diagnosticColor(diagnosticSeverityCountsForFile(diagnosticsByFile, child.path).worst)}
                             onClick={() => onSelectNode(child.nodeId)}
                             onDoubleClick={() => onFocusFile(child.path)}
                           />
@@ -390,6 +394,7 @@ function FileRow({ file, depth, selected, node, onClick, onDoubleClick }: {
   depth: number
   selected: boolean
   node?: GraphNode
+  diagnosticColor?: string
   onClick: () => void
   onDoubleClick: () => void
 }) {
@@ -423,7 +428,7 @@ function FileRow({ file, depth, selected, node, onClick, onDoubleClick }: {
       <div className="flex items-center gap-1 shrink-0">
         {file.fns > 0 && <MiniCount title={`${file.fns} functions`} icon={<FunctionSquare size={9} />} value={file.fns} />}
         {file.links > 0 && <MiniCount title={`${file.links} links`} icon={<Link2 size={9} />} value={file.links} />}
-        {file.diag > 0 && <MiniCount title={`${file.diag} diagnostics`} icon={<AlertTriangle size={9} />} value={file.diag} color="#DC2626" />}
+        {file.diag > 0 && <MiniCount title={`${file.diag} diagnostics`} icon={<AlertTriangle size={9} />} value={file.diag} color={diagnosticColor} />}
         <SourceBadge status={status} compact />
       </div>
     </button>

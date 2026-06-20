@@ -1,10 +1,12 @@
 import type { ReactNode } from 'react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ChevronUp, ChevronDown, AlertTriangle, AlertCircle, Info, Activity, GitBranch, X } from 'lucide-react'
-import type { AnalysisEvent } from '../types'
+import { diagnosticsToAnalysisEvents } from '../api/diagnostics'
+import type { AnalysisEvent, DiagnosticRecord } from '../types'
 
 interface AnalysisTimelineProps {
   events: AnalysisEvent[]
+  diagnosticsByFile?: Map<string, DiagnosticRecord[]>
   collapsed: boolean
   onToggle: () => void
 }
@@ -27,15 +29,19 @@ const EVENT_COLORS: Record<AnalysisEvent['type'], string> = {
   graph: '#8B5CF6',
 }
 
-export function AnalysisTimeline({ events, collapsed, onToggle }: AnalysisTimelineProps) {
+export function AnalysisTimeline({ events, diagnosticsByFile = new Map(), collapsed, onToggle }: AnalysisTimelineProps) {
   const [filter, setFilter] = useState<Filter>('all')
+  const timelineEvents = useMemo(
+    () => [...events, ...diagnosticsToAnalysisEvents(diagnosticsByFile)],
+    [diagnosticsByFile, events],
+  )
 
   const filtered = filter === 'all'
-    ? events
-    : events.filter(e => e.type === filter || (filter === 'errors' && e.type === 'error') || (filter === 'warnings' && e.type === 'warning'))
+    ? timelineEvents
+    : timelineEvents.filter(e => e.type === filter || (filter === 'errors' && e.type === 'error') || (filter === 'warnings' && e.type === 'warning'))
 
-  const errorCount = events.filter(e => e.type === 'error').length
-  const warnCount = events.filter(e => e.type === 'warning').length
+  const errorCount = timelineEvents.filter(e => e.type === 'error').length
+  const warnCount = timelineEvents.filter(e => e.type === 'warning').length
 
   return (
     <div

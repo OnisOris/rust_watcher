@@ -27,6 +27,60 @@ Build the Rust workspace:
 cargo build
 ```
 
+## Analyzer Setup
+
+Rust Code Command Center works with parser fallbacks, but external analyzers unlock richer semantic data.
+
+Rust:
+
+- Required for semantic Rust symbols, diagnostics, call hierarchy, references, definitions, and type definitions: `rust-analyzer`
+- Install with Rustup:
+
+```bash
+rustup component add rust-analyzer
+```
+
+Package-manager installs are also fine when your platform provides `rust-analyzer`.
+
+Python:
+
+- Optional semantic analyzer: `ty`
+- Install examples:
+
+```bash
+uv tool install ty
+cargo install ty
+```
+
+Platform/package-manager installs are also fine when available. In `auto` mode, missing `ty` is not fatal; the Python parser fallback remains active.
+
+TypeScript/JavaScript:
+
+- Optional semantic analyzers: `typescript` and `typescript-language-server`
+- Preferred local install:
+
+```bash
+cd frontend
+pnpm add -D typescript typescript-language-server
+```
+
+The backend automatically checks project `node_modules/.bin`, parent `node_modules/.bin`, this repository's `frontend/node_modules/.bin`, and then `PATH`. Avoid `sudo npm -g` as the default setup; local project installs are more portable.
+
+QML:
+
+- The QML parser works without external tools for now.
+- QML language server support can be added later as an optional semantic analyzer.
+
+Analyzer mode flags:
+
+- `--python-analyzer auto|parser|ty`
+- `--ty-path /path/to/ty`
+- `--disable-ty`
+- `--typescript-analyzer auto|parser|typescript-language-server`
+- `--typescript-language-server-path /path/to/typescript-language-server`
+- `--disable-typescript-language-server`
+- `--rust-analyzer /path/to/rust-analyzer`
+
 ## Run A Project
 
 Index any local project and open the browser UI:

@@ -95,6 +95,7 @@ export default function App() {
     edges,
     files,
     events,
+    diagnosticsByFile,
     diagnosticsByNode,
     selectedNodeId,
     setSelectedNodeId,
@@ -350,6 +351,7 @@ export default function App() {
           nodes={graphNodes}
           projectName={projectName ?? undefined}
           selectedNodeId={selectedNodeId}
+          diagnosticsByFile={diagnosticsByFile}
           onSelectNode={handleSelectNode}
           onFocusFile={() => {}}
         />
@@ -477,6 +479,7 @@ export default function App() {
       {/* analysis timeline */}
       <AnalysisTimeline
         events={events}
+        diagnosticsByFile={diagnosticsByFile}
         collapsed={timelineCollapsed}
         onToggle={() => setTimelineCollapsed(c => !c)}
       />

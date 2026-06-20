@@ -27,3 +27,15 @@ pnpm build
 ```bash
 pnpm test:run
 ```
+
+## Optional TypeScript semantic analysis
+
+The backend can analyze TypeScript and JavaScript with the parser alone, so the graph still works without extra tools.
+
+For semantic diagnostics, references, definitions, and type definitions, install the local language server dependencies:
+
+```bash
+pnpm add -D typescript typescript-language-server
+```
+
+After installation, the backend auto-detects `node_modules/.bin/typescript-language-server` when running in `--typescript-analyzer auto` mode.

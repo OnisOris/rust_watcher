@@ -36,7 +36,7 @@ pub fn build_language_graph(project_root: &Path, mut status: AppStatus) -> Graph
         nodes: vec![node(
             format!("workspace:{project_name}"),
             NodeType::Module,
-            project_name,
+            project_name.clone(),
             None,
             Some("workspace".into()),
             None,
@@ -49,6 +49,8 @@ pub fn build_language_graph(project_root: &Path, mut status: AppStatus) -> Graph
         events: Vec::new(),
         status,
     };
+    let (rust_file_count, rust_symbol_count, rust_endpoint_count) =
+        enrich_standalone_rust_graph(&mut snapshot, project_root, &project_name);
     let python_count = python::enrich_python_graph(&mut snapshot, project_root);
     let qml_count = qml::enrich_qml_graph(&mut snapshot, project_root);
     let frontend_count = typescript::enrich_typescript_graph(&mut snapshot, project_root);
@@ -57,8 +59,11 @@ pub fn build_language_graph(project_root: &Path, mut status: AppStatus) -> Graph
     snapshot.events = vec![event(
         AnalysisEventType::Graph,
         format!(
-            "Language graph built: {} files, {} frontend symbols, {} python symbols, {} qml symbols, {} nodes, {} edges",
+            "Language graph built: {} files, {} Rust files, {} Rust syntax symbols, {} Rust endpoints, {} frontend symbols, {} python symbols, {} qml symbols, {} nodes, {} edges",
             snapshot.files.len(),
+            rust_file_count,
+            rust_symbol_count,
+            rust_endpoint_count,
             frontend_count,
             python_count,
             qml_count,
@@ -68,6 +73,98 @@ pub fn build_language_graph(project_root: &Path, mut status: AppStatus) -> Graph
         None,
     )];
     snapshot
+}
+
+fn enrich_standalone_rust_graph(
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+    project_name: &str,
+) -> (usize, usize, usize) {
+    let mut paths = Vec::new();
+    collect_language_files(project_root, &["rs"], &mut paths);
+    let files = paths
+        .into_iter()
+        .map(|absolute_path| {
+            let relative_path = project_indexer::relative_to(project_root, &absolute_path);
+            IndexedFile {
+                module_path: infer_standalone_rust_module_path(project_root, &absolute_path),
+                absolute_path,
+                relative_path,
+                package_name: project_name.to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let workspace_id = format!("workspace:{project_name}");
+    for (idx, file) in files.iter().enumerate() {
+        let file_id = file_id(&file.relative_path);
+        if !snapshot.nodes.iter().any(|node| node.id == file_id) {
+            let angle = spread_angle(idx, files.len().max(1));
+            snapshot.nodes.push(node(
+                file_id.clone(),
+                NodeType::File,
+                Path::new(&file.relative_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&file.relative_path)
+                    .to_string(),
+                Some(file.relative_path.clone()),
+                Some(file.module_path.clone()),
+                Some(project_name.to_string()),
+                None,
+                angle.cos() * 260.0,
+                angle.sin() * 260.0,
+            ));
+        }
+        push_unique_edge_with_confidence(
+            &mut snapshot.edges,
+            &HashSet::new(),
+            EdgeType::Contains,
+            &workspace_id,
+            &file_id,
+            EdgeConfidence::Exact,
+        );
+    }
+
+    let mut symbol_count = 0usize;
+    for file in &files {
+        let symbols = discover_syntax_symbols(file);
+        symbol_count += symbols.len();
+        enrich_file_symbols(snapshot, file, &symbols);
+    }
+    enrich_syntax_relationships(snapshot, &files);
+    let endpoint_count = enrich_api_routes(snapshot, &files);
+    for node in &mut snapshot.nodes {
+        if node.language.as_deref() == Some(LanguageId::Rust.as_str()) {
+            node.reachability = Some(SourceReachability::Active);
+            node.detached_reason = None;
+        }
+    }
+    dedupe_graph(snapshot);
+    (files.len(), symbol_count, endpoint_count)
+}
+
+fn infer_standalone_rust_module_path(project_root: &Path, file: &Path) -> String {
+    let rel = file.strip_prefix(project_root).unwrap_or(file);
+    let mut components = rel
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if components.first().map(String::as_str) == Some("src") {
+        components.remove(0);
+    }
+    if let Some(last) = components.last_mut() {
+        *last = last.trim_end_matches(".rs").to_string();
+    }
+    if components == ["main"] || components == ["lib"] {
+        "crate root".to_string()
+    } else {
+        components
+            .into_iter()
+            .filter(|part| part != "mod" && part != "main" && part != "lib")
+            .collect::<Vec<_>>()
+            .join("::")
+    }
 }
 
 pub fn build_fallback_graph(index: &ProjectIndex, mut status: AppStatus) -> GraphSnapshot {
@@ -696,6 +793,7 @@ fn is_rust_crate_root(package_root: &Path, file: &Path) -> bool {
         .collect::<Vec<_>>();
     match parts.as_slice() {
         ["src", "main.rs"] | ["src", "lib.rs"] | ["build.rs"] => true,
+        ["src", "bin", name] => name.ends_with(".rs"),
         ["examples", name] | ["tests", name] | ["benches", name] => name.ends_with(".rs"),
         _ => false,
     }
@@ -1971,6 +2069,42 @@ fn wire() { app.route("/api/unused", get(unused_handler)); }
     }
 
     #[test]
+    fn rust_reachability_treats_src_bin_files_as_active_roots() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-bin-reachability-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src/bin")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"bin_reachability\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/bin/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join("src/unused.rs"), "fn scratch() {}\n").unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let bin = snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.node_type == NodeType::File && node.file.as_deref() == Some("src/bin/main.rs")
+            })
+            .expect("src/bin/main.rs file node");
+
+        assert_eq!(bin.reachability, Some(SourceReachability::Active));
+        assert!(bin
+            .reachable_from
+            .as_ref()
+            .is_some_and(|roots| roots.contains(&"src/bin/main.rs".to_string())));
+        assert!(!snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.target == bin.id && edge.source == DETACHED_RUST_GROUP_ID));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn parser_typescript_adapter_detects_react_graph_and_api_bridge() {
         let root = std::env::temp_dir().join(format!("rust-watcher-ts-parser-{}", Uuid::new_v4()));
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -3219,6 +3353,52 @@ ApplicationWindow {
         assert_async_analyzer(&TypeScriptLanguageAdapter);
         assert_async_analyzer(&PythonLanguageAdapter);
         assert_async_analyzer(&QmlLanguageAdapter);
+    }
+
+    #[test]
+    fn language_graph_without_cargo_includes_rust_syntax_nodes() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-standalone-rust-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+pub struct User {
+    name: String,
+}
+
+pub fn helper() {}
+
+fn main() {
+    helper();
+}
+"#,
+        )
+        .unwrap();
+
+        let snapshot = build_language_graph(&root, test_status());
+
+        assert!(snapshot.nodes.iter().any(|node| {
+            node.node_type == NodeType::File
+                && node.language.as_deref() == Some(LanguageId::Rust.as_str())
+                && node.file.as_deref() == Some("src/main.rs")
+        }));
+        assert!(snapshot.nodes.iter().any(|node| {
+            node.node_type == NodeType::Function
+                && node.language.as_deref() == Some(LanguageId::Rust.as_str())
+                && node.label == "main"
+        }));
+        assert!(snapshot.nodes.iter().any(|node| {
+            node.node_type == NodeType::Struct
+                && node.language.as_deref() == Some(LanguageId::Rust.as_str())
+                && node.label == "User"
+        }));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Calls));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 

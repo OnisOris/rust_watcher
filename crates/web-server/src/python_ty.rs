@@ -1,3 +1,4 @@
+use crate::analyzer_paths::resolve_ty;
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
 use graph_builder::push_unique_edge_with_confidence;
@@ -9,10 +10,16 @@ use parking_lot::RwLock;
 use ra_client::{LspCallHierarchyItem, LspCallHierarchyOutgoingCall, LspLocation, LspNotification};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::time::{timeout, Duration};
 use tracing::warn;
 use url::Url;
+
+const START_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+const TY_AUTO_FALLBACK_MESSAGE: &str =
+    "ty not found, parser fallback active. Install with: uv tool install ty";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PythonAnalyzerMode {
@@ -51,6 +58,9 @@ pub struct PythonTyState {
     file_versions: RwLock<HashMap<PathBuf, i32>>,
     status: RwLock<TyRuntimeStatus>,
     message: RwLock<Option<String>>,
+    last_start_failure: RwLock<Option<Instant>>,
+    last_warning: RwLock<Option<Instant>>,
+    start_attempts: AtomicUsize,
 }
 
 impl PythonTyState {
@@ -69,6 +79,9 @@ impl PythonTyState {
             file_versions: RwLock::new(HashMap::new()),
             status: RwLock::new(initial),
             message: RwLock::new(None),
+            last_start_failure: RwLock::new(None),
+            last_warning: RwLock::new(None),
+            start_attempts: AtomicUsize::new(0),
         }
     }
 
@@ -82,6 +95,22 @@ impl PythonTyState {
             status: self.status.read().as_str().to_string(),
             message: self.message.read().clone(),
         }
+    }
+
+    pub fn should_log_start_failure(&self) -> bool {
+        let mut last_warning = self.last_warning.write();
+        let should_log = last_warning
+            .as_ref()
+            .is_none_or(|instant| instant.elapsed() >= START_RETRY_COOLDOWN);
+        if should_log {
+            *last_warning = Some(Instant::now());
+        }
+        should_log
+    }
+
+    #[cfg(test)]
+    fn start_attempts(&self) -> usize {
+        self.start_attempts.load(Ordering::SeqCst)
     }
 
     pub async fn set_root(&self, root: PathBuf) {
@@ -99,6 +128,8 @@ impl PythonTyState {
             TyRuntimeStatus::Unavailable
         };
         *self.message.write() = None;
+        *self.last_start_failure.write() = None;
+        *self.last_warning.write() = None;
     }
 
     pub async fn subscribe_notifications(&self) -> Result<broadcast::Receiver<LspNotification>> {
@@ -259,16 +290,27 @@ impl PythonTyState {
         if client.is_some() {
             return Ok(());
         }
+        if self.mode == PythonAnalyzerMode::Auto
+            && self
+                .last_start_failure
+                .read()
+                .as_ref()
+                .is_some_and(|instant| instant.elapsed() < START_RETRY_COOLDOWN)
+        {
+            return Err(anyhow!(
+                "{}",
+                self.message
+                    .read()
+                    .clone()
+                    .unwrap_or_else(|| TY_AUTO_FALLBACK_MESSAGE.into())
+            ));
+        }
         let root = self.root.read().clone();
+        let binary = resolve_ty(&self.binary, &root);
+        self.start_attempts.fetch_add(1, Ordering::SeqCst);
         let started = timeout(
             Duration::from_secs(8),
-            ra_client::RaClient::start_with_options(
-                &self.binary,
-                ["server"],
-                &root,
-                "python",
-                "ty",
-            ),
+            ra_client::RaClient::start_with_options(&binary, ["server"], &root, "python", "ty"),
         )
         .await;
         match started {
@@ -277,6 +319,8 @@ impl PythonTyState {
                 self.opened_files.write().clear();
                 *self.status.write() = TyRuntimeStatus::Ready;
                 *self.message.write() = None;
+                *self.last_start_failure.write() = None;
+                *self.last_warning.write() = None;
                 Ok(())
             }
             Ok(Err(error)) => self.handle_start_error(error),
@@ -286,7 +330,12 @@ impl PythonTyState {
 
     fn handle_start_error(&self, error: anyhow::Error) -> Result<()> {
         let message = error.to_string();
-        *self.message.write() = Some(message.clone());
+        *self.message.write() = Some(if self.mode == PythonAnalyzerMode::Auto {
+            TY_AUTO_FALLBACK_MESSAGE.into()
+        } else {
+            message.clone()
+        });
+        *self.last_start_failure.write() = Some(Instant::now());
         *self.status.write() = if self.mode == PythonAnalyzerMode::Auto {
             TyRuntimeStatus::Unavailable
         } else {
@@ -647,5 +696,23 @@ mod tests {
         let status = state.status_record();
         assert_eq!(status.mode, "parser");
         assert_eq!(status.status, "parser only");
+    }
+
+    #[tokio::test]
+    async fn ty_unavailable_in_auto_reports_fallback_and_uses_cooldown() {
+        let missing = std::env::temp_dir().join(format!("missing-ty-{}", uuid::Uuid::new_v4()));
+        let state = PythonTyState::new(missing, PythonAnalyzerMode::Auto, PathBuf::from("."));
+
+        assert!(state.subscribe_notifications().await.is_err());
+        let status = state.status_record();
+        assert_eq!(status.status, "ty unavailable");
+        assert_eq!(
+            status.message.as_deref(),
+            Some("ty not found, parser fallback active. Install with: uv tool install ty")
+        );
+        assert_eq!(state.start_attempts(), 1);
+
+        assert!(state.subscribe_notifications().await.is_err());
+        assert_eq!(state.start_attempts(), 1);
     }
 }

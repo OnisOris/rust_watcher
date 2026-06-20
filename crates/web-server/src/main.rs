@@ -41,10 +41,12 @@ use tracing::{info, warn};
 use url::Url;
 use uuid::Uuid;
 
+mod analyzer_paths;
 mod context_pack;
 mod python_ty;
 mod trace;
 mod typescript_lsp;
+use analyzer_paths::resolve_rust_analyzer;
 use context_pack::{
     build_edge_context_pack, build_node_context_pack, build_route_context_pack,
     build_trace_context_pack,
@@ -229,6 +231,7 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Vec<ra_client::LspCallHierarchyItem>> {
+        self.ensure_document_open(file).await?;
         let mut guard = self.client.lock().await;
         self.ensure_started_locked(&mut guard).await?;
         let result = guard
@@ -274,6 +277,7 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Vec<ra_client::LspLocation>> {
+        self.ensure_document_open(file).await?;
         let mut guard = self.client.lock().await;
         self.ensure_started_locked(&mut guard).await?;
         let result = guard
@@ -293,6 +297,7 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
+        self.ensure_document_open(file).await?;
         let mut guard = self.client.lock().await;
         self.ensure_started_locked(&mut guard).await?;
         let result = guard
@@ -312,6 +317,7 @@ impl AnalyzerState {
         line: u32,
         character: u32,
     ) -> Result<Option<ra_client::LspGotoDefinitionResponse>> {
+        self.ensure_document_open(file).await?;
         let mut guard = self.client.lock().await;
         self.ensure_started_locked(&mut guard).await?;
         let result = guard
@@ -510,6 +516,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         typescript_analyzer_mode,
         project_root.clone(),
     ));
+    let rust_analyzer = resolve_rust_analyzer(&args.rust_analyzer, &project_root);
 
     let initial_status = AppStatus {
         app_state: AppState::Empty,
@@ -540,7 +547,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     let (ws_tx, _) = broadcast::channel(64);
     let analyzer = Arc::new(AnalyzerState {
-        binary: args.rust_analyzer.clone(),
+        binary: rust_analyzer.clone(),
         root: RwLock::new(project_root.clone()),
         client: AsyncMutex::new(None),
         opened_files: RwLock::new(HashSet::new()),
@@ -562,7 +569,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     };
     install_watcher(&state, project_root.clone());
 
-    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %args.rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), typescript_analyzer = ?typescript_analyzer_mode, typescript_language_server = %args.typescript_language_server_path.display(), "starting Rust Code Command Center");
+    info!(project_root = %project_root.display(), frontend_dist = %args.frontend_dist.display(), rust_analyzer = %rust_analyzer.display(), python_analyzer = ?python_analyzer_mode, ty = %args.ty_path.display(), typescript_analyzer = ?typescript_analyzer_mode, typescript_language_server = %args.typescript_language_server_path.display(), "starting Rust Code Command Center");
 
     let index_state = state.clone();
     tokio::spawn(async move {
@@ -1647,14 +1654,20 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             update_status(&state, |status| {
                 status.app_state = AppState::Normal;
                 status.analyzer_status = AnalyzerStatus::Fallback;
-                status.message = Some("No Cargo.toml found; Rust analysis disabled".into());
+                status.message = Some(
+                    "No Cargo.toml found; rust-analyzer disabled; Rust syntax fallback active"
+                        .into(),
+                );
                 status.progress = Some(80);
             });
             let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
             start_python_ty_if_available(&state).await;
             let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
             enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
-            snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
+            snapshot.status = fallback_status(
+                &state,
+                "No Cargo.toml found; rust-analyzer disabled; Rust syntax fallback active",
+            );
             publish_snapshot(&state, snapshot);
             state.is_indexing.store(false, Ordering::SeqCst);
             return;
@@ -1926,7 +1939,10 @@ async fn rebuild_language_patch_snapshot(
     start_python_ty_if_available(&state).await;
     let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
     enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
-    snapshot.status = ready_status(&state, "No Cargo.toml found; Rust analysis disabled");
+    snapshot.status = fallback_status(
+        &state,
+        "No Cargo.toml found; rust-analyzer disabled; Rust syntax fallback active",
+    );
     let diagnostics = state
         .diagnostics_by_file
         .read()
@@ -2334,10 +2350,12 @@ async fn start_python_ty_if_available(state: &AppStateHandle) -> bool {
             true
         }
         Err(error) => {
-            warn!(
-                ?error,
-                "ty unavailable; Python parser fallback remains active"
-            );
+            if state.python_ty.should_log_start_failure() {
+                warn!(
+                    ?error,
+                    "ty unavailable; Python parser fallback remains active"
+                );
+            }
             let status_record = state.python_ty.status_record();
             update_status(state, |status| {
                 if status_record.mode == "ty" {
@@ -2362,10 +2380,12 @@ async fn start_typescript_lsp_if_available(state: &AppStateHandle) -> bool {
             true
         }
         Err(error) => {
-            warn!(
-                ?error,
-                "typescript-language-server unavailable; TypeScript parser fallback remains active"
-            );
+            if state.typescript_lsp.should_log_start_failure() {
+                warn!(
+                    ?error,
+                    "typescript-language-server unavailable; TypeScript parser fallback remains active"
+                );
+            }
             let status_record = state.typescript_lsp.status_record();
             update_status(state, |status| {
                 if status_record.mode == "typescript-language-server" {
@@ -3241,7 +3261,10 @@ fn analyzer_services_from_counts(
                 status: AnalyzerStatus::Ready,
                 mode: Some("parser".into()),
                 message: if ty_unavailable_auto {
-                    Some("Using parser fallback because ty is unavailable.".into())
+                    Some(
+                        "ty not found, parser fallback active. Install with: uv tool install ty"
+                            .into(),
+                    )
                 } else {
                     None
                 },
@@ -3293,13 +3316,12 @@ fn analyzer_services_from_counts(
             label: "TypeScript parser".into(),
             status: AnalyzerStatus::Ready,
             mode: Some("parser".into()),
-            message: if ts_unavailable_auto {
-                Some(
-                    "Using parser fallback because typescript-language-server is unavailable."
-                        .into(),
-                )
-            } else {
-                None
+                message: if ts_unavailable_auto {
+                    Some(
+                        "Not installed, parser fallback active. Install with: cd frontend && pnpm add -D typescript typescript-language-server".into(),
+                    )
+                } else {
+                    None
             },
             capabilities: vec![AnalyzerCapability::Symbols],
             files_indexed: counts.typescript,
@@ -3767,9 +3789,35 @@ mod tests {
             service.id == "typescript-parser"
                 && service.status == AnalyzerStatus::Ready
                 && service.message.as_deref().is_some_and(|message| {
-                    message.contains("typescript-language-server is unavailable")
+                    message.contains("pnpm add -D typescript typescript-language-server")
                 })
         }));
+    }
+
+    #[test]
+    fn readme_documents_analyzer_setup() {
+        let readme =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"))
+                .expect("workspace README");
+
+        assert!(readme.contains("## Analyzer Setup"));
+        assert!(readme.contains("rustup component add rust-analyzer"));
+        assert!(readme.contains("uv tool install ty"));
+        assert!(readme.contains("pnpm add -D typescript typescript-language-server"));
+        assert!(readme.contains("--typescript-analyzer auto|parser|typescript-language-server"));
+    }
+
+    #[test]
+    fn frontend_readme_documents_local_typescript_semantic_setup() {
+        let readme = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../frontend/README.md"),
+        )
+        .expect("frontend README");
+
+        assert!(readme.contains("## Optional TypeScript semantic analysis"));
+        assert!(readme.contains("pnpm add -D typescript typescript-language-server"));
+        assert!(readme.contains("parser"));
+        assert!(readme.contains("node_modules/.bin/typescript-language-server"));
     }
 
     fn trace_snapshot() -> GraphSnapshot {
