@@ -9,7 +9,7 @@ import {
   buildRouteFlowGraph,
   bundleEdges,
 } from './graphView'
-import { assignRegions, buildSemanticLayout } from './semanticLayout'
+import { assignRegions, buildSemanticLayout, inferNodeLanguage, packageRegionId, semanticNodeSubtitle } from './semanticLayout'
 import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphNode, LanguageFilter, NodeType } from '../types'
 
 const allNodeTypes = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
@@ -313,7 +313,118 @@ describe('graph view helpers', () => {
     expect(byId.get('endpoint')!.x).toBeLessThan(byId.get('handler')!.x)
     expect(secondById.get('app')!.x).toBe(byId.get('app')!.x)
     expect(first.regions.some(region => region.id === 'boundary:api')).toBe(true)
-    expect(first.edges.find(edge => edge.id === 'api')?.routedPath?.length).toBe(4)
+    expect(first.edges.find(edge => edge.id === 'api')?.routedPath?.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('semantic zones infer language from file extension without confusing Rust module names', () => {
+    const rustQmlModule = { ...node('mod:qml', 'rust', 'Module'), label: 'qml', file: 'src/qml.rs' }
+    const inferredQml = { ...node('view', undefined, 'Object'), file: 'qml/Main.qml' }
+    const inferredTs = { ...node('component', undefined, 'Component'), file: 'frontend/App.tsx' }
+    const inferredPython = { ...node('service', undefined, 'Class'), file: 'backend/service.py' }
+    const assignments = new Map(assignRegions([rustQmlModule, inferredQml, inferredTs, inferredPython]).map(item => [item.nodeId, item]))
+
+    expect(inferNodeLanguage(rustQmlModule)).toBe('rust')
+    expect(assignments.get('mod:qml')?.regionId).toBe('language:rust')
+    expect(assignments.get('mod:qml')?.reason).toContain('label is a symbol name')
+    expect(semanticNodeSubtitle(rustQmlModule)).toBe('Rust Module')
+    expect(assignments.get('view')?.regionId).toBe('language:qml')
+    expect(assignments.get('component')?.regionId).toBe('language:typescript')
+    expect(assignments.get('service')?.regionId).toBe('language:python')
+  })
+
+  it('semantic zones place nodes inside non-overlapping package regions', () => {
+    const nodes = [
+      { ...node('file:a', 'rust', 'File'), file: 'src/routes/users.rs' },
+      { ...node('fn:a', 'rust', 'Function'), file: 'src/routes/users.rs' },
+      { ...node('file:b', 'rust', 'File'), file: 'src/services/users.rs' },
+      { ...node('fn:b', 'rust', 'Function'), file: 'src/services/users.rs' },
+      { ...node('file:c', 'python', 'File'), file: 'backend/api/users.py' },
+      { ...node('fn:c', 'python', 'Function'), file: 'backend/api/users.py' },
+    ]
+    const layout = buildSemanticLayout(nodes, [])
+    const regionById = new Map(layout.regions.map(region => [region.id, region]))
+
+    for (const positioned of layout.nodes) {
+      const topRegionId = assignRegions([positioned])[0].regionId
+      const regionId = packageRegionId(positioned, topRegionId) ?? topRegionId
+      const region = regionById.get(regionId)
+      expect(region, positioned.id).toBeTruthy()
+      expect(positioned.x).toBeGreaterThanOrEqual(region!.bounds.x)
+      expect(positioned.x).toBeLessThanOrEqual(region!.bounds.x + region!.bounds.width)
+      expect(positioned.y).toBeGreaterThanOrEqual(region!.bounds.y)
+      expect(positioned.y).toBeLessThanOrEqual(region!.bounds.y + region!.bounds.height)
+    }
+
+    const packages = layout.regions.filter(region => region.kind === 'Package')
+    for (let i = 0; i < packages.length; i++) {
+      for (let j = i + 1; j < packages.length; j++) {
+        if (packages[i].id.split(':package:')[0] !== packages[j].id.split(':package:')[0]) continue
+        const a = packages[i].bounds
+        const b = packages[j].bounds
+        const overlaps = a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+        expect(overlaps).toBe(false)
+      }
+    }
+  })
+
+  it('semantic zones grow busy language regions dynamically', () => {
+    const small = buildSemanticLayout([{ ...node('one', 'rust', 'Function'), file: 'src/main.rs' }], [])
+    const busyNodes = Array.from({ length: 42 }, (_, index) => ({ ...node(`fn:${index}`, 'rust', 'Function'), file: `src/module${index % 9}/file${index}.rs` }))
+    const busy = buildSemanticLayout(busyNodes, [])
+    const smallRust = small.regions.find(region => region.id === 'language:rust')!
+    const busyRust = busy.regions.find(region => region.id === 'language:rust')!
+
+    expect(busyRust.bounds.width * busyRust.bounds.height).toBeGreaterThan(smallRust.bounds.width * smallRust.bounds.height)
+  })
+
+  it('semantic zones route API edges through distinct lanes', () => {
+    const nodes = [
+      { ...node('app-a', 'typescript', 'Component'), file: 'frontend/App.tsx' },
+      { ...node('app-b', 'qml', 'Handler'), file: 'qml/Main.qml' },
+      { ...node('endpoint-a', undefined, 'Endpoint'), label: 'GET /api/users' },
+      { ...node('endpoint-b', undefined, 'Endpoint'), label: 'POST /api/users' },
+    ]
+    const layout = buildSemanticLayout(nodes, [
+      { id: 'api-a', source: 'app-a', target: 'endpoint-a', type: 'ApiCall' },
+      { id: 'api-b', source: 'app-b', target: 'endpoint-b', type: 'ApiCall' },
+    ])
+    const lanes = layout.edges.map(edge => edge.routedPath?.[1]?.x)
+
+    expect(new Set(lanes).size).toBe(2)
+  })
+
+  it('PackageMap collapses symbols into package nodes and preserves bundled edge ids', () => {
+    const nodes = [
+      { ...node('component', 'typescript', 'Component'), file: 'frontend/src/App.tsx' },
+      { ...node('hook', 'typescript', 'Hook'), file: 'frontend/src/hooks/useUsers.ts' },
+      { ...node('handler', 'rust', 'Function'), file: 'src/routes/users.rs' },
+    ]
+    const layout = buildSemanticLayout(nodes, [
+      { id: 'call', source: 'component', target: 'hook', type: 'Calls' },
+      { id: 'api', source: 'hook', target: 'handler', type: 'ApiCall' },
+    ], { layoutMode: 'PackageMap' })
+
+    expect(layout.nodes.some(item => item.id.startsWith('package:language:typescript:package:frontend/src'))).toBe(true)
+    expect(layout.edges.some(item => item.bundledEdgeIds?.includes('api'))).toBe(true)
+  })
+
+  it('Neighborhood layout centers the selected node and keeps unrelated nodes hidden', () => {
+    const nodes = [
+      node('selected', 'rust'),
+      node('caller', 'typescript'),
+      node('callee', 'rust'),
+      node('unrelated', 'python'),
+    ]
+    const layout = buildSemanticLayout(nodes, [
+      { id: 'incoming', source: 'caller', target: 'selected', type: 'Calls' },
+      { id: 'outgoing', source: 'selected', target: 'callee', type: 'Calls' },
+    ], { layoutMode: 'Neighborhood', selectedNodeId: 'selected' })
+    const byId = new Map(layout.nodes.map(item => [item.id, item]))
+
+    expect(byId.has('unrelated')).toBe(false)
+    expect(byId.get('selected')?.x).toBe(0)
+    expect(byId.get('caller')!.x).toBeLessThan(0)
+    expect(byId.get('callee')!.x).toBeGreaterThan(0)
   })
 
   it('semantic zones preserve pinned node positions', () => {

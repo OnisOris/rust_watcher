@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
-import type { AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, ContextPack, DiagnosticRecord, EdgeConfidence, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
+import type { AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, ContextPack, DiagnosticRecord, EdgeConfidence, GraphLayoutMode, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
 import { analyzerCapabilityLabel, analyzerEngineLabel, analyzerStatusColor, sortAnalyzers, summarizeAnalyzers } from '../api/analyzerStatus'
 import { contextPackToMarkdown, summarizeContextPack } from '../api/contextPack'
 import { traceToMarkdown } from '../api/trace'
+import { assignRegions, inferNodeLanguage, packageRegionId, regionLabel } from '../api/semanticLayout'
 
 interface InspectorPanelProps {
   selectedNode: GraphNode | null
@@ -19,6 +20,7 @@ interface InspectorPanelProps {
   totalEdges?: number
   visibleNodes?: number
   visibleEdges?: number
+  layoutMode?: GraphLayoutMode
   message?: string | null
   onTogglePin: (id: string) => void
   onToggleCollapse: (id: string) => void
@@ -53,6 +55,7 @@ export function InspectorPanel({
   totalEdges,
   visibleNodes,
   visibleEdges,
+  layoutMode = 'Force',
   message,
   onTogglePin,
   onToggleCollapse,
@@ -84,7 +87,7 @@ export function InspectorPanel({
       />
     )
   }
-  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} onTraceLoaded={onTraceLoaded} onClearTraceHighlight={onClearTraceHighlight} />
+  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} layoutMode={layoutMode} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} onTraceLoaded={onTraceLoaded} onClearTraceHighlight={onClearTraceHighlight} />
 }
 
 
@@ -100,6 +103,22 @@ function detachedSourceFallback(node: GraphNode) {
   if (node.language === 'python') return 'This file is not imported or referenced by the active Python package graph.'
   if (node.language === 'qml') return 'This QML file is not imported or rendered by the active QML graph.'
   return 'This source file is not reachable from the active project graph.'
+}
+
+function layoutModeLabel(mode: GraphLayoutMode) {
+  if (mode === 'SemanticZones') return 'Semantic zones'
+  if (mode === 'PackageMap') return 'Package map'
+  if (mode === 'Neighborhood') return 'Local neighborhood'
+  return 'Force graph'
+}
+
+function languageDisplay(language: string) {
+  if (language === 'typescript') return 'TypeScript'
+  if (language === 'javascript') return 'JavaScript'
+  if (language === 'qml') return 'QML'
+  if (language === 'rust') return 'Rust'
+  if (language === 'python') return 'Python'
+  return 'Unknown'
 }
 
 function AnalyzerRows({ analyzers }: { analyzers: AnalyzerServiceStatus[] }) {
@@ -164,10 +183,10 @@ function ProjectOverview({
   const scopeCount = visibleScopes.size || nodes.filter(n => n.id.startsWith('crate:')).length
   const analyzerSummary = summarizeAnalyzers(analyzers)
   const languageCounts = {
-    Rust: nodes.filter(node => node.language === 'rust').length,
-    TypeScript: nodes.filter(node => node.language === 'typescript' || node.language === 'javascript').length,
-    Python: nodes.filter(node => node.language === 'python').length,
-    QML: nodes.filter(node => node.language === 'qml').length,
+    Rust: nodes.filter(node => inferNodeLanguage(node) === 'rust').length,
+    TypeScript: nodes.filter(node => inferNodeLanguage(node) === 'typescript' || inferNodeLanguage(node) === 'javascript').length,
+    Python: nodes.filter(node => inferNodeLanguage(node) === 'python').length,
+    QML: nodes.filter(node => inferNodeLanguage(node) === 'qml').length,
   }
   const nodeTypeCounts = {
     Files: nodes.filter(node => node.type === 'File').length,
@@ -301,8 +320,8 @@ function ProjectOverview({
 }
 
 // ── Node inspector (something selected) ────────────────────────────────────
-function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, collapsedGroups, onShowNeighborhood, neighborhoodNodeId, onSelectNode, onOpenInEditor, onTraceLoaded, onClearTraceHighlight }: {
-  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onShowNeighborhood: (id: string) => void; neighborhoodNodeId: string | null; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void; onTraceLoaded: (trace: TraceExplanation) => void; onClearTraceHighlight: () => void
+function NodeInspector({ node, nodes, edges, layoutMode, onTogglePin, onToggleCollapse, collapsedGroups, onShowNeighborhood, neighborhoodNodeId, onSelectNode, onOpenInEditor, onTraceLoaded, onClearTraceHighlight }: {
+  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; layoutMode: GraphLayoutMode; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onShowNeighborhood: (id: string) => void; neighborhoodNodeId: string | null; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void; onTraceLoaded: (trace: TraceExplanation) => void; onClearTraceHighlight: () => void
 }) {
   const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
   const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
@@ -394,6 +413,8 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
   const references = details?.references ?? referenceRecordsFromNodes(usedBy)
   const diagnostics = details?.diagnostics ?? []
   const endpointDetails = details?.endpointDetails
+  const semanticAssignment = useMemo(() => assignRegions([node])[0], [node])
+  const semanticPackageId = semanticAssignment ? packageRegionId(node, semanticAssignment.regionId) : null
   const callerConfidence = confidenceByNode(incoming, 'source')
   const calleeConfidence = confidenceByNode(outgoing, 'target')
 
@@ -472,6 +493,19 @@ function NodeInspector({ node, nodes, edges, onTogglePin, onToggleCollapse, coll
             ) : (
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{contextError}</div>
             )}
+          </Card>
+        )}
+
+        {layoutMode !== 'Force' && semanticAssignment && (
+          <Card>
+            <SectionLabel label="Layout Region" />
+            <InfoRow label="Mode" value={layoutModeLabel(layoutMode)} />
+            <InfoRow label="Region" value={regionLabel(semanticAssignment.regionId)} mono />
+            {semanticPackageId && <InfoRow label="Package" value={regionLabel(semanticPackageId)} mono />}
+            <InfoRow label="Language" value={languageDisplay(inferNodeLanguage(node))} mono />
+            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
+              {semanticAssignment.reason}
+            </div>
           </Card>
         )}
 

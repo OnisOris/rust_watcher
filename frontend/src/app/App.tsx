@@ -380,6 +380,7 @@ export default function App() {
             theme={theme}
             layoutSettings={layoutSettings}
             layoutMode={layoutMode}
+            graphMode={mode}
             labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
             highlightedTraceNodeIds={traceHighlights?.nodeIds}
@@ -487,6 +488,7 @@ export default function App() {
           totalEdges={edges.length}
           visibleNodes={visibleGraphNodes.length}
           visibleEdges={visibleGraphEdges.length}
+          layoutMode={layoutMode}
           message={message}
           onTogglePin={togglePinNode}
           onToggleCollapse={toggleCollapseGroup}

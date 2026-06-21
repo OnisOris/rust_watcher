@@ -66,6 +66,22 @@ function diagnosticsMapFromRecord(record: Record<string, DiagnosticRecord[]>): M
   return new Map(Object.entries(record))
 }
 
+async function responseError(response: Response, action: string) {
+  const text = await response.text().catch(() => '')
+  const body = text.trim().slice(0, 240)
+  return new Error(body || `${action} failed with HTTP ${response.status}.`)
+}
+
+function actionableNetworkError(action: string, error: unknown) {
+  if (error instanceof TypeError && /fetch|network|failed/i.test(error.message)) {
+    return `${action}: backend is not reachable. Make sure web-server is still running and refresh the page.`
+  }
+  if (error instanceof Error && /NetworkError|Failed to fetch|Load failed/i.test(error.message)) {
+    return `${action}: backend is not reachable. Make sure web-server is still running and refresh the page.`
+  }
+  return error instanceof Error ? error.message : `${action} failed.`
+}
+
 export function useBackendGraph(mode: GraphMode) {
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
@@ -128,7 +144,7 @@ export function useBackendGraph(mode: GraphMode) {
 
   const refreshDiagnostics = useCallback(async () => {
     const response = await fetch('/api/diagnostics')
-    if (!response.ok) throw new Error(`diagnostics failed: ${response.status}`)
+    if (!response.ok) throw await responseError(response, 'Loading diagnostics')
     const diagnostics = await response.json() as DiagnosticsResponse
     applyDiagnosticsSnapshot(diagnostics.diagnosticsByFile)
   }, [applyDiagnosticsSnapshot])
@@ -188,13 +204,14 @@ export function useBackendGraph(mode: GraphMode) {
     const requestSeq = ++snapshotRequestSeq.current
     try {
       const response = await fetch('/api/graph/snapshot')
-      if (!response.ok) throw new Error(`snapshot failed: ${response.status}`)
+      if (!response.ok) throw await responseError(response, 'Loading graph snapshot')
       const snapshot = await response.json()
       if (requestSeq !== snapshotRequestSeq.current) return
       applySnapshot(snapshot)
       await refreshDiagnostics().catch(() => undefined)
       setBackendAvailable(true)
-    } catch {
+    } catch (error) {
+      setMessage(actionableNetworkError('Loading graph snapshot', error))
       applyDevFallback()
     }
   }, [applyDevFallback, applySnapshot, refreshDiagnostics])
@@ -217,8 +234,11 @@ export function useBackendGraph(mode: GraphMode) {
         if (cancelled) return
         applyStatus(await statusResponse.json())
         await refreshSnapshot()
-      } catch {
-        if (!cancelled) applyDevFallback()
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(actionableNetworkError('Connecting to backend', error))
+          applyDevFallback()
+        }
       }
     }
 
@@ -266,11 +286,11 @@ export function useBackendGraph(mode: GraphMode) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: path || undefined }),
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) throw await responseError(response, 'Opening project')
       await refreshSnapshot(mode)
       setBackendAvailable(true)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Failed to open project.')
+      setMessage(actionableNetworkError('Opening project', error))
       applyDevFallback()
     }
   }, [applyDevFallback, mode, refreshSnapshot])
@@ -281,7 +301,7 @@ export function useBackendGraph(mode: GraphMode) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nodeId, depth, mode }),
     })
-    if (!response.ok) throw new Error(await response.text())
+    if (!response.ok) throw await responseError(response, 'Focusing graph')
     return await response.json() as FocusResponse
   }, [mode])
 
@@ -296,10 +316,10 @@ export function useBackendGraph(mode: GraphMode) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file: node.file, line: node.line ?? undefined, column: 1 }),
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) throw await responseError(response, 'Opening editor')
       setBackendAvailable(true)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Failed to open editor.')
+      setMessage(actionableNetworkError('Opening editor', error))
     }
   }, [])
 
@@ -320,10 +340,10 @@ export function useBackendGraph(mode: GraphMode) {
           },
         }),
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) throw await responseError(response, 'Saving layout')
       setBackendAvailable(true)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Failed to save layout.')
+      setMessage(actionableNetworkError('Saving layout', error))
     }
   }, [backendAvailable])
 

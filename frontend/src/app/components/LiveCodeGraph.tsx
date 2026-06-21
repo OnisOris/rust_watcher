@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
-import { buildSemanticLayout } from '../api/semanticLayout'
-import type { DiagnosticRecord, GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode, GraphLayoutMode, GraphRegion } from '../types'
+import { buildSemanticLayout, semanticNodeDetail, semanticNodeSubtitle } from '../api/semanticLayout'
+import type { DiagnosticRecord, GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode, GraphLayoutMode, GraphMode, GraphRegion } from '../types'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
@@ -12,6 +12,7 @@ interface LiveCodeGraphProps {
   theme: ThemeMode
   layoutSettings: GraphLayoutSettings
   layoutMode: GraphLayoutMode
+  graphMode: GraphMode
   labelMode: GraphLabelMode
   diagnosticsByNode?: Map<string, DiagnosticRecord[]>
   highlightedTraceNodeIds?: Set<string>
@@ -153,12 +154,12 @@ function canvasTheme(): CanvasTheme {
   }
 }
 
-function getNodeBounds(nodes: GraphNode[]) {
-  if (nodes.length === 0) return null
+function getNodeBounds(items: Array<{ x: number; y: number; type?: NodeType; label?: string; file?: string }>) {
+  if (items.length === 0) return null
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
-  for (const n of nodes) {
-    const size = NODE_SIZES[n.type] ?? 16
-    const labelWidthPad = Math.min(110, Math.max(34, n.label.length * 4))
+  for (const n of items) {
+    const size = n.type ? NODE_SIZES[n.type] ?? 16 : 0
+    const labelWidthPad = Math.min(110, Math.max(34, (n.label ?? '').length * 4))
     const labelHeightPad = n.file ? 42 : 26
     minX = Math.min(minX, n.x - size - labelWidthPad)
     maxX = Math.max(maxX, n.x + size + labelWidthPad)
@@ -168,20 +169,32 @@ function getNodeBounds(nodes: GraphNode[]) {
   return { minX, maxX, minY, maxY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) }
 }
 
-function fitGraphToView(nodes: GraphNode[], canvasW: number, canvasH: number, pan: { x: number; y: number }, zoomRef: { current: number }) {
-  const bounds = getNodeBounds(nodes)
+function fitGraphToView(items: Array<{ x: number; y: number; type?: NodeType; label?: string; file?: string }>, canvasW: number, canvasH: number, pan: { x: number; y: number }, zoomRef: { current: number }) {
+  const bounds = getNodeBounds(items)
   if (!bounds || canvasW <= 0 || canvasH <= 0) return
   const margin = 96
   const availableW = Math.max(1, canvasW - margin * 2)
   const availableH = Math.max(1, canvasH - margin * 2)
   const fitZoom = Math.min(availableW / bounds.width, availableH / bounds.height)
-  const densityZoom = nodes.length > 55 ? Math.min(1.75, 1 + Math.log(nodes.length / 55) * 0.28) : 1
+  const densityZoom = items.length > 55 ? Math.min(1.75, 1 + Math.log(items.length / 55) * 0.28) : 1
   const nextZoom = Math.max(0.28, Math.min(1.6, fitZoom * densityZoom))
   const centerX = (bounds.minX + bounds.maxX) / 2
   const centerY = (bounds.minY + bounds.maxY) / 2
   zoomRef.current = nextZoom
   pan.x = canvasW / 2 - centerX * nextZoom
   pan.y = canvasH / 2 - centerY * nextZoom
+}
+
+function regionFitPoints(regions: GraphRegion[]) {
+  return regions.flatMap(region => [
+    { x: region.bounds.x, y: region.bounds.y, label: region.label },
+    { x: region.bounds.x + region.bounds.width, y: region.bounds.y + region.bounds.height, label: region.label },
+  ])
+}
+
+function fitItemsFor(nodes: GraphNode[], regions: GraphRegion[], semanticLayoutActive: boolean) {
+  if (!semanticLayoutActive || regions.length === 0) return nodes
+  return [...nodes, ...regionFitPoints(regions)]
 }
 
 function graphSizeScale(nodeCount: number) {
@@ -1070,9 +1083,17 @@ function shortPath(path: string) {
   return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
 }
 
-function nodeLabelLines(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
+function nodeLabelLines(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, semanticLayoutActive = false) {
   const important = isSelected || isHovered || n.type === 'Endpoint' || n.type === 'File' || n.type === 'Struct' || n.type === 'Trait'
   const lines = wrapLabel(ctx, n.label, important)
+  if (semanticLayoutActive) {
+    lines.push(fitLabelLine(ctx, semanticNodeSubtitle(n), important ? 170 : 118))
+    const detail = semanticNodeDetail(n)
+    if ((isSelected || isHovered) && detail && detail !== n.label) {
+      lines.push(fitLabelLine(ctx, shortPath(detail), important ? 170 : 118))
+    }
+    return lines.slice(0, isSelected || isHovered ? 3 : 2)
+  }
   const shouldShowPath = !!n.file && n.file !== n.label && (
     isSelected
     || isHovered
@@ -1091,10 +1112,10 @@ function nodeLabelLines(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected:
   return lines.slice(0, isSelected || isHovered ? 3 : 2)
 }
 
-function labelBounds(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean) {
+function labelBounds(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, semanticLayoutActive = false) {
   const size = NODE_SIZES[n.type]
   ctx.font = labelFont(isSelected, isHovered)
-  const lines = nodeLabelLines(ctx, n, isSelected, isHovered)
+  const lines = nodeLabelLines(ctx, n, isSelected, isHovered, semanticLayoutActive)
   const width = Math.max(...lines.map(line => ctx.measureText(line).width)) + 12
   const height = lines.length * labelLineHeight(isSelected, isHovered) + 2
   const offsetY = n.type === 'Module' ? size * 0.7 + 5 : size + 5
@@ -1154,6 +1175,7 @@ function drawLabels(
   zoom: number,
   labelMode: GraphLabelMode,
   theme: CanvasTheme,
+  semanticLayoutActive = false,
 ) {
   const occupied: Array<{ x1: number; y1: number; x2: number; y2: number }> = []
   const sorted = [...candidates].sort((a, b) => b.priority - a.priority)
@@ -1168,7 +1190,7 @@ function drawLabels(
     if (labelMode !== 'all' && !force && drawn >= budget) continue
     if (labelMode !== 'all' && !force && visibleCount > 70 && zoom < 0.62 && candidate.degree < 3) continue
 
-    const box = labelBounds(ctx, candidate.node, candidate.isSelected, candidate.isHovered)
+    const box = labelBounds(ctx, candidate.node, candidate.isSelected, candidate.isHovered, semanticLayoutActive)
     if (labelMode !== 'all' && !force && occupied.some(existing => boxesOverlap(existing, box))) continue
 
     drawLabel(ctx, candidate.node, candidate.isSelected, candidate.isHovered, theme, box.lines)
@@ -1289,7 +1311,7 @@ function drawEdgeBundleBadge(ctx: CanvasRenderingContext2D, src: GraphNode, tgt:
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, layoutMode, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, layoutMode, graphMode, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
   const edgesRef = useRef<GraphEdge[]>(edges)
@@ -1333,7 +1355,8 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     const rect = canvas.getBoundingClientRect()
     const visibleIds = visibleNodeIdsFor(nodesRef.current, edgesRef.current, filters.depth)
     const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
-    fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, rect.width, rect.height, panRef.current, zoomRef)
+    const semanticLayoutActive = SEMANTIC_LAYOUTS.has(layoutModeRef.current)
+    fitGraphToView(fitItemsFor(fitNodes.length > 0 ? fitNodes : nodesRef.current, regionsRef.current, semanticLayoutActive), rect.width, rect.height, panRef.current, zoomRef)
   }, [filters.depth, filters.nodeTypes])
 
   useEffect(() => {
@@ -1367,14 +1390,14 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
   // keep nodesRef in sync
   useEffect(() => {
-    const signature = `${layoutMode}::${nodes.map(n => n.id).join('|')}::${edges.map(e => e.id).join('|')}`
+    const signature = `${layoutMode}::${graphMode}::${selectedNodeId ?? ''}::${nodes.map(n => n.id).join('|')}::${edges.map(e => e.id).join('|')}`
     if (signature !== graphSignatureRef.current) {
       const previousNodes = nodesRef.current
       const previous = new Map(previousNodes.map(node => [node.id, node]))
       graphSignatureRef.current = signature
       if (SEMANTIC_LAYOUTS.has(layoutMode)) {
         layoutWorkerSignatureRef.current = ''
-        const semantic = buildSemanticLayout(nodes, edges, diagnosticsByNode)
+        const semantic = buildSemanticLayout(nodes, edges, { layoutMode, graphMode, selectedNodeId, diagnosticsByNode })
         nodesRef.current = semantic.nodes.map(node => {
           const existing = previous.get(node.id)
           return existing?.pinned ? { ...node, x: existing.x, y: existing.y, vx: 0, vy: 0, pinned: true } : node
@@ -1414,10 +1437,10 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         return existing ? { ...node, x: existing.x, y: existing.y, vx: existing.vx, vy: existing.vy } : { ...node, vx: 0, vy: 0 }
       })
       edgesRef.current = SEMANTIC_LAYOUTS.has(layoutMode)
-        ? buildSemanticLayout(nodesRef.current, edges, diagnosticsByNode).edges
+        ? buildSemanticLayout(nodesRef.current, edges, { layoutMode, graphMode, selectedNodeId, diagnosticsByNode }).edges
         : edges
     }
-  }, [canAutoFitRef, diagnosticsByNode, edges, filters, fitCurrentGraph, layoutMode, layoutSettings, nodes])
+  }, [canAutoFitRef, diagnosticsByNode, edges, filters, fitCurrentGraph, graphMode, layoutMode, layoutSettings, nodes, selectedNodeId])
 
   useEffect(() => {
     const signature = visibleGraphSignature(nodesRef.current, edgesRef.current, filters)
@@ -1503,7 +1526,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         physicsTicksRef.current++
         if (!userNavigatedRef.current && settleElapsed < FIT_SETTLE_MS) {
           const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
-          fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, W, H, panRef.current, zoomRef)
+          fitGraphToView(fitItemsFor(fitNodes.length > 0 ? fitNodes : nodesRef.current, regionsRef.current, semanticLayoutActive), W, H, panRef.current, zoomRef)
         }
       } else if (!semanticLayoutActive && !settledRef.current) {
         const fadeProgress = Math.min(1, (settleElapsed - VISIBLE_SETTLE_MS) / SETTLE_FADE_MS)
@@ -1652,7 +1675,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
           ctx.restore()
         }
       }
-      drawLabels(ctx, labelCandidates, labelCandidates.length, zoomRef.current, labelMode, canvasColors)
+      drawLabels(ctx, labelCandidates, labelCandidates.length, zoomRef.current, labelMode, canvasColors, semanticLayoutActive)
 
       ctx.restore()
 
