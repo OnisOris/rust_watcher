@@ -11,7 +11,7 @@ import {
   SlidersHorizontal,
   Wifi,
 } from 'lucide-react'
-import type { AnalyzerServiceStatus, AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
+import type { AnalyzerServiceStatus, AnalyzerStatus, GraphMode, AppState, ThemeMode, GraphLayoutMode } from '../types'
 import { AnalyzerStatusSummary } from './AnalyzerStatusSummary'
 
 interface TopToolbarProps {
@@ -24,6 +24,8 @@ interface TopToolbarProps {
   filesCount?: number
   mode: GraphMode
   onModeChange: (mode: GraphMode) => void
+  layoutMode: GraphLayoutMode
+  onLayoutModeChange: (mode: GraphLayoutMode) => void
   onSearchOpen: () => void
   onSettingsOpen: () => void
   onRecenter: () => void
@@ -42,6 +44,13 @@ const MODES: { key: GraphMode; label: string; hint: string }[] = [
   { key: 'CallFlow', label: 'Call Flow', hint: 'Endpoint-to-handler and function chains' },
   { key: 'DataFlow', label: 'Data Flow', hint: 'Request, DTO and response type flow' },
   { key: 'Traits', label: 'Types & Impl', hint: 'Traits, impls, classes and type relationships' },
+]
+
+const LAYOUT_MODES: { key: GraphLayoutMode; label: string; hint: string }[] = [
+  { key: 'Force', label: 'Force graph', hint: 'Classic force-directed graph' },
+  { key: 'SemanticZones', label: 'Semantic zones', hint: 'Language zones, API boundary and package panels' },
+  { key: 'PackageMap', label: 'Package map', hint: 'Package-oriented semantic zone map' },
+  { key: 'Neighborhood', label: 'Local neighborhood', hint: 'Semantic placement for focused local context' },
 ]
 
 const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: string; dot: string; pulse: boolean }> = {
@@ -67,6 +76,8 @@ export function TopToolbar({
   filesCount = 0,
   mode,
   onModeChange,
+  layoutMode,
+  onLayoutModeChange,
   onSearchOpen,
   onSettingsOpen,
   onRecenter,
@@ -132,6 +143,30 @@ export function TopToolbar({
               color: mode === item.key ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
               background: mode === item.key ? 'var(--cc-selected-soft)' : 'transparent',
               border: mode === item.key ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-0.5 rounded-xl p-1 shrink-0" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+        {LAYOUT_MODES.map(item => (
+          <button
+            key={item.key}
+            onClick={() => onLayoutModeChange(item.key)}
+            title={item.hint}
+            className="rounded-lg transition-all"
+            style={{
+              padding: '5px 9px',
+              fontSize: 11,
+              lineHeight: 1,
+              fontWeight: layoutMode === item.key ? 750 : 600,
+              color: layoutMode === item.key ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+              background: layoutMode === item.key ? 'var(--cc-selected-soft)' : 'transparent',
+              border: layoutMode === item.key ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
               cursor: 'pointer',
               whiteSpace: 'nowrap',
             }}

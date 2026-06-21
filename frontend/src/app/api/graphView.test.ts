@@ -9,6 +9,7 @@ import {
   buildRouteFlowGraph,
   bundleEdges,
 } from './graphView'
+import { assignRegions, buildSemanticLayout } from './semanticLayout'
 import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphNode, LanguageFilter, NodeType } from '../types'
 
 const allNodeTypes = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
@@ -264,5 +265,67 @@ describe('graph view helpers', () => {
 
     expect(neighborhood.nodes.map(n => n.id)).toEqual(['caller', 'selected', 'callee'])
     expect(neighborhood.edges.map(e => e.id)).toEqual(['in', 'out'])
+  })
+
+  it('assigns nodes to semantic language and boundary regions', () => {
+    const nodes = [
+      node('ts', 'typescript', 'File'),
+      node('qml', 'qml', 'Object'),
+      node('rust', 'rust', 'Function'),
+      node('python', 'python', 'Class'),
+      node('endpoint', undefined, 'Endpoint'),
+      node('external', undefined, 'ExternalCrate'),
+      { ...node('detached', 'rust', 'File'), reachability: 'Detached' as const },
+    ]
+
+    const regions = new Map(assignRegions(nodes).map(assignment => [assignment.nodeId, assignment.regionId]))
+
+    expect(regions.get('ts')).toBe('language:typescript')
+    expect(regions.get('qml')).toBe('language:qml')
+    expect(regions.get('rust')).toBe('language:rust')
+    expect(regions.get('python')).toBe('language:python')
+    expect(regions.get('endpoint')).toBe('boundary:api')
+    expect(regions.get('external')).toBe('external:external')
+    expect(regions.get('detached')).toBe('detached:detached')
+  })
+
+  it('semantic zones are stable and place frontend left of backend', () => {
+    const nodes = [
+      { ...node('app', 'typescript', 'Component'), file: 'src/app/App.tsx' },
+      { ...node('endpoint', undefined, 'Endpoint'), label: 'GET /api/users' },
+      { ...node('handler', 'rust', 'Function'), file: 'src/routes/users.rs' },
+      { ...node('py', 'python', 'Function'), file: 'backend/services/users.py' },
+      { ...node('qml', 'qml', 'Object'), file: 'qml/Main.qml' },
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'api', source: 'app', target: 'endpoint', type: 'ApiCall' },
+      { id: 'handler', source: 'endpoint', target: 'handler', type: 'EndpointHandler' },
+    ]
+
+    const first = buildSemanticLayout(nodes, edges)
+    const second = buildSemanticLayout(nodes, edges)
+    const byId = new Map(first.nodes.map(node => [node.id, node]))
+    const secondById = new Map(second.nodes.map(node => [node.id, node]))
+
+    expect(byId.get('app')!.x).toBeLessThan(byId.get('handler')!.x)
+    expect(byId.get('qml')!.y).toBeGreaterThan(byId.get('app')!.y)
+    expect(byId.get('endpoint')!.x).toBeGreaterThan(byId.get('app')!.x)
+    expect(byId.get('endpoint')!.x).toBeLessThan(byId.get('handler')!.x)
+    expect(secondById.get('app')!.x).toBe(byId.get('app')!.x)
+    expect(first.regions.some(region => region.id === 'boundary:api')).toBe(true)
+    expect(first.edges.find(edge => edge.id === 'api')?.routedPath?.length).toBe(4)
+  })
+
+  it('semantic zones preserve pinned node positions', () => {
+    const nodes = [
+      { ...node('app', 'typescript', 'Component'), file: 'src/app/App.tsx', pinned: true, x: 123, y: -456 },
+      { ...node('handler', 'rust', 'Function'), file: 'src/main.rs' },
+    ]
+
+    const layout = buildSemanticLayout(nodes, [])
+    const pinned = layout.nodes.find(node => node.id === 'app')!
+
+    expect(pinned.x).toBe(123)
+    expect(pinned.y).toBe(-456)
   })
 })

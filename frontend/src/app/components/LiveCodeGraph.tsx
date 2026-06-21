@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
-import type { DiagnosticRecord, GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode } from '../types'
+import { buildSemanticLayout } from '../api/semanticLayout'
+import type { DiagnosticRecord, GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode, GraphLayoutMode, GraphRegion } from '../types'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
@@ -10,6 +11,7 @@ interface LiveCodeGraphProps {
   recenterKey: number
   theme: ThemeMode
   layoutSettings: GraphLayoutSettings
+  layoutMode: GraphLayoutMode
   labelMode: GraphLabelMode
   diagnosticsByNode?: Map<string, DiagnosticRecord[]>
   highlightedTraceNodeIds?: Set<string>
@@ -101,6 +103,7 @@ const FIT_SETTLE_MS = 450
 const SPATIAL_GRID_THRESHOLD = 220
 const SPATIAL_CELL_SIZE = 260
 const SPATIAL_SEARCH_RADIUS = 2
+const SEMANTIC_LAYOUTS = new Set<GraphLayoutMode>(['SemanticZones', 'PackageMap', 'Neighborhood'])
 
 interface PhysicsOptions {
   dampingScale?: number
@@ -733,6 +736,96 @@ function drawArrow(
   ctx.restore()
 }
 
+function drawRoutedArrow(
+  ctx: CanvasRenderingContext2D,
+  points: Array<{ x: number; y: number }>,
+  color: string,
+  width: number,
+  dashed: boolean,
+  animated: boolean,
+  animT: number,
+  targetRadius: number,
+) {
+  if (points.length < 2) return
+  const end = points[points.length - 1]
+  const beforeEnd = points[points.length - 2]
+  const dx = end.x - beforeEnd.x, dy = end.y - beforeEnd.y
+  const len = Math.sqrt(dx * dx + dy * dy) || 1
+  const ux = dx / len, uy = dy / len
+  const arrowSize = 9
+  const tipX = end.x - ux * (targetRadius + 5), tipY = end.y - uy * (targetRadius + 5)
+  const ex = tipX - ux * arrowSize, ey = tipY - uy * arrowSize
+
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = width
+  ctx.globalAlpha = 0.62
+  ctx.setLineDash(dashed ? [5, 4] : [])
+  ctx.beginPath()
+  ctx.moveTo(points[0].x, points[0].y)
+  for (let i = 1; i < points.length - 1; i++) {
+    ctx.lineTo(points[i].x, points[i].y)
+  }
+  ctx.lineTo(ex, ey)
+  ctx.stroke()
+
+  if (animated) {
+    const progress = (animT % 1800) / 1800
+    const segment = Math.min(points.length - 2, Math.floor(progress * (points.length - 1)))
+    const local = progress * (points.length - 1) - segment
+    const a = points[segment], b = points[segment + 1]
+    ctx.globalAlpha = 0.9
+    ctx.fillStyle = color
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.arc(a.x + (b.x - a.x) * local, a.y + (b.y - a.y) * local, 3, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  ctx.globalAlpha = 0.85
+  ctx.fillStyle = color
+  ctx.setLineDash([])
+  ctx.beginPath()
+  const px1 = ex - uy * arrowSize * 0.5, py1 = ey + ux * arrowSize * 0.5
+  const px2 = ex + uy * arrowSize * 0.5, py2 = ey - ux * arrowSize * 0.5
+  ctx.moveTo(tipX, tipY)
+  ctx.lineTo(px1, py1)
+  ctx.lineTo(px2, py2)
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawRegionBackgrounds(ctx: CanvasRenderingContext2D, regions: GraphRegion[], theme: CanvasTheme) {
+  const topLevel = regions.filter(region => region.kind !== 'Package')
+  const packages = regions.filter(region => region.kind === 'Package')
+  for (const region of [...topLevel, ...packages]) {
+    const { x, y, width, height } = region.bounds
+    ctx.save()
+    ctx.globalAlpha = region.kind === 'Package' ? 0.08 : 0.12
+    ctx.fillStyle = region.colorToken
+    ctx.strokeStyle = region.colorToken
+    ctx.lineWidth = region.kind === 'Boundary' ? 2 : 1.2
+    ctx.beginPath()
+    ctx.roundRect(x, y, width, height, region.kind === 'Boundary' ? 18 : 14)
+    ctx.fill()
+    ctx.globalAlpha = region.kind === 'Package' ? 0.22 : 0.34
+    ctx.stroke()
+    ctx.globalAlpha = region.kind === 'Package' ? 0.75 : 0.9
+    ctx.fillStyle = theme.text
+    ctx.font = `${region.kind === 'Package' ? 600 : 750} ${region.kind === 'Package' ? 10 : 13}px Inter, sans-serif`
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillText(region.label, x + 14, y + 12)
+    ctx.globalAlpha = region.kind === 'Package' ? 0.45 : 0.62
+    ctx.fillStyle = theme.textMuted
+    ctx.font = '10px Inter, sans-serif'
+    const stats = `${region.stats.fileCount} files · ${region.stats.symbolCount} symbols${region.stats.endpointCount ? ` · ${region.stats.endpointCount} endpoints` : ''}${region.stats.diagnosticCount ? ` · ${region.stats.diagnosticCount} diagnostics` : ''}`
+    ctx.fillText(stats, x + 14, y + 30)
+    ctx.restore()
+  }
+}
+
 function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, isFocusContext: boolean, isFaded: boolean, theme: CanvasTheme) {
   const color = NODE_COLORS[n.type]
   const size = NODE_SIZES[n.type]
@@ -1196,9 +1289,11 @@ function drawEdgeBundleBadge(ctx: CanvasRenderingContext2D, src: GraphNode, tgt:
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, layoutMode, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>(nodes)
+  const edgesRef = useRef<GraphEdge[]>(edges)
+  const regionsRef = useRef<GraphRegion[]>([])
   const animFrameRef = useRef<number>(0)
   const animTimeRef = useRef<number>(0)
   const panRef = useRef({ x: 0, y: 0 })
@@ -1215,6 +1310,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   const layoutWorkerSignatureRef = useRef('')
   const layoutWorkerRef = useRef<Worker | null>(null)
   const layoutSettingsRef = useRef(layoutSettings)
+  const layoutModeRef = useRef(layoutMode)
   const onUpdateNodesRef = useRef(onUpdateNodes)
   const [hoveredNode, setHoveredNode] = useState<string | null>(null)
   const physicsTicksRef = useRef(0)
@@ -1222,6 +1318,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   const settledRef = useRef(false)
 
   layoutSettingsRef.current = layoutSettings
+  layoutModeRef.current = layoutMode
   onUpdateNodesRef.current = onUpdateNodes
   selectedNodeIdRef.current = selectedNodeId
 
@@ -1234,10 +1331,10 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     if (!canvas || nodesRef.current.length === 0) return
     if (!force && userNavigatedRef.current) return
     const rect = canvas.getBoundingClientRect()
-    const visibleIds = visibleNodeIdsFor(nodesRef.current, edges, filters.depth)
+    const visibleIds = visibleNodeIdsFor(nodesRef.current, edgesRef.current, filters.depth)
     const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
     fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, rect.width, rect.height, panRef.current, zoomRef)
-  }, [edges, filters.depth, filters.nodeTypes])
+  }, [filters.depth, filters.nodeTypes])
 
   useEffect(() => {
     let worker: Worker | null = null
@@ -1270,16 +1367,27 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
   // keep nodesRef in sync
   useEffect(() => {
-    const signature = `${nodes.map(n => n.id).join('|')}::${edges.map(e => e.id).join('|')}`
+    const signature = `${layoutMode}::${nodes.map(n => n.id).join('|')}::${edges.map(e => e.id).join('|')}`
     if (signature !== graphSignatureRef.current) {
       const previousNodes = nodesRef.current
       const previous = new Map(previousNodes.map(node => [node.id, node]))
       graphSignatureRef.current = signature
-      visibleSignatureRef.current = visibleGraphSignature(nodes, edges, filters)
-      if (layoutWorkerRef.current && nodes.length >= SPATIAL_GRID_THRESHOLD) {
+      if (SEMANTIC_LAYOUTS.has(layoutMode)) {
+        layoutWorkerSignatureRef.current = ''
+        const semantic = buildSemanticLayout(nodes, edges, diagnosticsByNode)
+        nodesRef.current = semantic.nodes.map(node => {
+          const existing = previous.get(node.id)
+          return existing?.pinned ? { ...node, x: existing.x, y: existing.y, vx: 0, vy: 0, pinned: true } : node
+        })
+        edgesRef.current = semantic.edges
+        regionsRef.current = semantic.regions
+        visibleSignatureRef.current = visibleGraphSignature(nodesRef.current, edgesRef.current, filters)
+      } else if (layoutWorkerRef.current && nodes.length >= SPATIAL_GRID_THRESHOLD) {
         const workerSignature = `${signature}::${layoutSettingsSignature(layoutSettings)}`
         layoutWorkerSignatureRef.current = workerSignature
         nodesRef.current = seedLayout(nodes, edges, previous)
+        edgesRef.current = edges
+        regionsRef.current = []
         layoutWorkerRef.current.postMessage({
           type: 'layout',
           signature: workerSignature,
@@ -1290,6 +1398,8 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         })
       } else {
         nodesRef.current = prepareInitialLayout(nodes, edges, previous, layoutSettings)
+        edgesRef.current = edges
+        regionsRef.current = []
       }
       physicsTicksRef.current = 0
       settleStartedAtRef.current = null
@@ -1303,11 +1413,14 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         const existing = current.get(node.id)
         return existing ? { ...node, x: existing.x, y: existing.y, vx: existing.vx, vy: existing.vy } : { ...node, vx: 0, vy: 0 }
       })
+      edgesRef.current = SEMANTIC_LAYOUTS.has(layoutMode)
+        ? buildSemanticLayout(nodesRef.current, edges, diagnosticsByNode).edges
+        : edges
     }
-  }, [edges, filters, fitCurrentGraph, nodes])
+  }, [canAutoFitRef, diagnosticsByNode, edges, filters, fitCurrentGraph, layoutMode, layoutSettings, nodes])
 
   useEffect(() => {
-    const signature = visibleGraphSignature(nodesRef.current, edges, filters)
+    const signature = visibleGraphSignature(nodesRef.current, edgesRef.current, filters)
     if (signature === visibleSignatureRef.current) return
     visibleSignatureRef.current = signature
     layoutWorkerSignatureRef.current = ''
@@ -1317,7 +1430,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     if (canAutoFitRef()) {
       requestAnimationFrame(() => fitCurrentGraph(true))
     }
-  }, [canAutoFitRef, edges, filters, fitCurrentGraph])
+  }, [canAutoFitRef, edges, filters, fitCurrentGraph, layoutMode])
 
   useEffect(() => {
     physicsTicksRef.current = 0
@@ -1350,8 +1463,8 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   }, [toWorld])
 
   const getVisibleNodeIds = useCallback(() => {
-    return visibleNodeIdsFor(nodesRef.current, edges, filters.depth)
-  }, [edges, filters.depth])
+    return visibleNodeIdsFor(nodesRef.current, edgesRef.current, filters.depth)
+  }, [filters.depth])
 
   // main render + physics loop
   useEffect(() => {
@@ -1376,26 +1489,28 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       const W = canvas.width / dpr
       const H = canvas.height / dpr
       const canvasColors = canvasTheme()
+      const activeEdges = edgesRef.current
       const visibleIds = getVisibleNodeIds()
       const currentLayoutSettings = layoutSettingsRef.current
+      const semanticLayoutActive = SEMANTIC_LAYOUTS.has(layoutModeRef.current)
 
       if (settleStartedAtRef.current === null) {
         settleStartedAtRef.current = ts
       }
       const settleElapsed = ts - settleStartedAtRef.current
-      if (settleElapsed <= VISIBLE_SETTLE_MS) {
-        nodesRef.current = runVisiblePhysicsTick(nodesRef.current, edges, visibleIds, filters, W, H, { layoutSettings: currentLayoutSettings })
+      if (!semanticLayoutActive && settleElapsed <= VISIBLE_SETTLE_MS) {
+        nodesRef.current = runVisiblePhysicsTick(nodesRef.current, activeEdges, visibleIds, filters, W, H, { layoutSettings: currentLayoutSettings })
         physicsTicksRef.current++
         if (!userNavigatedRef.current && settleElapsed < FIT_SETTLE_MS) {
           const fitNodes = nodesRef.current.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
           fitGraphToView(fitNodes.length > 0 ? fitNodes : nodesRef.current, W, H, panRef.current, zoomRef)
         }
-      } else if (!settledRef.current) {
+      } else if (!semanticLayoutActive && !settledRef.current) {
         const fadeProgress = Math.min(1, (settleElapsed - VISIBLE_SETTLE_MS) / SETTLE_FADE_MS)
         const dampingScale = 2.4 + fadeProgress * 4.6
         const dragScale = 2.2 + fadeProgress * 5.2
         const velocityFade = 1 - 0.08 - fadeProgress * 0.18
-        nodesRef.current = runVisiblePhysicsTick(nodesRef.current, edges, visibleIds, filters, W, H, {
+        nodesRef.current = runVisiblePhysicsTick(nodesRef.current, activeEdges, visibleIds, filters, W, H, {
           dampingScale,
           dragScale,
           maxSpeedScale: 0.55,
@@ -1439,13 +1554,17 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         }
       }
 
+      if (semanticLayoutActive) {
+        drawRegionBackgrounds(ctx, regionsRef.current, canvasColors)
+      }
+
       const nodeMap = new Map(nodesRef.current.map(n => [n.id, n]))
-      const degree = buildDegreeMap(nodesRef.current, edges)
+      const degree = buildDegreeMap(nodesRef.current, activeEdges)
       const hoveredConnections = new Set<string>()
       const selectedConnections = new Set<string>()
       const activeSelectedNodeId = selectedNodeIdRef.current
       if (hoveredNodeRef.current) {
-        edges.forEach(e => {
+        activeEdges.forEach(e => {
           if (e.source === hoveredNodeRef.current || e.target === hoveredNodeRef.current) {
             hoveredConnections.add(e.source)
             hoveredConnections.add(e.target)
@@ -1453,7 +1572,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         })
       }
       if (activeSelectedNodeId) {
-        edges.forEach(e => {
+        activeEdges.forEach(e => {
           if (e.source === activeSelectedNodeId || e.target === activeSelectedNodeId) {
             selectedConnections.add(e.source)
             selectedConnections.add(e.target)
@@ -1468,7 +1587,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       }
 
       // draw edges
-      for (const edge of edges) {
+      for (const edge of activeEdges) {
         if (!filters.edgeTypes.has(edge.type)) continue
         const src = nodeMap.get(edge.source), tgt = nodeMap.get(edge.target)
         if (!src || !tgt) continue
@@ -1484,7 +1603,11 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         const dashed = edge.type === 'Implements' || edge.type === 'ExternalDependency' || edge.type === 'Renders'
         const animated = edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler'
 
-        drawArrow(ctx, src.x, src.y, tgt.x, tgt.y, color, width, dashed, animated, ts, NODE_SIZES[src.type], NODE_SIZES[tgt.type])
+        if (edge.routedPath && semanticLayoutActive) {
+          drawRoutedArrow(ctx, edge.routedPath, color, width, dashed, animated, ts, NODE_SIZES[tgt.type])
+        } else {
+          drawArrow(ctx, src.x, src.y, tgt.x, tgt.y, color, width, dashed, animated, ts, NODE_SIZES[src.type], NODE_SIZES[tgt.type])
+        }
         if ((edge.bundledCount ?? 1) > 1) {
           drawEdgeBundleBadge(ctx, src, tgt, edge.bundledCount ?? 1, canvasColors)
         }

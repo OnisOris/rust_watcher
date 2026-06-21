@@ -22,7 +22,7 @@ import { applySavedViewState, normalizeSavedView, serializableFilters } from './
 import { deriveTraceHighlights, type TraceHighlights } from './api/trace'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import { formatUpdatedLabel } from './utils/time'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView, TraceExplanation } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, GraphLayoutMode, LanguageFilter, SavedView, TraceExplanation } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Imports', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
@@ -76,6 +76,8 @@ export default function App() {
   const [clarityOpen, setClarityOpen] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
   const [neighborhoodNodeId, setNeighborhoodNodeId] = useState<string | null>(null)
+  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>('Force')
+  const layoutModeTouchedRef = useRef(false)
   const [labelMode, setLabelMode] = useState<GraphLabelMode>('auto')
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
@@ -114,6 +116,10 @@ export default function App() {
     })),
     [nodes, pinnedNodeIds],
   )
+  useEffect(() => {
+    if (layoutModeTouchedRef.current) return
+    if (nodes.length > 100) setLayoutMode('SemanticZones')
+  }, [nodes.length])
   const selectedNode = selectedNodeId ? graphNodes.find(n => n.id === selectedNodeId) ?? null : null
   const handleTraceLoaded = useCallback((trace: TraceExplanation) => {
     setTraceHighlights(deriveTraceHighlights(trace))
@@ -156,6 +162,11 @@ export default function App() {
   const zeroEdgeHint = visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
     ? graphModeEmptyHint(mode)
     : null
+
+  const handleLayoutModeChange = useCallback((next: GraphLayoutMode) => {
+    layoutModeTouchedRef.current = true
+    setLayoutMode(next)
+  }, [])
 
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -332,6 +343,8 @@ export default function App() {
         filesCount={files.length}
         mode={mode}
         onModeChange={setMode}
+        layoutMode={layoutMode}
+        onLayoutModeChange={handleLayoutModeChange}
         onSearchOpen={() => setSearchOpen(true)}
         onSettingsOpen={() => setSettingsOpen(true)}
         onRecenter={() => setRecenterKey(key => key + 1)}
@@ -339,7 +352,7 @@ export default function App() {
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         onClarityToggle={() => setClarityOpen(open => !open)}
         clarityOpen={clarityOpen}
-        clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
+        clarityActive={graphLens !== 'all' || layoutMode !== 'Force' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
         theme={theme}
       />
 
@@ -366,6 +379,7 @@ export default function App() {
             recenterKey={recenterKey}
             theme={theme}
             layoutSettings={layoutSettings}
+            layoutMode={layoutMode}
             labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
             highlightedTraceNodeIds={traceHighlights?.nodeIds}
@@ -381,6 +395,16 @@ export default function App() {
             >
               <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>{zeroEdgeHint.title}</div>
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', lineHeight: 1.45, marginTop: 4 }}>{zeroEdgeHint.body}</div>
+            </div>
+          )}
+
+          {layoutMode === 'SemanticZones' && graphNodes.length > 100 && !layoutModeTouchedRef.current && (
+            <div
+              className="absolute left-1/2 top-24 z-20 -translate-x-1/2 rounded-xl px-4 py-2"
+              style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', boxShadow: 'var(--cc-shadow)', maxWidth: 430, backdropFilter: 'blur(12px)' }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>Large project detected. Showing semantic zones.</div>
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 3 }}>Switch to Force graph anytime from the layout selector.</div>
             </div>
           )}
 

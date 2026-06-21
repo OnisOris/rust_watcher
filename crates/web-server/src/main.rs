@@ -3592,7 +3592,26 @@ fn load_layout(project_root: &Path) -> Result<LayoutStore> {
     }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+    match serde_json::from_str(&text) {
+        Ok(layout) => Ok(layout),
+        Err(error) => {
+            let corrupt_path = path.with_file_name(format!(
+                "layout.corrupt.{}.json",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or_default()
+            ));
+            let _ = std::fs::rename(&path, &corrupt_path);
+            warn!(
+                error = %error,
+                layout = %path.display(),
+                backup = %corrupt_path.display(),
+                "corrupt layout cache renamed; starting fresh"
+            );
+            Ok(LayoutStore::default())
+        }
+    }
 }
 
 fn save_layout(project_root: &Path, layout: &LayoutStore) -> Result<()> {
@@ -4466,6 +4485,32 @@ mod tests {
         let root = temp_project_root("missing-layout");
         let layout = load_layout(&root).unwrap();
         assert!(layout.nodes.is_empty());
+        let _ = std::fs::remove_dir_all(storage_dir_for_project(&root));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_layout_file_is_renamed_and_ignored() {
+        let root = temp_project_root("corrupt-layout");
+        let path = layout_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{not-json").unwrap();
+
+        let layout = load_layout(&root).unwrap();
+
+        assert!(layout.nodes.is_empty());
+        assert!(!path.exists());
+        let backups = std::fs::read_dir(storage_dir_for_project(&root))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("layout.corrupt.")
+            })
+            .count();
+        assert_eq!(backups, 1);
         let _ = std::fs::remove_dir_all(storage_dir_for_project(&root));
         let _ = std::fs::remove_dir_all(root);
     }
