@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from '../types'
-import { buildSemanticLayout, semanticNodeDetail, semanticNodeSubtitle } from '../api/semanticLayout'
+import { assignedSemanticRegionId, buildSemanticLayout, clampPointToRegion, semanticNodeDetail, semanticNodeSubtitle } from '../api/semanticLayout'
 import type { DiagnosticRecord, GraphNode, GraphEdge, GraphFilters, NodeType, EdgeType, ThemeMode, GraphLayoutSettings, GraphLabelMode, GraphLayoutMode, GraphMode, GraphRegion } from '../types'
 
 interface LiveCodeGraphProps {
@@ -105,6 +105,8 @@ const SPATIAL_GRID_THRESHOLD = 220
 const SPATIAL_CELL_SIZE = 260
 const SPATIAL_SEARCH_RADIUS = 2
 const SEMANTIC_LAYOUTS = new Set<GraphLayoutMode>(['SemanticZones', 'PackageMap', 'Neighborhood'])
+const PACKAGE_CARD_W = 142
+const PACKAGE_CARD_H = 72
 
 interface PhysicsOptions {
   dampingScale?: number
@@ -839,6 +841,28 @@ function drawRegionBackgrounds(ctx: CanvasRenderingContext2D, regions: GraphRegi
   }
 }
 
+function drawReadingOrderHint(ctx: CanvasRenderingContext2D, regions: GraphRegion[], theme: CanvasTheme) {
+  if (!regions.some(region => region.id === 'boundary:api')) return
+  const allBounds = getNodeBounds(regionFitPoints(regions))
+  if (!allBounds) return
+  ctx.save()
+  ctx.globalAlpha = 0.72
+  ctx.fillStyle = theme.textMuted
+  ctx.font = '11px Inter, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'top'
+  const y = allBounds.minY - 28
+  ctx.fillText('Read left to right: UI -> API Boundary -> backend -> domain', (allBounds.minX + allBounds.maxX) / 2, y)
+  ctx.globalAlpha = 0.36
+  ctx.strokeStyle = '#64748B'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(allBounds.minX + 120, y + 22)
+  ctx.lineTo(allBounds.maxX - 120, y + 22)
+  ctx.stroke()
+  ctx.restore()
+}
+
 function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boolean, isHovered: boolean, isFocusContext: boolean, isFaded: boolean, theme: CanvasTheme) {
   const color = NODE_COLORS[n.type]
   const size = NODE_SIZES[n.type]
@@ -861,6 +885,12 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
   ctx.fillStyle = fillColor
   ctx.strokeStyle = isSelected ? theme.text : isHovered ? color : color
   ctx.lineWidth = isSelected ? 2.5 : isHovered ? 2 : 1.5
+
+  if (n.packageStats || n.layoutGuide) {
+    drawPackageCard(ctx, n, color, alpha, isSelected, isHovered, theme)
+    ctx.restore()
+    return
+  }
 
   if (isDetached) {
     ctx.setLineDash([6, 4])
@@ -1009,6 +1039,45 @@ function drawNode(ctx: CanvasRenderingContext2D, n: GraphNode, isSelected: boole
     }
   }
 
+  ctx.restore()
+}
+
+function drawPackageCard(ctx: CanvasRenderingContext2D, n: GraphNode, color: string, alpha: number, isSelected: boolean, isHovered: boolean, theme: CanvasTheme) {
+  const w = n.layoutGuide ? 260 : PACKAGE_CARD_W
+  const h = n.layoutGuide ? 84 : PACKAGE_CARD_H
+  ctx.save()
+  ctx.globalAlpha = alpha
+  ctx.shadowBlur = isSelected ? 24 : isHovered ? 14 : 7
+  ctx.shadowColor = color
+  ctx.fillStyle = theme.card
+  ctx.strokeStyle = isSelected ? theme.text : color
+  ctx.lineWidth = isSelected ? 2.4 : isHovered ? 2 : 1.4
+  ctx.beginPath()
+  ctx.roundRect(n.x - w / 2, n.y - h / 2, w, h, 8)
+  ctx.fill()
+  ctx.stroke()
+  ctx.globalAlpha = alpha * 0.78
+  ctx.fillStyle = color
+  ctx.beginPath()
+  ctx.roundRect(n.x - w / 2 + 10, n.y - h / 2 + 8, Math.min(36, w - 20), 5, 3)
+  ctx.fill()
+  ctx.fillStyle = theme.text
+  ctx.globalAlpha = alpha
+  ctx.font = `700 ${n.layoutGuide ? 13 : 11}px Inter, sans-serif`
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'top'
+  ctx.fillText(fitLabelLine(ctx, n.label, w - 24), n.x - w / 2 + 12, n.y - h / 2 + 18)
+  ctx.fillStyle = theme.textMuted
+  ctx.font = '9px Inter, sans-serif'
+  if (n.layoutGuide) {
+    ctx.fillText(n.layoutGuide, n.x - w / 2 + 12, n.y - h / 2 + 42)
+  } else {
+    const stats = n.packageStats
+    const first = `${stats?.fileCount ?? 0} files · ${stats?.symbolCount ?? 0} symbols`
+    const second = `${stats?.incomingEdgeCount ?? 0} in · ${stats?.outgoingEdgeCount ?? 0} out${stats?.diagnosticCount ? ` · ${stats.diagnosticCount} diag` : ''}`
+    ctx.fillText(first, n.x - w / 2 + 12, n.y - h / 2 + 38)
+    ctx.fillText(second, n.x - w / 2 + 12, n.y - h / 2 + 52)
+  }
   ctx.restore()
 }
 
@@ -1291,6 +1360,66 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
   ctx.restore()
 }
 
+function drawCanvasLegend(ctx: CanvasRenderingContext2D, canvasW: number, theme: CanvasTheme) {
+  const x = Math.max(300, canvasW - 570)
+  const y = 14
+  const w = 385
+  const h = 72
+  const regions = [
+    ['TypeScript', '#14B8A6'],
+    ['QML', '#8B5CF6'],
+    ['API', '#E11D48'],
+    ['Rust', '#3B82F6'],
+    ['Python', '#F97316'],
+  ] as const
+  const edges = [
+    ['API call', EDGE_COLORS.ApiCall],
+    ['Handler', EDGE_COLORS.EndpointHandler],
+    ['Data', EDGE_COLORS.DataFlow],
+    ['Calls', EDGE_COLORS.Calls],
+  ] as const
+  ctx.save()
+  ctx.globalAlpha = 0.9
+  ctx.fillStyle = theme.surface
+  ctx.strokeStyle = theme.border
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.roundRect(x, y, w, h, 9)
+  ctx.fill()
+  ctx.stroke()
+  ctx.fillStyle = theme.text
+  ctx.font = '700 10px Inter, sans-serif'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'top'
+  ctx.fillText('Legend', x + 12, y + 10)
+  ctx.font = '9px Inter, sans-serif'
+  regions.forEach(([label, color], index) => {
+    const px = x + 12 + index * 72
+    ctx.fillStyle = color
+    ctx.globalAlpha = 0.85
+    ctx.beginPath()
+    ctx.roundRect(px, y + 29, 11, 7, 2)
+    ctx.fill()
+    ctx.globalAlpha = 0.82
+    ctx.fillStyle = theme.textMuted
+    ctx.fillText(label, px + 15, y + 27)
+  })
+  edges.forEach(([label, color], index) => {
+    const px = x + 12 + index * 88
+    ctx.strokeStyle = color
+    ctx.globalAlpha = 0.88
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(px, y + 55)
+    ctx.lineTo(px + 18, y + 55)
+    ctx.stroke()
+    ctx.fillStyle = theme.textMuted
+    ctx.font = '9px Inter, sans-serif'
+    ctx.fillText(label, px + 24, y + 50)
+  })
+  ctx.restore()
+}
+
 function drawEdgeBundleBadge(ctx: CanvasRenderingContext2D, src: GraphNode, tgt: GraphNode, count: number, theme: CanvasTheme) {
   const x = (src.x + tgt.x) / 2
   const y = (src.y + tgt.y) / 2
@@ -1398,9 +1527,13 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       if (SEMANTIC_LAYOUTS.has(layoutMode)) {
         layoutWorkerSignatureRef.current = ''
         const semantic = buildSemanticLayout(nodes, edges, { layoutMode, graphMode, selectedNodeId, diagnosticsByNode })
+        const semanticRegionById = new Map(semantic.regions.map(region => [region.id, region]))
         nodesRef.current = semantic.nodes.map(node => {
           const existing = previous.get(node.id)
-          return existing?.pinned ? { ...node, x: existing.x, y: existing.y, vx: 0, vy: 0, pinned: true } : node
+          if (!existing?.pinned) return node
+          const region = semanticRegionById.get(node.regionId ?? assignedSemanticRegionId(node))
+          const clamped = region ? clampPointToRegion(existing.x, existing.y, region) : { x: existing.x, y: existing.y }
+          return { ...node, ...clamped, vx: 0, vy: 0, pinned: true }
         })
         edgesRef.current = semantic.edges
         regionsRef.current = semantic.regions
@@ -1478,6 +1611,12 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     const { x, y } = toWorld(cx, cy)
     for (let i = nodesRef.current.length - 1; i >= 0; i--) {
       const n = nodesRef.current[i]
+      if (n.packageStats || n.layoutGuide) {
+        const w = n.layoutGuide ? 260 : PACKAGE_CARD_W
+        const h = n.layoutGuide ? 84 : PACKAGE_CARD_H
+        if (x >= n.x - w / 2 && x <= n.x + w / 2 && y >= n.y - h / 2 && y <= n.y + h / 2) return n
+        continue
+      }
       const size = NODE_SIZES[n.type]
       const dist = Math.sqrt((n.x - x) ** 2 + (n.y - y) ** 2)
       if (dist <= size + 6) return n
@@ -1579,6 +1718,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
       if (semanticLayoutActive) {
         drawRegionBackgrounds(ctx, regionsRef.current, canvasColors)
+        drawReadingOrderHint(ctx, regionsRef.current, canvasColors)
       }
 
       const nodeMap = new Map(nodesRef.current.map(n => [n.id, n]))
@@ -1681,6 +1821,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
       // minimap (screen-space)
       drawMiniMap(ctx, nodesRef.current.filter(n => visibleIds.has(n.id)), panRef.current, zoomRef.current, W, H, canvasColors)
+      if (semanticLayoutActive) {
+        drawCanvasLegend(ctx, W, canvasColors)
+      }
 
       // "You are here" breadcrumb for selected
       if (activeSelectedNodeId) {
@@ -1746,7 +1889,12 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       }
       const { x, y } = toWorld(e.clientX, e.clientY)
       nodesRef.current = nodesRef.current.map(n =>
-        n.id === dragNodeRef.current ? { ...n, x, y, vx: 0, vy: 0, pinned: true } : n
+        n.id === dragNodeRef.current ? (() => {
+          if (!SEMANTIC_LAYOUTS.has(layoutModeRef.current)) return { ...n, x, y, vx: 0, vy: 0, pinned: true }
+          const region = regionsRef.current.find(item => item.id === (n.regionId ?? assignedSemanticRegionId(n)))
+          const clamped = region ? clampPointToRegion(x, y, region) : { x, y }
+          return { ...n, ...clamped, vx: 0, vy: 0, pinned: true }
+        })() : n
       )
     } else if (isDraggingRef.current) {
       panRef.current.x = dragStartRef.current.panX + (e.clientX - dragStartRef.current.x)

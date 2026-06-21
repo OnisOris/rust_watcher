@@ -469,6 +469,7 @@ function NodeInspector({ node, nodes, edges, layoutMode, onTogglePin, onToggleCo
           )}
 
           <div className="flex flex-wrap gap-1.5 mt-3">
+            {node.underlyingNodeIds?.length && <ActionBtn icon={<Layers size={12} />} label="Show internals" onClick={() => onShowNeighborhood(node.id)} />}
             {node.type === 'Endpoint' && <ActionBtn icon={<GitBranch size={12} />} label="Explain route" onClick={explainRoute} />}
             {(incomingDataFlow.length > 0 || outgoingDataFlow.length > 0) && <ActionBtn icon={<GitBranch size={12} />} label="Explain data flow" onClick={explainDataFlow} />}
             <ActionBtn icon={<ChevronRight size={12} />} label="Explain node" onClick={explainNode} />
@@ -483,6 +484,23 @@ function NodeInspector({ node, nodes, edges, layoutMode, onTogglePin, onToggleCo
             ) : (
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{traceError}</div>
             )}
+          </Card>
+        )}
+
+        {node.packageStats && (
+          <Card>
+            <SectionLabel label="Package Summary" />
+            <InfoRow label="Package" value={node.packagePath ?? node.label} mono />
+            <InfoRow label="Files" value={String(node.packageStats.fileCount)} mono />
+            <InfoRow label="Symbols" value={String(node.packageStats.symbolCount)} mono />
+            <InfoRow label="Public" value={String(node.packageStats.exportedSymbolCount)} mono />
+            <InfoRow label="Endpoints" value={String(node.packageStats.endpointCount)} mono />
+            <InfoRow label="Diagnostics" value={String(node.packageStats.diagnosticCount)} mono />
+            <InfoRow label="Incoming" value={String(node.packageStats.incomingEdgeCount)} mono />
+            <InfoRow label="Outgoing" value={String(node.packageStats.outgoingEdgeCount)} mono />
+            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
+              Contains {node.underlyingNodeIds?.length ?? 0} graph nodes and summarizes {node.underlyingEdgeIds?.length ?? 0} underlying edges.
+            </div>
           </Card>
         )}
 

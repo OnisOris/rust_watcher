@@ -97,7 +97,7 @@ export function buildSemanticZonesLayout(
     const parentRegionId = topAssignmentByNode.get(node.id) ?? 'external:external'
     packageAssignmentByNode.set(node.id, packageRegionId(node, parentRegionId) ?? parentRegionId)
   }
-  const positionedNodes = positionNodes(nodes, packageAssignmentByNode, regionById)
+  const positionedNodes = positionEndpointsInRouteRows(positionNodes(nodes, packageAssignmentByNode, regionById), edges, regionById)
   const routedEdges = routeSemanticEdges(edges, positionedNodes, topAssignmentByNode, regionById, options.graphMode)
 
   return { nodes: positionedNodes, edges: routedEdges, regions, assignments }
@@ -112,6 +112,7 @@ export function buildPackageMapLayout(
   const assignmentByNode = new Map(zones.assignments.map(assignment => [assignment.nodeId, assignment.regionId]))
   const packageByNode = new Map<string, string>()
   const packageNodes = new Map<string, GraphNode>()
+  const underlyingEdgesByPackageNode = new Map<string, Set<string>>()
   const packageRegions = zones.regions.filter(region => region.kind === 'Package')
 
   for (const region of packageRegions) {
@@ -123,6 +124,11 @@ export function buildPackageMapLayout(
       label: region.label,
       file: firstNode?.file,
       module: region.label,
+      packagePath: region.label,
+      regionId: region.id,
+      underlyingNodeIds: [...region.nodeIds],
+      underlyingEdgeIds: [],
+      packageStats: packageStatsFromRegion(region, nodes, edges),
       description: `Package map group: ${region.nodeIds.length} nodes`,
       connections: region.nodeIds.length,
       x: region.bounds.x + region.bounds.width / 2,
@@ -145,6 +151,19 @@ export function buildPackageMapLayout(
         id: `package:${regionId}:${node.id}`,
         type: node.type === 'File' ? 'File' : 'Module',
         label: region?.label ?? node.label,
+        packagePath: region?.label ?? node.label,
+        regionId,
+        underlyingNodeIds: [node.id],
+        underlyingEdgeIds: [],
+        packageStats: {
+          fileCount: node.type === 'File' ? 1 : 0,
+          symbolCount: node.type === 'File' || node.type === 'Endpoint' ? 0 : 1,
+          endpointCount: node.type === 'Endpoint' ? 1 : 0,
+          diagnosticCount: options.diagnosticsByNode?.get(node.id)?.length ?? 0,
+          exportedSymbolCount: isExportedNode(node) ? 1 : 0,
+          incomingEdgeCount: edges.filter(edge => edge.target === node.id).length,
+          outgoingEdgeCount: edges.filter(edge => edge.source === node.id).length,
+        },
         description: `Package map singleton: ${node.label}`,
         connections: 1,
         x: region ? region.bounds.x + region.bounds.width / 2 : node.x,
@@ -169,6 +188,16 @@ export function buildPackageMapLayout(
       : packageByNode.get(edge.target) ?? edge.target
     if (source === target || !packageNodes.has(source) || !packageNodes.has(target)) continue
     const key = `${edge.type}:${source}->${target}`
+    if (source !== edge.source) {
+      const ids = underlyingEdgesByPackageNode.get(source) ?? new Set<string>()
+      ids.add(edge.id)
+      underlyingEdgesByPackageNode.set(source, ids)
+    }
+    if (target !== edge.target) {
+      const ids = underlyingEdgesByPackageNode.get(target) ?? new Set<string>()
+      ids.add(edge.id)
+      underlyingEdgesByPackageNode.set(target, ids)
+    }
     const existing = packageEdges.get(key)
     if (existing) {
       existing.bundledCount = (existing.bundledCount ?? 1) + 1
@@ -186,7 +215,10 @@ export function buildPackageMapLayout(
     }
   }
 
-  const packageNodeList = [...packageNodes.values()]
+  const packageNodeList = [...packageNodes.values()].map(node => ({
+    ...node,
+    underlyingEdgeIds: [...(underlyingEdgesByPackageNode.get(node.id) ?? new Set(node.underlyingEdgeIds ?? []))],
+  }))
   const assignments = assignRegions(packageNodeList)
   const assignmentByPackageNode = new Map(assignments.map(assignment => [assignment.nodeId, assignment.regionId]))
   const routedEdges = routeSemanticEdges([...packageEdges.values()], packageNodeList, assignmentByPackageNode, new Map(zones.regions.map(region => [region.id, region])), options.graphMode)
@@ -199,11 +231,32 @@ export function buildNeighborhoodLayout(
   edges: GraphEdge[],
   options: SemanticLayoutOptions = {},
 ): SemanticLayoutResult {
+  if (!options.selectedNodeId || !nodes.some(node => node.id === options.selectedNodeId)) {
+    const guide: GraphNode = {
+      id: 'layout-guide:local-neighborhood',
+      type: 'Module',
+      label: 'Select a node',
+      description: 'Select a node to open local neighborhood',
+      layoutGuide: 'Select a node to open local neighborhood',
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+    }
+    const region: GraphRegion = {
+      id: 'neighborhood:guide',
+      label: 'Local Neighborhood',
+      kind: 'Layer',
+      bounds: { x: -240, y: -140, width: 480, height: 280 },
+      colorToken: '#0EA5E9',
+      nodeIds: [guide.id],
+      childRegionIds: [],
+      stats: { ...ZERO_STATS, symbolCount: 1 },
+    }
+    return { nodes: [guide], edges: [], regions: [region], assignments: [assignment(guide, region.id, 'no node selected')] }
+  }
   if (!nodes.length) return buildSemanticZonesLayout(nodes, edges, options)
-  const selectedId = options.selectedNodeId && nodes.some(node => node.id === options.selectedNodeId)
-    ? options.selectedNodeId
-    : strongestNode(nodes, edges)?.id
-  if (!selectedId) return buildSemanticZonesLayout(nodes, edges, options)
+  const selectedId = options.selectedNodeId
 
   const importantEdges = edges.filter(edge => edge.source === selectedId || edge.target === selectedId || isTraceLikeEdge(edge.type))
   const visibleIds = new Set<string>([selectedId])
@@ -297,6 +350,19 @@ export function packageRegionId(node: GraphNode, parentRegionId: string) {
   const packagePath = packagePathFor(node.file)
   if (!packagePath) return null
   return `${parentRegionId}:package:${packagePath}`
+}
+
+export function assignedSemanticRegionId(node: GraphNode) {
+  const topRegionId = assignRegions([node])[0]?.regionId ?? 'external:external'
+  return packageRegionId(node, topRegionId) ?? topRegionId
+}
+
+export function clampPointToRegion(x: number, y: number, region: GraphRegion) {
+  const pad = region.kind === 'Package' ? 26 : 38
+  return {
+    x: clamp(x, region.bounds.x + pad, region.bounds.x + region.bounds.width - pad),
+    y: clamp(y, region.bounds.y + pad + 22, region.bounds.y + region.bounds.height - pad),
+  }
 }
 
 export function regionLabel(regionId: string) {
@@ -403,7 +469,8 @@ function positionNodes(nodes: GraphNode[], assignmentByNode: Map<string, string>
     const cellH = Math.max(52, (region.bounds.height - 68) / rows)
     sorted.forEach((node, index) => {
       if (node.pinned) {
-        next.set(node.id, node)
+        const clamped = clampPointToRegion(node.x, node.y, region)
+        next.set(node.id, { ...node, ...clamped, vx: 0, vy: 0 })
         return
       }
       const col = index % cols
@@ -419,6 +486,25 @@ function positionNodes(nodes: GraphNode[], assignmentByNode: Map<string, string>
     })
   }
   return nodes.map(node => next.get(node.id) ?? node)
+}
+
+function positionEndpointsInRouteRows(nodes: GraphNode[], edges: GraphEdge[], regionById: Map<string, GraphRegion>) {
+  const apiRegion = regionById.get('boundary:api')
+  if (!apiRegion) return nodes
+  const endpointIds = new Set(nodes.filter(node => node.type === 'Endpoint').map(node => node.id))
+  if (!endpointIds.size) return nodes
+  const endpointRows = routeRowsForEndpoints(nodes.filter(node => endpointIds.has(node.id)))
+  return nodes.map(node => {
+    const row = endpointRows.get(node.id)
+    if (!row || node.pinned) return node.pinned ? { ...node, ...clampPointToRegion(node.x, node.y, apiRegion), vx: 0, vy: 0 } : node
+    return {
+      ...node,
+      x: apiRegion.bounds.x + apiRegion.bounds.width / 2,
+      y: row.y,
+      vx: 0,
+      vy: 0,
+    }
+  })
 }
 
 function routeSemanticEdges(
@@ -457,8 +543,9 @@ function buildApiLaneMap(edges: GraphEdge[], nodes: GraphNode[], regionById: Map
   const nodeById = new Map(nodes.map(node => [node.id, node]))
   const apiRegion = regionById.get('boundary:api')
   const centerX = apiRegion ? apiRegion.bounds.x + apiRegion.bounds.width / 2 : 0
-  const topY = apiRegion ? apiRegion.bounds.y + 70 : -280
+  const topY = apiRegion ? apiRegion.bounds.y + 78 : -280
   const lanes = new Map<string, { x: number; y: number }>()
+  const endpointRows = routeRowsForEndpoints(nodes.filter(node => node.type === 'Endpoint'))
   const keys = new Set<string>()
   for (const edge of edges) {
     const source = nodeById.get(edge.source)
@@ -471,15 +558,18 @@ function buildApiLaneMap(edges: GraphEdge[], nodes: GraphNode[], regionById: Map
     }
   }
   ;[...keys].sort().forEach((key, index) => {
-    const laneOffset = (index % 5 - 2) * 28
-    lanes.set(key, { x: centerX + laneOffset, y: topY + index * 48 })
+    const [endpointId, edgeType] = key.split('::')
+    const row = endpointRows.get(endpointId)
+    const laneOffset = edgeType === 'ApiCall' ? -82 : edgeType === 'EndpointHandler' ? 82 : (index % 5 - 2) * 24
+    const returnOffset = edgeType === 'DataFlow' ? 18 : 0
+    lanes.set(key, { x: centerX + laneOffset, y: row ? row.y + returnOffset : topY + index * 48 })
   })
   return lanes
 }
 
 function apiLaneKey(edge: GraphEdge, source: GraphNode, target: GraphNode) {
   const endpoint = source.type === 'Endpoint' ? source : target.type === 'Endpoint' ? target : undefined
-  return `${endpoint?.id ?? endpoint?.label ?? edge.label ?? edge.description ?? edge.id}:${edge.type}`
+  return `${endpoint?.id ?? endpoint?.label ?? edge.label ?? edge.description ?? edge.id}::${edge.type}`
 }
 
 function assignment(node: GraphNode, regionId: string, reason: string): LayoutRegionAssignment {
@@ -536,6 +626,42 @@ function dynamicTopBounds(regionId: string, nodeCount: number, packageCount: num
   const width = anchor.width + Math.min(360, Math.max(0, Math.ceil(Math.sqrt(density)) - 4) * 42)
   const height = anchor.height + Math.min(420, Math.max(0, Math.ceil(density / 18) - 1) * 62)
   return { ...anchor, width, height }
+}
+
+function routeRowsForEndpoints(endpoints: GraphNode[]) {
+  const rows = new Map<string, { y: number; routeKey: string }>()
+  const sorted = [...endpoints].sort((a, b) => routeKeyForEndpoint(a).localeCompare(routeKeyForEndpoint(b)))
+  sorted.forEach((endpoint, index) => {
+    rows.set(endpoint.id, { y: -310 + index * 76, routeKey: routeKeyForEndpoint(endpoint) })
+  })
+  return rows
+}
+
+function routeKeyForEndpoint(node: GraphNode) {
+  return node.description ?? node.label ?? node.id
+}
+
+function packageStatsFromRegion(region: GraphRegion, nodes: GraphNode[], edges: GraphEdge[]) {
+  const nodeIds = new Set(region.nodeIds)
+  const packageNodes = nodes.filter(node => nodeIds.has(node.id))
+  const incoming = edges.filter(edge => !nodeIds.has(edge.source) && nodeIds.has(edge.target))
+  const outgoing = edges.filter(edge => nodeIds.has(edge.source) && !nodeIds.has(edge.target))
+  return {
+    fileCount: region.stats.fileCount,
+    symbolCount: region.stats.symbolCount,
+    endpointCount: region.stats.endpointCount,
+    diagnosticCount: region.stats.diagnosticCount,
+    exportedSymbolCount: packageNodes.filter(isExportedNode).length,
+    incomingEdgeCount: incoming.length,
+    outgoingEdgeCount: outgoing.length,
+  }
+}
+
+function isExportedNode(node: GraphNode) {
+  return node.visibility === 'pub'
+    || node.visibility === 'pub(crate)'
+    || node.type === 'Endpoint'
+    || /^[A-Z]/.test(node.label)
 }
 
 function regionStatsFor(nodes: GraphNode[], edges: GraphEdge[], diagnosticsByNode: Map<string, DiagnosticRecord[]>): RegionStats {
@@ -605,6 +731,11 @@ function stableJitter(id: string) {
     x: ((hash & 0xff) / 255 - 0.5) * 18,
     y: (((hash >> 8) & 0xff) / 255 - 0.5) * 14,
   }
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (max < min) return (min + max) / 2
+  return Math.min(max, Math.max(min, value))
 }
 
 function isCrossZoneEdge(type: EdgeType, graphMode?: GraphMode) {

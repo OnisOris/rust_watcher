@@ -118,7 +118,8 @@ export default function App() {
   )
   useEffect(() => {
     if (layoutModeTouchedRef.current) return
-    if (nodes.length > 100) setLayoutMode('SemanticZones')
+    if (nodes.length > 100) setLayoutMode('PackageMap')
+    else if (nodes.length > 0) setLayoutMode('SemanticZones')
   }, [nodes.length])
   const selectedNode = selectedNodeId ? graphNodes.find(n => n.id === selectedNodeId) ?? null : null
   const handleTraceLoaded = useCallback((trace: TraceExplanation) => {
@@ -399,13 +400,13 @@ export default function App() {
             </div>
           )}
 
-          {layoutMode === 'SemanticZones' && graphNodes.length > 100 && !layoutModeTouchedRef.current && (
+          {layoutMode === 'PackageMap' && graphNodes.length > 100 && !layoutModeTouchedRef.current && (
             <div
               className="absolute left-1/2 top-24 z-20 -translate-x-1/2 rounded-xl px-4 py-2"
               style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', boxShadow: 'var(--cc-shadow)', maxWidth: 430, backdropFilter: 'blur(12px)' }}
             >
-              <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>Large project detected. Showing semantic zones.</div>
-              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 3 }}>Switch to Force graph anytime from the layout selector.</div>
+              <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>Showing project map.</div>
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 3 }}>Expand a package or switch to Force graph for raw details.</div>
             </div>
           )}
 

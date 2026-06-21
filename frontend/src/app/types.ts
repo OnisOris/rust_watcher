@@ -130,6 +130,20 @@ export interface GraphNode {
   reachability?: SourceReachability
   reachableFrom?: string[]
   detachedReason?: string
+  underlyingNodeIds?: string[]
+  underlyingEdgeIds?: string[]
+  packagePath?: string
+  regionId?: string
+  layoutGuide?: string
+  packageStats?: {
+    fileCount: number
+    symbolCount: number
+    endpointCount: number
+    diagnosticCount: number
+    exportedSymbolCount: number
+    incomingEdgeCount: number
+    outgoingEdgeCount: number
+  }
   x: number
   y: number
   vx: number

@@ -388,7 +388,7 @@ describe('graph view helpers', () => {
       { id: 'api-a', source: 'app-a', target: 'endpoint-a', type: 'ApiCall' },
       { id: 'api-b', source: 'app-b', target: 'endpoint-b', type: 'ApiCall' },
     ])
-    const lanes = layout.edges.map(edge => edge.routedPath?.[1]?.x)
+    const lanes = layout.edges.map(edge => `${edge.routedPath?.[1]?.x}:${edge.routedPath?.[2]?.y}`)
 
     expect(new Set(lanes).size).toBe(2)
   })
@@ -406,6 +406,28 @@ describe('graph view helpers', () => {
 
     expect(layout.nodes.some(item => item.id.startsWith('package:language:typescript:package:frontend/src'))).toBe(true)
     expect(layout.edges.some(item => item.bundledEdgeIds?.includes('api'))).toBe(true)
+  })
+
+  it('PackageMap exposes architecture cards with package metadata, not low-level functions', () => {
+    const nodes = [
+      { ...node('file', 'rust', 'File'), file: 'src/routes/users.rs' },
+      { ...node('public-handler', 'rust', 'Function'), label: 'UsersHandler', file: 'src/routes/users.rs', visibility: 'pub' as const },
+      { ...node('private-helper', 'rust', 'Function'), file: 'src/routes/users.rs', visibility: 'private' as const },
+      { ...node('endpoint', undefined, 'Endpoint'), label: 'GET /api/users' },
+    ]
+    const layout = buildSemanticLayout(nodes, [
+      { id: 'contains-a', source: 'file', target: 'public-handler', type: 'Contains' },
+      { id: 'contains-b', source: 'file', target: 'private-helper', type: 'Contains' },
+      { id: 'handler', source: 'endpoint', target: 'public-handler', type: 'EndpointHandler' },
+    ], { layoutMode: 'PackageMap' })
+    const routePackage = layout.nodes.find(item => item.packagePath === 'src/routes')!
+
+    expect(layout.nodes.some(item => item.id === 'private-helper')).toBe(false)
+    expect(routePackage.underlyingNodeIds).toEqual(expect.arrayContaining(['file', 'public-handler', 'private-helper']))
+    expect(routePackage.packageStats?.fileCount).toBe(1)
+    expect(routePackage.packageStats?.symbolCount).toBe(2)
+    expect(routePackage.packageStats?.exportedSymbolCount).toBe(1)
+    expect(routePackage.underlyingEdgeIds).toEqual(expect.arrayContaining(['handler']))
   })
 
   it('Neighborhood layout centers the selected node and keeps unrelated nodes hidden', () => {
@@ -427,7 +449,20 @@ describe('graph view helpers', () => {
     expect(byId.get('callee')!.x).toBeGreaterThan(0)
   })
 
-  it('semantic zones preserve pinned node positions', () => {
+  it('Neighborhood layout shows a guide instead of auto-picking a hub without selection', () => {
+    const layout = buildSemanticLayout([
+      node('main', 'rust', 'File'),
+      node('service', 'rust', 'Function'),
+    ], [
+      { id: 'edge', source: 'main', target: 'service', type: 'Calls' },
+    ], { layoutMode: 'Neighborhood', selectedNodeId: null })
+
+    expect(layout.nodes.map(item => item.id)).toEqual(['layout-guide:local-neighborhood'])
+    expect(layout.nodes[0].layoutGuide).toContain('Select a node')
+    expect(layout.edges).toEqual([])
+  })
+
+  it('semantic zones clamp pinned nodes inside their assigned region', () => {
     const nodes = [
       { ...node('app', 'typescript', 'Component'), file: 'src/app/App.tsx', pinned: true, x: 123, y: -456 },
       { ...node('handler', 'rust', 'Function'), file: 'src/main.rs' },
@@ -435,8 +470,12 @@ describe('graph view helpers', () => {
 
     const layout = buildSemanticLayout(nodes, [])
     const pinned = layout.nodes.find(node => node.id === 'app')!
+    const tsRegion = layout.regions.find(region => region.id === 'language:typescript')!
 
-    expect(pinned.x).toBe(123)
-    expect(pinned.y).toBe(-456)
+    expect(pinned.pinned).toBe(true)
+    expect(pinned.x).toBeGreaterThanOrEqual(tsRegion.bounds.x)
+    expect(pinned.x).toBeLessThanOrEqual(tsRegion.bounds.x + tsRegion.bounds.width)
+    expect(pinned.y).toBeGreaterThanOrEqual(tsRegion.bounds.y)
+    expect(pinned.y).toBeLessThanOrEqual(tsRegion.bounds.y + tsRegion.bounds.height)
   })
 })
