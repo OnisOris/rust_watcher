@@ -105,8 +105,8 @@ const SPATIAL_GRID_THRESHOLD = 220
 const SPATIAL_CELL_SIZE = 260
 const SPATIAL_SEARCH_RADIUS = 2
 const SEMANTIC_LAYOUTS = new Set<GraphLayoutMode>(['SemanticZones', 'PackageMap', 'Neighborhood'])
-const PACKAGE_CARD_W = 142
-const PACKAGE_CARD_H = 72
+const PACKAGE_CARD_W = 174
+const PACKAGE_CARD_H = 86
 
 interface PhysicsOptions {
   dampingScale?: number
@@ -160,13 +160,15 @@ function getNodeBounds(items: Array<{ x: number; y: number; type?: NodeType; lab
   if (items.length === 0) return null
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
   for (const n of items) {
-    const size = n.type ? NODE_SIZES[n.type] ?? 16 : 0
+    const cardW = 'packageStats' in n && n.packageStats ? PACKAGE_CARD_W : 'layoutGuide' in n && n.layoutGuide ? 260 : 0
+    const cardH = 'packageStats' in n && n.packageStats ? PACKAGE_CARD_H : 'layoutGuide' in n && n.layoutGuide ? 84 : 0
+    const size = cardW ? 0 : n.type ? NODE_SIZES[n.type] ?? 16 : 0
     const labelWidthPad = Math.min(110, Math.max(34, (n.label ?? '').length * 4))
     const labelHeightPad = n.file ? 42 : 26
-    minX = Math.min(minX, n.x - size - labelWidthPad)
-    maxX = Math.max(maxX, n.x + size + labelWidthPad)
-    minY = Math.min(minY, n.y - size - 10)
-    maxY = Math.max(maxY, n.y + size + labelHeightPad)
+    minX = Math.min(minX, n.x - Math.max(size + labelWidthPad, cardW / 2))
+    maxX = Math.max(maxX, n.x + Math.max(size + labelWidthPad, cardW / 2))
+    minY = Math.min(minY, n.y - Math.max(size + 10, cardH / 2))
+    maxY = Math.max(maxY, n.y + Math.max(size + labelHeightPad, cardH / 2))
   }
   return { minX, maxX, minY, maxY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) }
 }
@@ -846,7 +848,7 @@ function drawRegionBackgrounds(ctx: CanvasRenderingContext2D, regions: GraphRegi
 
 function drawRouteRowGuides(ctx: CanvasRenderingContext2D, region: GraphRegion, theme: CanvasTheme) {
   ctx.save()
-  ctx.font = '9px Inter, sans-serif'
+  ctx.font = '10px Inter, sans-serif'
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
   for (const row of region.routeRows ?? []) {
@@ -858,10 +860,10 @@ function drawRouteRowGuides(ctx: CanvasRenderingContext2D, region: GraphRegion, 
     ctx.moveTo(region.bounds.x + 14, y)
     ctx.lineTo(region.bounds.x + region.bounds.width - 14, y)
     ctx.stroke()
-    ctx.globalAlpha = 0.62
-    ctx.fillStyle = theme.textMuted
+    ctx.globalAlpha = 0.74
+    ctx.fillStyle = theme.text
     const label = row.method && row.path ? `${row.method} ${row.path}` : row.routeKey
-    ctx.fillText(fitLabelLine(ctx, label, Math.max(80, region.bounds.width - 42)), region.bounds.x + 18, y - row.height / 2 + 9)
+    ctx.fillText(fitLabelLine(ctx, label, Math.max(80, region.bounds.width - 42)), region.bounds.x + 18, y - row.height / 2 + 11)
     ctx.globalAlpha = 0.38
     ctx.fillStyle = region.colorToken
     for (const port of [row.ports.leftIn, row.ports.endpointCenter, row.ports.rightOut]) {
@@ -878,9 +880,9 @@ function drawReadingOrderHint(ctx: CanvasRenderingContext2D, regions: GraphRegio
   const allBounds = getNodeBounds(regionFitPoints(regions))
   if (!allBounds) return
   ctx.save()
-  ctx.globalAlpha = 0.72
-  ctx.fillStyle = theme.textMuted
-  ctx.font = '11px Inter, sans-serif'
+  ctx.globalAlpha = 0.86
+  ctx.fillStyle = theme.text
+  ctx.font = '700 11px Inter, sans-serif'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
   const y = allBounds.minY - 28
@@ -1095,20 +1097,22 @@ function drawPackageCard(ctx: CanvasRenderingContext2D, n: GraphNode, color: str
   ctx.fill()
   ctx.fillStyle = theme.text
   ctx.globalAlpha = alpha
-  ctx.font = `700 ${n.layoutGuide ? 13 : 11}px Inter, sans-serif`
+  ctx.font = `700 ${n.layoutGuide ? 13 : 12}px Inter, sans-serif`
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
-  ctx.fillText(fitLabelLine(ctx, n.label, w - 24), n.x - w / 2 + 12, n.y - h / 2 + 18)
+  ctx.fillText(fitLabelLine(ctx, n.label, w - 24), n.x - w / 2 + 12, n.y - h / 2 + 19)
   ctx.fillStyle = theme.textMuted
-  ctx.font = '9px Inter, sans-serif'
+  ctx.font = '10px Inter, sans-serif'
   if (n.layoutGuide) {
     ctx.fillText(n.layoutGuide, n.x - w / 2 + 12, n.y - h / 2 + 42)
   } else {
     const stats = n.packageStats
     const first = `${stats?.fileCount ?? 0} files · ${stats?.symbolCount ?? 0} symbols`
-    const second = `${stats?.incomingEdgeCount ?? 0} in · ${stats?.outgoingEdgeCount ?? 0} out${stats?.diagnosticCount ? ` · ${stats.diagnosticCount} diag` : ''}`
-    ctx.fillText(first, n.x - w / 2 + 12, n.y - h / 2 + 38)
-    ctx.fillText(second, n.x - w / 2 + 12, n.y - h / 2 + 52)
+    const second = `${stats?.endpointCount ?? 0} endpoints${stats?.diagnosticCount ? ` · ${stats.diagnosticCount} diag` : ''}`
+    const third = `${stats?.incomingEdgeCount ?? 0} in · ${stats?.outgoingEdgeCount ?? 0} out`
+    ctx.fillText(first, n.x - w / 2 + 12, n.y - h / 2 + 40)
+    ctx.fillText(second, n.x - w / 2 + 12, n.y - h / 2 + 55)
+    ctx.fillText(third, n.x - w / 2 + 12, n.y - h / 2 + 70)
   }
   ctx.restore()
 }
@@ -1392,11 +1396,11 @@ function drawMiniMap(ctx: CanvasRenderingContext2D, nodes: GraphNode[], pan: { x
   ctx.restore()
 }
 
-function drawCanvasLegend(ctx: CanvasRenderingContext2D, canvasW: number, theme: CanvasTheme) {
-  const x = Math.max(300, canvasW - 570)
-  const y = 14
-  const w = 385
-  const h = 72
+function drawCanvasLegend(ctx: CanvasRenderingContext2D, canvasH: number, theme: CanvasTheme) {
+  const x = 18
+  const y = Math.max(96, canvasH - 176)
+  const w = 302
+  const h = 78
   const regions = [
     ['TypeScript', '#14B8A6'],
     ['QML', '#8B5CF6'],
@@ -1426,28 +1430,29 @@ function drawCanvasLegend(ctx: CanvasRenderingContext2D, canvasW: number, theme:
   ctx.fillText('Legend', x + 12, y + 10)
   ctx.font = '9px Inter, sans-serif'
   regions.forEach(([label, color], index) => {
-    const px = x + 12 + index * 72
+    const px = x + 12 + (index % 3) * 92
+    const py = y + 29 + Math.floor(index / 3) * 18
     ctx.fillStyle = color
     ctx.globalAlpha = 0.85
     ctx.beginPath()
-    ctx.roundRect(px, y + 29, 11, 7, 2)
+    ctx.roundRect(px, py + 2, 11, 7, 2)
     ctx.fill()
     ctx.globalAlpha = 0.82
     ctx.fillStyle = theme.textMuted
-    ctx.fillText(label, px + 15, y + 27)
+    ctx.fillText(label, px + 15, py)
   })
   edges.forEach(([label, color], index) => {
-    const px = x + 12 + index * 88
+    const px = x + 12 + index * 72
     ctx.strokeStyle = color
     ctx.globalAlpha = 0.88
     ctx.lineWidth = 2
     ctx.beginPath()
-    ctx.moveTo(px, y + 55)
-    ctx.lineTo(px + 18, y + 55)
+    ctx.moveTo(px, y + 64)
+    ctx.lineTo(px + 16, y + 64)
     ctx.stroke()
     ctx.fillStyle = theme.textMuted
     ctx.font = '9px Inter, sans-serif'
-    ctx.fillText(label, px + 24, y + 50)
+    ctx.fillText(label, px + 21, y + 59)
   })
   ctx.restore()
 }
@@ -1828,13 +1833,15 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         if (n.description?.startsWith('Collapsed:') && (n.connections ?? 0) > 0) {
           drawGroupCountBadge(ctx, n, n.connections ?? 0, canvasColors)
         }
-        labelCandidates.push({
-          node: n,
-          isSelected,
-          isHovered,
-          degree: degree.get(n.id) ?? 0,
-          priority: labelPriority(n, degree.get(n.id) ?? 0, isSelected, isHovered),
-        })
+        if (!n.packageStats && !n.layoutGuide) {
+          labelCandidates.push({
+            node: n,
+            isSelected,
+            isHovered,
+            degree: degree.get(n.id) ?? 0,
+            priority: labelPriority(n, degree.get(n.id) ?? 0, isSelected, isHovered),
+          })
+        }
 
         // pin indicator
         if (n.pinned) {
@@ -1854,7 +1861,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       // minimap (screen-space)
       drawMiniMap(ctx, nodesRef.current.filter(n => visibleIds.has(n.id)), panRef.current, zoomRef.current, W, H, canvasColors)
       if (semanticLayoutActive) {
-        drawCanvasLegend(ctx, W, canvasColors)
+        drawCanvasLegend(ctx, H, canvasColors)
       }
 
       // "You are here" breadcrumb for selected

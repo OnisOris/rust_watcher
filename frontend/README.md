@@ -28,6 +28,29 @@ pnpm build
 pnpm test:run
 ```
 
+## UI screenshot review
+
+Use the screenshot workflow before merging graph UI/layout changes:
+
+```bash
+pnpm screenshots
+```
+
+The script builds the frontend, starts the Rust backend against `./example`, opens the app with Playwright Chromium, and captures the graph matrix into:
+
+```text
+tmp/ui-review/after/
+```
+
+For before/after comparisons:
+
+```bash
+UI_REVIEW_PHASE=before pnpm screenshots
+UI_REVIEW_PHASE=after pnpm screenshots
+```
+
+Review at least Package map, Semantic zones, and Local neighborhood across Macro, Meso, Micro, Call Flow, Data Flow, and Types & Impl at 1600x900 and 1920x1080. Notes and browser console output are written next to the screenshots.
+
 ## Optional TypeScript semantic analysis
 
 The backend can analyze TypeScript and JavaScript with the parser alone, so the graph still works without extra tools.

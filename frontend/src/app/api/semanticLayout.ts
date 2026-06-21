@@ -39,7 +39,7 @@ const REGION_LABELS: Record<string, { label: string; language?: string; color: s
 const REGION_ANCHORS: Record<string, { x: number; y: number; width: number; height: number }> = {
   'language:typescript': { x: -900, y: -360, width: 520, height: 360 },
   'language:qml': { x: -900, y: 150, width: 520, height: 330 },
-  'boundary:api': { x: -125, y: -380, width: 250, height: 860 },
+  'boundary:api': { x: -125, y: -210, width: 250, height: 420 },
   'language:rust': { x: 360, y: -380, width: 620, height: 420 },
   'language:python': { x: 360, y: 160, width: 620, height: 360 },
   'external:external': { x: 1130, y: -250, width: 360, height: 300 },
@@ -703,8 +703,8 @@ function packageRegion(id: string, parent: GraphRegion, index: number, total: nu
 function dynamicTopBounds(regionId: string, nodeCount: number, packageCount: number) {
   const anchor = REGION_ANCHORS[regionId] ?? REGION_ANCHORS['external:external']
   if (regionId === 'boundary:api') {
-    const rowCapacityHeight = 92 + Math.max(1, nodeCount) * 66
-    return { ...anchor, height: Math.max(anchor.height, rowCapacityHeight) }
+    const height = clamp(118 + Math.max(1, nodeCount) * 76, 250, 620)
+    return { ...anchor, y: -height / 2, height }
   }
   const density = Math.max(nodeCount, packageCount * 6)
   const width = anchor.width + Math.min(360, Math.max(0, Math.ceil(Math.sqrt(density)) - 4) * 42)
@@ -716,13 +716,14 @@ function routeRowsForEndpoints(endpoints: GraphNode[], apiRegion?: GraphRegion) 
   const rows = new Map<string, RouteRow>()
   if (!apiRegion || !endpoints.length) return rows
   const sorted = [...endpoints].sort((a, b) => routeKeyForEndpoint(a).localeCompare(routeKeyForEndpoint(b)))
-  const topPad = 64
-  const bottomPad = 36
+  const topPad = 54
+  const bottomPad = 42
   const usableHeight = Math.max(80, apiRegion.bounds.height - topPad - bottomPad)
   const idealStep = 76
   const step = sorted.length <= 1 ? 0 : Math.min(idealStep, usableHeight / Math.max(1, sorted.length - 1))
   const rowHeight = Math.max(42, Math.min(62, step ? step - 12 : usableHeight))
-  const startY = apiRegion.bounds.y + topPad
+  const groupHeight = sorted.length <= 1 ? 0 : step * (sorted.length - 1)
+  const startY = apiRegion.bounds.y + apiRegion.bounds.height / 2 - groupHeight / 2
   sorted.forEach((endpoint, index) => {
     const y = sorted.length <= 1
       ? apiRegion.bounds.y + apiRegion.bounds.height / 2
