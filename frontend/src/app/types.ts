@@ -183,6 +183,32 @@ export interface GraphBounds {
   height: number
 }
 
+export interface GraphPoint {
+  x: number
+  y: number
+}
+
+export interface RouteRowPorts {
+  leftIn: GraphPoint
+  leftOut: GraphPoint
+  endpointCenter: GraphPoint
+  rightIn: GraphPoint
+  rightOut: GraphPoint
+  dataIn: GraphPoint
+  dataOut: GraphPoint
+  returnOut: GraphPoint
+}
+
+export interface RouteRow {
+  endpointId: string
+  routeKey: string
+  method?: string
+  path?: string
+  y: number
+  height: number
+  ports: RouteRowPorts
+}
+
 export interface RegionStats {
   fileCount: number
   symbolCount: number
@@ -202,6 +228,7 @@ export interface GraphRegion {
   nodeIds: string[]
   childRegionIds: string[]
   stats: RegionStats
+  routeRows?: RouteRow[]
 }
 
 export interface LayoutRegionAssignment {

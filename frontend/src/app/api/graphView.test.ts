@@ -9,7 +9,7 @@ import {
   buildRouteFlowGraph,
   bundleEdges,
 } from './graphView'
-import { assignRegions, buildSemanticLayout, inferNodeLanguage, packageRegionId, semanticNodeSubtitle } from './semanticLayout'
+import { assignRegions, buildRouteRowsForTest, buildSemanticLayout, inferNodeLanguage, packageRegionId, semanticNodeSubtitle } from './semanticLayout'
 import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphNode, LanguageFilter, NodeType } from '../types'
 
 const allNodeTypes = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
@@ -313,7 +313,7 @@ describe('graph view helpers', () => {
     expect(byId.get('endpoint')!.x).toBeLessThan(byId.get('handler')!.x)
     expect(secondById.get('app')!.x).toBe(byId.get('app')!.x)
     expect(first.regions.some(region => region.id === 'boundary:api')).toBe(true)
-    expect(first.edges.find(edge => edge.id === 'api')?.routedPath?.length).toBeGreaterThanOrEqual(4)
+    expect(first.edges.find(edge => edge.id === 'api')?.routedPath?.length).toBeGreaterThanOrEqual(3)
   })
 
   it('semantic zones infer language from file extension without confusing Rust module names', () => {
@@ -391,6 +391,83 @@ describe('graph view helpers', () => {
     const lanes = layout.edges.map(edge => `${edge.routedPath?.[1]?.x}:${edge.routedPath?.[2]?.y}`)
 
     expect(new Set(lanes).size).toBe(2)
+  })
+
+  it('API Boundary route rows stay inside bounds with stable route order', () => {
+    const endpoints = [
+      { ...node('post', undefined, 'Endpoint'), label: 'POST /api/person/:name' },
+      { ...node('get', undefined, 'Endpoint'), label: 'GET /api/person' },
+    ]
+    const apiRegion = {
+      id: 'boundary:api',
+      label: 'API Boundary',
+      kind: 'Boundary' as const,
+      bounds: { x: -100, y: -200, width: 240, height: 360 },
+      colorToken: '#E11D48',
+      nodeIds: endpoints.map(item => item.id),
+      childRegionIds: [],
+      stats: { fileCount: 0, symbolCount: 0, endpointCount: 2, diagnosticCount: 0, incomingEdgeCount: 0, outgoingEdgeCount: 0 },
+    }
+    const rows = buildRouteRowsForTest(endpoints, apiRegion)
+
+    expect(rows.map(row => row.endpointId)).toEqual(['get', 'post'])
+    expect(rows[0].y).toBeLessThan(rows[1].y)
+    for (const row of rows) {
+      expect(row.y).toBeGreaterThanOrEqual(apiRegion.bounds.y)
+      expect(row.y).toBeLessThanOrEqual(apiRegion.bounds.y + apiRegion.bounds.height)
+      for (const point of Object.values(row.ports)) {
+        expect(point.y).toBeGreaterThanOrEqual(apiRegion.bounds.y - 20)
+        expect(point.y).toBeLessThanOrEqual(apiRegion.bounds.y + apiRegion.bounds.height + 20)
+      }
+    }
+  })
+
+  it('API route edges use row ports and do not overshoot the boundary', () => {
+    const nodes = [
+      { ...node('ui', 'typescript', 'Component'), file: 'frontend/src/App.tsx' },
+      { ...node('endpoint', undefined, 'Endpoint'), label: 'GET /api/person' },
+      { ...node('handler', 'rust', 'Function'), file: 'src/routes/person.rs' },
+      { ...node('consumer', 'typescript', 'Hook'), file: 'frontend/src/usePerson.ts' },
+    ]
+    const layout = buildSemanticLayout(nodes, [
+      { id: 'api', source: 'ui', target: 'endpoint', type: 'ApiCall' },
+      { id: 'handler', source: 'endpoint', target: 'handler', type: 'EndpointHandler' },
+      { id: 'response', source: 'endpoint', target: 'consumer', type: 'DataFlow', dataFlowKind: 'ApiResponse' },
+    ])
+    const apiRegion = layout.regions.find(region => region.id === 'boundary:api')!
+    const row = apiRegion.routeRows?.find(item => item.endpointId === 'endpoint')!
+    const api = layout.edges.find(edge => edge.id === 'api')!
+    const handler = layout.edges.find(edge => edge.id === 'handler')!
+    const response = layout.edges.find(edge => edge.id === 'response')!
+
+    expect(api.routedPath?.[1]).toEqual(row.ports.leftIn)
+    expect(api.routedPath?.at(-1)).toEqual(row.ports.endpointCenter)
+    expect(handler.routedPath?.[0]).toEqual(row.ports.endpointCenter)
+    expect(handler.routedPath?.[1]).toEqual(row.ports.rightOut)
+    expect(response.routedPath?.[1]).toEqual(row.ports.returnOut)
+    for (const edge of [api, handler, response]) {
+      for (const point of edge.routedPath ?? []) {
+        if (point.x >= apiRegion.bounds.x - 30 && point.x <= apiRegion.bounds.x + apiRegion.bounds.width + 30) {
+          expect(point.y).toBeGreaterThanOrEqual(apiRegion.bounds.y - 20)
+          expect(point.y).toBeLessThanOrEqual(apiRegion.bounds.y + apiRegion.bounds.height + 20)
+        }
+      }
+    }
+  })
+
+  it('parallel API edges on the same route row get readable offsets', () => {
+    const nodes = [
+      { ...node('ui-a', 'typescript', 'Component'), file: 'frontend/src/A.tsx' },
+      { ...node('ui-b', 'qml', 'Handler'), file: 'qml/Main.qml' },
+      { ...node('endpoint', undefined, 'Endpoint'), label: 'GET /api/person' },
+    ]
+    const layout = buildSemanticLayout(nodes, [
+      { id: 'api-a', source: 'ui-a', target: 'endpoint', type: 'ApiCall' },
+      { id: 'api-b', source: 'ui-b', target: 'endpoint', type: 'ApiCall' },
+    ])
+    const paths = layout.edges.map(edge => edge.routedPath?.map(point => `${Math.round(point.x)}:${Math.round(point.y)}`).join('|'))
+
+    expect(new Set(paths).size).toBe(2)
   })
 
   it('PackageMap collapses symbols into package nodes and preserves bundled edge ids', () => {

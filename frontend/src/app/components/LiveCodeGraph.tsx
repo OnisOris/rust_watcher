@@ -837,8 +837,40 @@ function drawRegionBackgrounds(ctx: CanvasRenderingContext2D, regions: GraphRegi
     ctx.font = '10px Inter, sans-serif'
     const stats = `${region.stats.fileCount} files · ${region.stats.symbolCount} symbols${region.stats.endpointCount ? ` · ${region.stats.endpointCount} endpoints` : ''}${region.stats.diagnosticCount ? ` · ${region.stats.diagnosticCount} diagnostics` : ''}`
     ctx.fillText(stats, x + 14, y + 30)
+    if (region.kind === 'Boundary' && region.routeRows?.length) {
+      drawRouteRowGuides(ctx, region, theme)
+    }
     ctx.restore()
   }
+}
+
+function drawRouteRowGuides(ctx: CanvasRenderingContext2D, region: GraphRegion, theme: CanvasTheme) {
+  ctx.save()
+  ctx.font = '9px Inter, sans-serif'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  for (const row of region.routeRows ?? []) {
+    const y = row.y
+    ctx.globalAlpha = 0.12
+    ctx.strokeStyle = region.colorToken
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(region.bounds.x + 14, y)
+    ctx.lineTo(region.bounds.x + region.bounds.width - 14, y)
+    ctx.stroke()
+    ctx.globalAlpha = 0.62
+    ctx.fillStyle = theme.textMuted
+    const label = row.method && row.path ? `${row.method} ${row.path}` : row.routeKey
+    ctx.fillText(fitLabelLine(ctx, label, Math.max(80, region.bounds.width - 42)), region.bounds.x + 18, y - row.height / 2 + 9)
+    ctx.globalAlpha = 0.38
+    ctx.fillStyle = region.colorToken
+    for (const port of [row.ports.leftIn, row.ports.endpointCenter, row.ports.rightOut]) {
+      ctx.beginPath()
+      ctx.arc(port.x, port.y, 2.4, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+  ctx.restore()
 }
 
 function drawReadingOrderHint(ctx: CanvasRenderingContext2D, regions: GraphRegion[], theme: CanvasTheme) {

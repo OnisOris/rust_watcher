@@ -6,7 +6,10 @@ import type {
   GraphNode,
   GraphRegion,
   GraphLayoutMode,
+  GraphPoint,
   LayoutRegionAssignment,
+  RouteRow,
+  RouteRowPorts,
   RegionStats,
   SemanticLayoutResult,
 } from '../types'
@@ -97,7 +100,8 @@ export function buildSemanticZonesLayout(
     const parentRegionId = topAssignmentByNode.get(node.id) ?? 'external:external'
     packageAssignmentByNode.set(node.id, packageRegionId(node, parentRegionId) ?? parentRegionId)
   }
-  const positionedNodes = positionEndpointsInRouteRows(positionNodes(nodes, packageAssignmentByNode, regionById), edges, regionById)
+  attachRouteRows(regions, nodes)
+  const positionedNodes = positionEndpointsInRouteRows(positionNodes(nodes, packageAssignmentByNode, regionById), regionById)
   const routedEdges = routeSemanticEdges(edges, positionedNodes, topAssignmentByNode, regionById, options.graphMode)
 
   return { nodes: positionedNodes, edges: routedEdges, regions, assignments }
@@ -488,19 +492,19 @@ function positionNodes(nodes: GraphNode[], assignmentByNode: Map<string, string>
   return nodes.map(node => next.get(node.id) ?? node)
 }
 
-function positionEndpointsInRouteRows(nodes: GraphNode[], edges: GraphEdge[], regionById: Map<string, GraphRegion>) {
+function positionEndpointsInRouteRows(nodes: GraphNode[], regionById: Map<string, GraphRegion>) {
   const apiRegion = regionById.get('boundary:api')
   if (!apiRegion) return nodes
   const endpointIds = new Set(nodes.filter(node => node.type === 'Endpoint').map(node => node.id))
   if (!endpointIds.size) return nodes
-  const endpointRows = routeRowsForEndpoints(nodes.filter(node => endpointIds.has(node.id)))
+  const endpointRows = routeRowsForEndpoints(nodes.filter(node => endpointIds.has(node.id)), apiRegion)
   return nodes.map(node => {
     const row = endpointRows.get(node.id)
     if (!row || node.pinned) return node.pinned ? { ...node, ...clampPointToRegion(node.x, node.y, apiRegion), vx: 0, vy: 0 } : node
     return {
       ...node,
-      x: apiRegion.bounds.x + apiRegion.bounds.width / 2,
-      y: row.y,
+      x: row.ports.endpointCenter.x,
+      y: row.ports.endpointCenter.y,
       vx: 0,
       vy: 0,
     }
@@ -515,7 +519,8 @@ function routeSemanticEdges(
   graphMode?: GraphMode,
 ) {
   const nodeById = new Map(nodes.map(node => [node.id, node]))
-  const apiLaneByKey = buildApiLaneMap(edges, nodes, regionById)
+  const routeRows = routeRowsForEndpoints(nodes.filter(node => node.type === 'Endpoint'), regionById.get('boundary:api'))
+  const routeEdgeOffsets = buildRouteEdgeOffsets(edges, nodeById)
   return edges.map(edge => {
     const source = nodeById.get(edge.source)
     const target = nodeById.get(edge.target)
@@ -524,52 +529,127 @@ function routeSemanticEdges(
     const targetRegion = assignmentByNode.get(edge.target)
     if (!sourceRegion || !targetRegion || sourceRegion === targetRegion) return { ...edge, routedPath: undefined }
     if (!isCrossZoneEdge(edge.type, graphMode)) return { ...edge, routedPath: undefined }
-    const apiLane = apiLaneByKey.get(apiLaneKey(edge, source, target))
-    const laneX = apiLane?.x ?? (source.x + target.x) / 2
-    const laneY = apiLane?.y
-    const midA = { x: laneX, y: source.y }
-    const midB = laneY === undefined ? { x: laneX, y: target.y } : { x: laneX, y: laneY }
-    const midC = laneY === undefined ? null : { x: laneX, y: target.y }
+    const routePath = routeAwareEdgePath(edge, source, target, routeRows, routeEdgeOffsets.get(routeEdgeKey(edge, source, target)) ?? 0)
+    if (routePath) return { ...edge, routedPath: routePath }
+    const laneX = (source.x + target.x) / 2
     return {
       ...edge,
-      routedPath: midC
-        ? [{ x: source.x, y: source.y }, midA, midB, midC, { x: target.x, y: target.y }]
-        : [{ x: source.x, y: source.y }, midA, midB, { x: target.x, y: target.y }],
+      routedPath: [
+        getNodePort(source, 'right'),
+        { x: laneX, y: source.y },
+        { x: laneX, y: target.y },
+        getNodePort(target, 'left'),
+      ],
     }
   })
 }
 
-function buildApiLaneMap(edges: GraphEdge[], nodes: GraphNode[], regionById: Map<string, GraphRegion>) {
-  const nodeById = new Map(nodes.map(node => [node.id, node]))
-  const apiRegion = regionById.get('boundary:api')
-  const centerX = apiRegion ? apiRegion.bounds.x + apiRegion.bounds.width / 2 : 0
-  const topY = apiRegion ? apiRegion.bounds.y + 78 : -280
-  const lanes = new Map<string, { x: number; y: number }>()
-  const endpointRows = routeRowsForEndpoints(nodes.filter(node => node.type === 'Endpoint'))
-  const keys = new Set<string>()
+export function buildRouteRowsForTest(endpoints: GraphNode[], apiRegion: GraphRegion) {
+  return [...routeRowsForEndpoints(endpoints, apiRegion).values()]
+}
+
+function attachRouteRows(regions: GraphRegion[], nodes: GraphNode[]) {
+  const apiRegion = regions.find(region => region.id === 'boundary:api')
+  if (!apiRegion) return
+  apiRegion.routeRows = [...routeRowsForEndpoints(nodes.filter(node => node.type === 'Endpoint'), apiRegion).values()]
+}
+
+function routeAwareEdgePath(
+  edge: GraphEdge,
+  source: GraphNode,
+  target: GraphNode,
+  rows: Map<string, RouteRow>,
+  parallelOffset: number,
+): GraphPoint[] | null {
+  const endpoint = source.type === 'Endpoint' ? source : target.type === 'Endpoint' ? target : null
+  if (!endpoint) return null
+  const row = rows.get(endpoint.id)
+  if (!row) return null
+  const offset = { x: 0, y: parallelOffset }
+  const p = row.ports
+  if (edge.type === 'ApiCall') {
+    return compactPath([
+      getNodePort(source, 'right'),
+      addPoint(p.leftIn, offset),
+      addPoint(p.endpointCenter, offset),
+    ])
+  }
+  if (edge.type === 'EndpointHandler') {
+    return compactPath([
+      addPoint(p.endpointCenter, offset),
+      addPoint(p.rightOut, offset),
+      getNodePort(target, 'left'),
+    ])
+  }
+  if (edge.type === 'DataFlow') {
+    if (target.type === 'Endpoint') {
+      return compactPath([
+        getNodePort(source, 'right'),
+        addPoint(p.dataIn, offset),
+        addPoint(p.endpointCenter, offset),
+      ])
+    }
+    if (source.type === 'Endpoint') {
+      return compactPath([
+        addPoint(p.endpointCenter, offset),
+        addPoint(p.returnOut, offset),
+        getNodePort(target, inferNodeLanguage(target) === 'typescript' || inferNodeLanguage(target) === 'qml' ? 'right' : 'left'),
+      ])
+    }
+  }
+  return null
+}
+
+function getNodePort(node: GraphNode, direction: 'left' | 'right' | 'top' | 'bottom' | 'center'): GraphPoint {
+  const cardW = node.layoutGuide ? 260 : node.packageStats ? 142 : 0
+  const cardH = node.layoutGuide ? 84 : node.packageStats ? 72 : 0
+  const radius = node.packageStats || node.layoutGuide ? 0 : node.type === 'Endpoint' ? 22 : 18
+  const halfW = cardW ? cardW / 2 : radius
+  const halfH = cardH ? cardH / 2 : radius
+  if (direction === 'left') return { x: node.x - halfW, y: node.y }
+  if (direction === 'right') return { x: node.x + halfW, y: node.y }
+  if (direction === 'top') return { x: node.x, y: node.y - halfH }
+  if (direction === 'bottom') return { x: node.x, y: node.y + halfH }
+  return { x: node.x, y: node.y }
+}
+
+function buildRouteEdgeOffsets(edges: GraphEdge[], nodeById: Map<string, GraphNode>) {
+  const groups = new Map<string, GraphEdge[]>()
   for (const edge of edges) {
     const source = nodeById.get(edge.source)
     const target = nodeById.get(edge.target)
     if (!source || !target) continue
-    if (edge.type === 'ApiCall' || edge.type === 'EndpointHandler' || edge.type === 'DataFlow') {
-      if (source.type === 'Endpoint' || target.type === 'Endpoint' || edge.label?.startsWith('/api') || edge.description?.includes('/api')) {
-        keys.add(apiLaneKey(edge, source, target))
-      }
-    }
+    const endpoint = source.type === 'Endpoint' ? source : target.type === 'Endpoint' ? target : null
+    if (!endpoint || (edge.type !== 'ApiCall' && edge.type !== 'EndpointHandler' && edge.type !== 'DataFlow')) continue
+    const key = `${endpoint.id}:${edge.type}:${source.id === endpoint.id ? 'out' : 'in'}`
+    const group = groups.get(key) ?? []
+    group.push(edge)
+    groups.set(key, group)
   }
-  ;[...keys].sort().forEach((key, index) => {
-    const [endpointId, edgeType] = key.split('::')
-    const row = endpointRows.get(endpointId)
-    const laneOffset = edgeType === 'ApiCall' ? -82 : edgeType === 'EndpointHandler' ? 82 : (index % 5 - 2) * 24
-    const returnOffset = edgeType === 'DataFlow' ? 18 : 0
-    lanes.set(key, { x: centerX + laneOffset, y: row ? row.y + returnOffset : topY + index * 48 })
-  })
-  return lanes
+  const offsets = new Map<string, number>()
+  for (const group of groups.values()) {
+    const sorted = [...group].sort((a, b) => a.id.localeCompare(b.id))
+    sorted.forEach((edge, index) => {
+      const center = (sorted.length - 1) / 2
+      const offset = sorted.length > 1 ? (index - center) * 7 : 0
+      const source = nodeById.get(edge.source)!
+      const target = nodeById.get(edge.target)!
+      offsets.set(routeEdgeKey(edge, source, target), offset)
+    })
+  }
+  return offsets
 }
 
-function apiLaneKey(edge: GraphEdge, source: GraphNode, target: GraphNode) {
-  const endpoint = source.type === 'Endpoint' ? source : target.type === 'Endpoint' ? target : undefined
-  return `${endpoint?.id ?? endpoint?.label ?? edge.label ?? edge.description ?? edge.id}::${edge.type}`
+function routeEdgeKey(edge: GraphEdge, source: GraphNode, target: GraphNode) {
+  return `${edge.id}:${source.id}->${target.id}`
+}
+
+function addPoint(point: GraphPoint, offset: GraphPoint) {
+  return { x: point.x + offset.x, y: point.y + offset.y }
+}
+
+function compactPath(points: GraphPoint[]) {
+  return points.filter((point, index) => index === 0 || point.x !== points[index - 1].x || point.y !== points[index - 1].y)
 }
 
 function assignment(node: GraphNode, regionId: string, reason: string): LayoutRegionAssignment {
@@ -622,19 +702,69 @@ function packageRegion(id: string, parent: GraphRegion, index: number, total: nu
 
 function dynamicTopBounds(regionId: string, nodeCount: number, packageCount: number) {
   const anchor = REGION_ANCHORS[regionId] ?? REGION_ANCHORS['external:external']
+  if (regionId === 'boundary:api') {
+    const rowCapacityHeight = 92 + Math.max(1, nodeCount) * 66
+    return { ...anchor, height: Math.max(anchor.height, rowCapacityHeight) }
+  }
   const density = Math.max(nodeCount, packageCount * 6)
   const width = anchor.width + Math.min(360, Math.max(0, Math.ceil(Math.sqrt(density)) - 4) * 42)
   const height = anchor.height + Math.min(420, Math.max(0, Math.ceil(density / 18) - 1) * 62)
   return { ...anchor, width, height }
 }
 
-function routeRowsForEndpoints(endpoints: GraphNode[]) {
-  const rows = new Map<string, { y: number; routeKey: string }>()
+function routeRowsForEndpoints(endpoints: GraphNode[], apiRegion?: GraphRegion) {
+  const rows = new Map<string, RouteRow>()
+  if (!apiRegion || !endpoints.length) return rows
   const sorted = [...endpoints].sort((a, b) => routeKeyForEndpoint(a).localeCompare(routeKeyForEndpoint(b)))
+  const topPad = 64
+  const bottomPad = 36
+  const usableHeight = Math.max(80, apiRegion.bounds.height - topPad - bottomPad)
+  const idealStep = 76
+  const step = sorted.length <= 1 ? 0 : Math.min(idealStep, usableHeight / Math.max(1, sorted.length - 1))
+  const rowHeight = Math.max(42, Math.min(62, step ? step - 12 : usableHeight))
+  const startY = apiRegion.bounds.y + topPad
   sorted.forEach((endpoint, index) => {
-    rows.set(endpoint.id, { y: -310 + index * 76, routeKey: routeKeyForEndpoint(endpoint) })
+    const y = sorted.length <= 1
+      ? apiRegion.bounds.y + apiRegion.bounds.height / 2
+      : startY + index * step
+    const routeKey = routeKeyForEndpoint(endpoint)
+    rows.set(endpoint.id, {
+      endpointId: endpoint.id,
+      routeKey,
+      ...routeParts(routeKey),
+      y,
+      height: rowHeight,
+      ports: routeRowPorts(apiRegion, y, rowHeight),
+    })
   })
   return rows
+}
+
+function routeRowPorts(apiRegion: GraphRegion, y: number, rowHeight: number): RouteRowPorts {
+  const left = apiRegion.bounds.x
+  const right = apiRegion.bounds.x + apiRegion.bounds.width
+  const centerX = apiRegion.bounds.x + apiRegion.bounds.width / 2
+  const topLane = y - rowHeight * 0.22
+  const bottomLane = y + rowHeight * 0.24
+  return {
+    leftIn: { x: left + 24, y },
+    leftOut: { x: left + 48, y },
+    endpointCenter: { x: centerX, y },
+    rightIn: { x: right - 48, y },
+    rightOut: { x: right - 24, y },
+    dataIn: { x: left + 72, y: topLane },
+    dataOut: { x: right - 72, y: topLane },
+    returnOut: { x: left + 72, y: bottomLane },
+  }
+}
+
+function routeParts(routeKey: string) {
+  const [method, ...pathParts] = routeKey.split(/\s+/)
+  const path = pathParts.join(' ')
+  if (/^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)$/i.test(method) && path) {
+    return { method: method.toUpperCase(), path }
+  }
+  return {}
 }
 
 function routeKeyForEndpoint(node: GraphNode) {
