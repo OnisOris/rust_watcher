@@ -13,7 +13,6 @@ import {
   applyCollapsedGroups,
   applyGraphFilters,
   applyGraphMode,
-  buildNeighborhoodGraph,
   buildCollapsedGroupStats,
   buildRouteFlowGraph,
   bundleEdges,
@@ -22,7 +21,7 @@ import { applySavedViewState, normalizeSavedView, serializableFilters } from './
 import { deriveTraceHighlights, type TraceHighlights } from './api/trace'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import { formatUpdatedLabel } from './utils/time'
-import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, GraphLayoutMode, LanguageFilter, SavedView, TraceExplanation } from './types'
+import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView, TraceExplanation } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
 const ALL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'Imports', 'Uses', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Implements', 'TypeReference', 'DataFlow', 'ModDeclaration', 'ExternalDependency'])
@@ -75,9 +74,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarityOpen, setClarityOpen] = useState(false)
   const [graphLens, setGraphLens] = useState<GraphLens>('all')
-  const [neighborhoodNodeId, setNeighborhoodNodeId] = useState<string | null>(null)
-  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>('Force')
-  const layoutModeTouchedRef = useRef(false)
   const [labelMode, setLabelMode] = useState<GraphLabelMode>('auto')
   const [layoutSettings, setLayoutSettings] = useState<GraphLayoutSettings>(DEFAULT_GRAPH_LAYOUT_SETTINGS)
   const [recenterKey, setRecenterKey] = useState(0)
@@ -105,7 +101,6 @@ export default function App() {
     openInEditor,
     saveNodeLayout,
     search,
-    refreshSnapshot,
   } = useBackendGraph(mode)
   const savedLayoutRef = useRef<Map<string, string>>(new Map())
 
@@ -116,11 +111,6 @@ export default function App() {
     })),
     [nodes, pinnedNodeIds],
   )
-  useEffect(() => {
-    if (layoutModeTouchedRef.current) return
-    if (nodes.length > 100) setLayoutMode('PackageMap')
-    else if (nodes.length > 0) setLayoutMode('SemanticZones')
-  }, [nodes.length])
   const selectedNode = selectedNodeId ? graphNodes.find(n => n.id === selectedNodeId) ?? null : null
   const handleTraceLoaded = useCallback((trace: TraceExplanation) => {
     setTraceHighlights(deriveTraceHighlights(trace))
@@ -138,12 +128,9 @@ export default function App() {
       const lensGraph = graphLens === 'route'
         ? buildRouteFlowGraph(modeGraph)
         : applyGraphLens(modeGraph.nodes, modeGraph.edges, graphLens)
-      const neighborhoodGraph = neighborhoodNodeId
-        ? buildNeighborhoodGraph(lensGraph, neighborhoodNodeId)
-        : lensGraph
-      const collapsedStats = buildCollapsedGroupStats(neighborhoodGraph, collapsedGroups, diagnosticsByNode)
+      const collapsedStats = buildCollapsedGroupStats(lensGraph, collapsedGroups, diagnosticsByNode)
       const annotatedGraph = {
-        nodes: neighborhoodGraph.nodes.map(node => {
+        nodes: lensGraph.nodes.map(node => {
           const stats = collapsedStats.get(node.id)
           if (!stats) return node
           const edgeTypes = [...new Set([...stats.incomingEdgeTypes, ...stats.outgoingEdgeTypes])].slice(0, 3).join(', ')
@@ -153,21 +140,16 @@ export default function App() {
             description: `Collapsed: ${stats.hiddenNodeCount} hidden · ${stats.hiddenDiagnosticCount} diagnostics${edgeTypes ? ` · ${edgeTypes}` : ''}`,
           }
         }),
-        edges: neighborhoodGraph.edges,
+        edges: lensGraph.edges,
       }
       const filteredGraph = applyCollapsedGroups(applyGraphFilters(annotatedGraph, filters), collapsedGroups)
       return { nodes: filteredGraph.nodes, edges: bundleEdges(filteredGraph.edges) }
     },
-    [graphNodes, edges, mode, graphLens, neighborhoodNodeId, filters, collapsedGroups, diagnosticsByNode],
+    [graphNodes, edges, mode, graphLens, filters, collapsedGroups, diagnosticsByNode],
   )
   const zeroEdgeHint = visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
     ? graphModeEmptyHint(mode)
     : null
-
-  const handleLayoutModeChange = useCallback((next: GraphLayoutMode) => {
-    layoutModeTouchedRef.current = true
-    setLayoutMode(next)
-  }, [])
 
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -225,7 +207,6 @@ export default function App() {
     setFilters(next.filters)
     setCollapsedGroups(next.collapsedGroups)
     setSelectedNodeId(next.focusedNodeId)
-    setNeighborhoodNodeId(null)
   }, [filters, setSelectedNodeId])
 
   const loadSavedViews = useCallback(async () => {
@@ -255,7 +236,6 @@ export default function App() {
           filters: serializableFilters(filters),
           focusedNodeId: selectedNodeId,
           collapsedGroups: [...collapsedGroups],
-          // TODO: per-view layout overrides can build on the separate global layout store.
         }),
       })
       if (response.ok) {
@@ -344,8 +324,6 @@ export default function App() {
         filesCount={files.length}
         mode={mode}
         onModeChange={setMode}
-        layoutMode={layoutMode}
-        onLayoutModeChange={handleLayoutModeChange}
         onSearchOpen={() => setSearchOpen(true)}
         onSettingsOpen={() => setSettingsOpen(true)}
         onRecenter={() => setRecenterKey(key => key + 1)}
@@ -353,7 +331,7 @@ export default function App() {
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         onClarityToggle={() => setClarityOpen(open => !open)}
         clarityOpen={clarityOpen}
-        clarityActive={graphLens !== 'all' || layoutMode !== 'Force' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
+        clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
         theme={theme}
       />
 
@@ -380,7 +358,7 @@ export default function App() {
             recenterKey={recenterKey}
             theme={theme}
             layoutSettings={layoutSettings}
-            layoutMode={layoutMode}
+            layoutMode="Force"
             graphMode={mode}
             labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
@@ -397,16 +375,6 @@ export default function App() {
             >
               <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>{zeroEdgeHint.title}</div>
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', lineHeight: 1.45, marginTop: 4 }}>{zeroEdgeHint.body}</div>
-            </div>
-          )}
-
-          {layoutMode === 'PackageMap' && graphNodes.length > 100 && !layoutModeTouchedRef.current && (
-            <div
-              className="absolute left-1/2 top-24 z-20 -translate-x-1/2 rounded-xl px-4 py-2"
-              style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', boxShadow: 'var(--cc-shadow)', maxWidth: 430, backdropFilter: 'blur(12px)' }}
-            >
-              <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>Showing project map.</div>
-              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 3 }}>Expand a package or switch to Force graph for raw details.</div>
             </div>
           )}
 
@@ -465,6 +433,8 @@ export default function App() {
                 </>
               )}
               <span style={{ color: 'var(--cc-border)' }}>·</span>
+              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>Force graph</span>
+              <span style={{ color: 'var(--cc-border)' }}>·</span>
               <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{graphModeLabel(mode)}</span>
             </div>
             <div className="flex items-center gap-1.5 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
@@ -489,13 +459,10 @@ export default function App() {
           totalEdges={edges.length}
           visibleNodes={visibleGraphNodes.length}
           visibleEdges={visibleGraphEdges.length}
-          layoutMode={layoutMode}
           message={message}
           onTogglePin={togglePinNode}
           onToggleCollapse={toggleCollapseGroup}
           collapsedGroups={collapsedGroups}
-          onShowNeighborhood={id => setNeighborhoodNodeId(current => current === id ? null : id)}
-          neighborhoodNodeId={neighborhoodNodeId}
           onSelectNode={handleSelectNode}
           onOpenInEditor={openInEditor}
           onTraceLoaded={handleTraceLoaded}
@@ -600,10 +567,8 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
         const sourceKept = keep.has(edge.source)
         const targetKept = keep.has(edge.target)
         if (edge.type === 'Contains' && targetKept && !sourceKept) {
-          if (!sourceKept) {
-            keep.add(edge.source)
-            grew = true
-          }
+          keep.add(edge.source)
+          grew = true
         }
         if (edge.type === 'Calls' && sourceKept && !targetKept && byId.get(edge.target)?.type === 'Endpoint') {
           keep.add(edge.target)
@@ -633,8 +598,8 @@ function IndexingScreen() {
     { label: 'Discovering project scopes…', done: true },
     { label: 'Loading rust-analyzer…', done: true },
     { label: 'Indexing source files…', done: false, progress: 45 },
-    { label: 'Building semantic graph…', done: false, pending: true },
-    { label: 'Resolving type relationships…', done: false, pending: true },
+    { label: 'Building force graph…', done: false, pending: true },
+    { label: 'Resolving language badges…', done: false, pending: true },
   ]
 
   return (
@@ -654,7 +619,7 @@ function IndexingScreen() {
         Indexing workspace
       </h2>
       <p style={{ fontSize: 13, color: 'var(--cc-text-muted)', marginBottom: 28 }}>
-        Connecting rust-analyzer to axum-web-api…
+        Connecting analyzers to the project graph…
       </p>
 
       {/* step list */}
@@ -689,7 +654,7 @@ function IndexingScreen() {
         ))}
       </div>
 
-      <p style={{ fontSize: 11, color: 'var(--cc-text-faint)', marginTop: 16 }}>247 files · 4 scopes · semantic analyzers</p>
+      <p style={{ fontSize: 11, color: 'var(--cc-text-faint)', marginTop: 16 }}>Project files · analyzers · force graph</p>
     </div>
   )
 }
