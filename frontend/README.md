@@ -49,7 +49,7 @@ UI_REVIEW_PHASE=before pnpm screenshots
 UI_REVIEW_PHASE=after pnpm screenshots
 ```
 
-Review at least Package map, Semantic zones, and Local neighborhood across Macro, Meso, Micro, Call Flow, Data Flow, and Types & Impl at 1600x900 and 1920x1080. Notes and browser console output are written next to the screenshots.
+Review the force graph across Macro, Meso, Micro, Call Flow, Data Flow, and Types & Impl at 1600x900 and 1920x1080. Notes and browser console output are written next to the screenshots.
 
 ## Optional TypeScript semantic analysis
 
