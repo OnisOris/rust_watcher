@@ -12,11 +12,6 @@ const port = Number(process.env.RUST_WATCHER_SCREENSHOT_PORT || 41737)
 const url = `http://127.0.0.1:${port}`
 const shouldBuild = process.env.UI_REVIEW_SKIP_BUILD !== '1'
 
-const layouts = [
-  { key: 'SemanticZones', label: 'Semantic zones', slug: 'semantic' },
-  { key: 'PackageMap', label: 'Package map', slug: 'package' },
-  { key: 'Neighborhood', label: 'Local neighborhood', slug: 'neighborhood' },
-]
 const modes = [
   { label: 'Macro', slug: 'macro' },
   { label: 'Meso', slug: 'meso' },
@@ -25,6 +20,7 @@ const modes = [
   { label: 'Data Flow', slug: 'dataflow' },
   { label: 'Types & Impl', slug: 'types' },
 ]
+
 const viewports = [
   { width: 1600, height: 900, slug: '1600' },
   { width: 1920, height: 1080, slug: '1920' },
@@ -59,6 +55,7 @@ async function main() {
     const browser = await chromium.launch({ headless: true })
     const consoleMessages = []
     const pageErrors = []
+
     try {
       for (const viewport of viewports) {
         const page = await browser.newPage({ viewport })
@@ -76,17 +73,13 @@ async function main() {
 
         await page.goto(url, { waitUntil: 'domcontentloaded' })
         await waitForGraphStable(page)
-        await assertCanvasPresent(page)
+        await assertForceGraphOnly(page)
 
-        for (const layout of layouts) {
-          await clickButton(page, layout.label)
+        for (const mode of modes) {
+          await clickButton(page, mode.label)
           await page.waitForTimeout(450)
-          for (const mode of modes) {
-            await clickButton(page, mode.label)
-            await page.waitForTimeout(450)
-            const file = path.join(outRoot, `example-${layout.slug}-${mode.slug}-${viewport.slug}.png`)
-            await page.screenshot({ path: file, fullPage: false })
-          }
+          const file = path.join(outRoot, `example-force-${mode.slug}-${viewport.slug}.png`)
+          await page.screenshot({ path: file, fullPage: false })
         }
 
         await page.close()
@@ -103,10 +96,7 @@ async function main() {
     }
     console.log(`Screenshots saved to ${path.relative(repoRoot, outRoot)}`)
   } finally {
-    server.kill('SIGTERM')
-    setTimeout(() => {
-      if (!server.killed) server.kill('SIGKILL')
-    }, 1500).unref()
+    server.kill()
   }
 }
 
@@ -133,7 +123,7 @@ async function waitForServer(targetUrl, timeoutMs) {
 }
 
 async function waitForGraphStable(page) {
-  await page.waitForSelector('canvas', { timeout: 45_000 })
+  await page.waitForSelector('svg', { timeout: 45_000 })
   await page.waitForFunction(() => {
     const text = document.body.innerText
     return /Ready|Fallback|parser|indexed|Analyzer/i.test(text) && !/Indexing/.test(text)
@@ -141,13 +131,15 @@ async function waitForGraphStable(page) {
   await page.waitForTimeout(1200)
 }
 
-async function assertCanvasPresent(page) {
+async function assertForceGraphOnly(page) {
   const result = await page.evaluate(() => {
-    const canvas = document.querySelector('canvas')
-    if (!canvas) return { ok: false, reason: 'No canvas element found.' }
-    if (canvas.width <= 0 || canvas.height <= 0) return { ok: false, reason: 'Canvas has zero size.' }
+    const graph = document.querySelector('svg')
+    if (!graph) return { ok: false, reason: 'No SVG graph element found.' }
+    const box = graph.getBoundingClientRect()
+    if (box.width <= 0 || box.height <= 0) return { ok: false, reason: 'Graph has zero size.' }
     const text = document.body.innerText
     if (/ReferenceError|TypeError|NetworkError/i.test(text)) return { ok: false, reason: 'Error text found in document.' }
+    if (/Semantic zones|Package map|Local neighborhood/i.test(text)) return { ok: false, reason: 'Removed layout switcher text is still visible.' }
     return { ok: true, reason: '' }
   })
   if (!result.ok) throw new Error(result.reason)
@@ -169,7 +161,7 @@ Captured from \`./example\` at ${new Date().toISOString()}.
 
 ## Matrix
 
-- Layouts: Semantic zones, Package map, Local neighborhood
+- Layout: Force graph only
 - Modes: Macro, Meso, Micro, Call Flow, Data Flow, Types & Impl
 - Viewports: 1600x900, 1920x1080
 
