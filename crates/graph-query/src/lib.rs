@@ -250,10 +250,7 @@ pub fn find_active_endpoint_by_route_key<'a>(
         node.node_type == NodeType::Endpoint
             && graph_core::route_key_from_label(&node.label)
                 .is_some_and(|route| route.key == requested)
-            && !matches!(
-                node.reachability,
-                Some(SourceReachability::Detached | SourceReachability::Generated)
-            )
+            && !matches!(node.reachability, Some(SourceReachability::Detached))
     })
 }
 
@@ -276,5 +273,171 @@ fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
         Some(2)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graph_core::{AppStatus, EdgeConfidence};
+
+    fn test_node(id: &str, label: &str, node_type: NodeType) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            language: None,
+            node_type,
+            label: label.to_string(),
+            file: None,
+            module: None,
+            crate_name: None,
+            line: None,
+            visibility: None,
+            is_async: None,
+            is_unsafe: None,
+            is_generic: None,
+            signature: None,
+            description: None,
+            pinned: None,
+            bookmarked: None,
+            connections: None,
+            range: None,
+            selection_range: None,
+            reachability: Some(SourceReachability::Active),
+            reachable_from: None,
+            detached_reason: None,
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+        }
+    }
+
+    fn test_edge(edge_type: EdgeType, source: &str, target: &str) -> GraphEdge {
+        GraphEdge {
+            id: graph_core::edge_id(edge_type, source, target),
+            source: source.to_string(),
+            target: target.to_string(),
+            edge_type,
+            confidence: EdgeConfidence::Exact,
+            label: None,
+            description: None,
+            data_flow_kind: None,
+            evidence: None,
+        }
+    }
+
+    fn test_snapshot(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> GraphSnapshot {
+        GraphSnapshot {
+            nodes,
+            edges,
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        }
+    }
+
+    #[test]
+    fn focus_subgraph_depth_1() {
+        let graph = test_snapshot(
+            vec![
+                test_node("a", "A", NodeType::Function),
+                test_node("b", "B", NodeType::Function),
+                test_node("c", "C", NodeType::Function),
+            ],
+            vec![
+                test_edge(EdgeType::Calls, "a", "b"),
+                test_edge(EdgeType::Calls, "b", "c"),
+            ],
+        );
+
+        let response = focus_subgraph(&graph, "a", Some(1)).unwrap();
+        let node_ids = response
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(node_ids.contains("a"));
+        assert!(node_ids.contains("b"));
+        assert!(!node_ids.contains("c"));
+    }
+
+    #[test]
+    fn focus_subgraph_full_depth() {
+        let graph = test_snapshot(
+            vec![
+                test_node("a", "A", NodeType::Function),
+                test_node("b", "B", NodeType::Function),
+                test_node("c", "C", NodeType::Function),
+            ],
+            vec![
+                test_edge(EdgeType::Calls, "a", "b"),
+                test_edge(EdgeType::Calls, "b", "c"),
+            ],
+        );
+
+        let response = focus_subgraph(&graph, "a", None).unwrap();
+        let node_ids = response
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(node_ids.contains("a"));
+        assert!(node_ids.contains("b"));
+        assert!(node_ids.contains("c"));
+    }
+
+    #[test]
+    fn search_nodes_finds_label() {
+        let graph = test_snapshot(
+            vec![test_node("handler", "UserHandler", NodeType::Function)],
+            Vec::new(),
+        );
+
+        let results = search_nodes(&graph, "user", 30);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label, "UserHandler");
+    }
+
+    #[test]
+    fn endpoint_details_collects_handlers() {
+        let endpoint = test_node("endpoint", "GET /api/users", NodeType::Endpoint);
+        let handler = test_node("handler", "users", NodeType::Function);
+        let edge = test_edge(EdgeType::EndpointHandler, "endpoint", "handler");
+        let nodes = [endpoint.clone(), handler.clone()];
+        let node_by_id = nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect::<HashMap<_, _>>();
+
+        let details = endpoint_details_for_node(&endpoint, &[edge], &node_by_id).unwrap();
+
+        assert_eq!(details.route_key, "GET /api/users");
+        assert_eq!(details.handlers.len(), 1);
+        assert_eq!(details.handlers[0].node_id, "handler");
+    }
+
+    #[test]
+    fn node_details_base_collects_callers_and_callees() {
+        let graph = test_snapshot(
+            vec![
+                test_node("a", "A", NodeType::Function),
+                test_node("b", "B", NodeType::Function),
+                test_node("c", "C", NodeType::Function),
+            ],
+            vec![
+                test_edge(EdgeType::Calls, "a", "b"),
+                test_edge(EdgeType::Calls, "b", "c"),
+            ],
+        );
+
+        let details = node_details_base(&graph, "b", Vec::new(), Vec::new()).unwrap();
+
+        assert_eq!(details.callers.len(), 1);
+        assert_eq!(details.callers[0].id, "a");
+        assert_eq!(details.callees.len(), 1);
+        assert_eq!(details.callees[0].id, "c");
     }
 }
