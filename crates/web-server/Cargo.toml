@@ -12,6 +12,7 @@ dashmap.workspace = true
 futures-util.workspace = true
 graph-builder = { path = "../graph-builder" }
 graph-core = { path = "../graph-core" }
+graph-query = { path = "../graph-query" }
 notify.workspace = true
 parking_lot.workspace = true
 project-indexer = { path = "../project-indexer" }
