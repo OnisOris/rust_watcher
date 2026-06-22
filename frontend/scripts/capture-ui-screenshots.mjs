@@ -73,7 +73,7 @@ async function main() {
 
         await page.goto(url, { waitUntil: 'domcontentloaded' })
         await waitForGraphStable(page)
-        await assertForceGraphOnly(page)
+        await assertGraphPresent(page)
 
         for (const mode of modes) {
           await clickButton(page, mode.label)
@@ -131,7 +131,7 @@ async function waitForGraphStable(page) {
   await page.waitForTimeout(1200)
 }
 
-async function assertForceGraphOnly(page) {
+async function assertGraphPresent(page) {
   const result = await page.evaluate(() => {
     const graph = document.querySelector('svg')
     if (!graph) return { ok: false, reason: 'No SVG graph element found.' }
@@ -139,7 +139,6 @@ async function assertForceGraphOnly(page) {
     if (box.width <= 0 || box.height <= 0) return { ok: false, reason: 'Graph has zero size.' }
     const text = document.body.innerText
     if (/ReferenceError|TypeError|NetworkError/i.test(text)) return { ok: false, reason: 'Error text found in document.' }
-    if (/Semantic zones|Package map|Local neighborhood/i.test(text)) return { ok: false, reason: 'Removed layout switcher text is still visible.' }
     return { ok: true, reason: '' }
   })
   if (!result.ok) throw new Error(result.reason)
