@@ -65,7 +65,6 @@ export type TraceStepKind =
 export type ContextPackKind = 'Node' | 'Trace' | 'Route' | 'DataFlow'
 export type DiagnosticSeverity = 'Error' | 'Warning' | 'Information' | 'Hint'
 export type GraphMode = 'Macro' | 'Meso' | 'Micro' | 'CallFlow' | 'DataFlow' | 'Traits'
-export type GraphLayoutMode = 'Force' | 'SemanticZones' | 'PackageMap' | 'Neighborhood'
 export type GraphLabelMode = 'auto' | 'key' | 'all'
 export type EdgeVisibilityLevel = 'Essential' | 'Semantic' | 'All'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
@@ -164,84 +163,6 @@ export interface GraphEdge {
   bundledTypes?: EdgeType[]
   bundledEdgeIds?: string[]
   routedPath?: Array<{ x: number; y: number }>
-}
-
-export type GraphRegionKind =
-  | 'Language'
-  | 'Package'
-  | 'Module'
-  | 'Layer'
-  | 'Boundary'
-  | 'External'
-  | 'Detached'
-  | 'Generated'
-
-export interface GraphBounds {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-export interface GraphPoint {
-  x: number
-  y: number
-}
-
-export interface RouteRowPorts {
-  leftIn: GraphPoint
-  leftOut: GraphPoint
-  endpointCenter: GraphPoint
-  rightIn: GraphPoint
-  rightOut: GraphPoint
-  dataIn: GraphPoint
-  dataOut: GraphPoint
-  returnOut: GraphPoint
-}
-
-export interface RouteRow {
-  endpointId: string
-  routeKey: string
-  method?: string
-  path?: string
-  y: number
-  height: number
-  ports: RouteRowPorts
-}
-
-export interface RegionStats {
-  fileCount: number
-  symbolCount: number
-  endpointCount: number
-  diagnosticCount: number
-  incomingEdgeCount: number
-  outgoingEdgeCount: number
-}
-
-export interface GraphRegion {
-  id: string
-  label: string
-  kind: GraphRegionKind
-  language?: string
-  bounds: GraphBounds
-  colorToken: string
-  nodeIds: string[]
-  childRegionIds: string[]
-  stats: RegionStats
-  routeRows?: RouteRow[]
-}
-
-export interface LayoutRegionAssignment {
-  nodeId: string
-  regionId: string
-  reason: string
-}
-
-export interface SemanticLayoutResult {
-  nodes: GraphNode[]
-  edges: GraphEdge[]
-  regions: GraphRegion[]
-  assignments: LayoutRegionAssignment[]
 }
 
 export interface LspPosition {

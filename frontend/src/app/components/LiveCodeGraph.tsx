@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
-import type { GraphEdge, GraphFilters, GraphLabelMode, GraphLayoutMode, GraphLayoutSettings, GraphMode, GraphNode, ThemeMode, DiagnosticRecord } from '../types'
+import type { GraphEdge, GraphFilters, GraphLabelMode, GraphLayoutSettings, GraphMode, GraphNode, ThemeMode, DiagnosticRecord } from '../types'
 import { inferNodeLanguage, languageColor, languageIcon } from '../api/language'
 
 interface LiveCodeGraphProps {
@@ -11,7 +11,6 @@ interface LiveCodeGraphProps {
   recenterKey: number
   theme: ThemeMode
   layoutSettings: GraphLayoutSettings
-  layoutMode: GraphLayoutMode
   graphMode: GraphMode
   labelMode: GraphLabelMode
   diagnosticsByNode?: Map<string, DiagnosticRecord[]>

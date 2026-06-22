@@ -358,7 +358,6 @@ export default function App() {
             recenterKey={recenterKey}
             theme={theme}
             layoutSettings={layoutSettings}
-            layoutMode="Force"
             graphMode={mode}
             labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
