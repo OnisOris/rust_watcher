@@ -4,7 +4,9 @@ members = [
   "crates/ra-client",
   "crates/project-indexer",
   "crates/graph-builder",
-  "crates/web-server", "example",
+  "crates/graph-query",
+  "crates/web-server",
+  "example",
 ]
 resolver = "2"
 
