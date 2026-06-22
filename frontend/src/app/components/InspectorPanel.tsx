@@ -1,10 +1,8 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ExternalLink, BookMarked, Pin, ChevronRight, ArrowUpRight, ArrowDownRight, Users, GitBranch, Zap, Layers, AlertTriangle } from 'lucide-react'
-import type { AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, ContextPack, DiagnosticRecord, EdgeConfidence, GraphLayoutMode, GraphNode, GraphEdge, NodeDetailsResponse, ReferenceRecord, TraceExplanation, TraceStep } from '../types'
-import { analyzerCapabilityLabel, analyzerEngineLabel, analyzerStatusColor, sortAnalyzers, summarizeAnalyzers } from '../api/analyzerStatus'
-import { contextPackToMarkdown, summarizeContextPack } from '../api/contextPack'
-import { traceToMarkdown } from '../api/trace'
-import { assignRegions, inferNodeLanguage, packageRegionId, regionLabel } from '../api/semanticLayout'
+import type { ReactNode } from 'react'
+import { ExternalLink, Pin, Layers } from 'lucide-react'
+import type { AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, GraphEdge, GraphNode, TraceExplanation } from '../types'
+import { analyzerStatusColor, sortAnalyzers, summarizeAnalyzers } from '../api/analyzerStatus'
+import { inferNodeLanguage, languageColor, languageDisplay, languageIcon } from '../api/language'
 
 interface InspectorPanelProps {
   selectedNode: GraphNode | null
@@ -20,1161 +18,192 @@ interface InspectorPanelProps {
   totalEdges?: number
   visibleNodes?: number
   visibleEdges?: number
-  layoutMode?: GraphLayoutMode
   message?: string | null
   onTogglePin: (id: string) => void
   onToggleCollapse: (id: string) => void
   collapsedGroups: Set<string>
-  onShowNeighborhood: (id: string) => void
-  neighborhoodNodeId: string | null
   onSelectNode: (id: string) => void
   onOpenInEditor: (node: GraphNode) => void
-  onTraceLoaded: (trace: TraceExplanation) => void
-  onClearTraceHighlight: () => void
+  onTraceLoaded?: (trace: TraceExplanation) => void
+  onClearTraceHighlight?: () => void
 }
 
-const NODE_TYPE_COLORS: Record<string, string> = {
-  File: '#3B82F6', Module: '#8B5CF6', Struct: '#06B6D4', Class: '#0EA5E9', Object: '#38BDF8', Enum: '#F59E0B',
-  Trait: '#10B981', Impl: '#6366F1', Function: '#EC4899', Method: '#F97316',
-  Component: '#14B8A6', Hook: '#A855F7', Interface: '#22C55E', TypeAlias: '#84CC16',
-  Property: '#FACC15', Signal: '#FB7185', Handler: '#F472B6',
-  Endpoint: '#E11D48', Macro: '#EF4444', ExternalCrate: '#7D8795',
-}
-
-export function InspectorPanel({
-  selectedNode,
-  nodes,
-  edges,
-  projectName,
-  analyzerStatus = 'Starting',
-  analyzers = [],
-  pythonAnalyzer = null,
-  appState = 'empty',
-  filesCount = 0,
-  totalNodes,
-  totalEdges,
-  visibleNodes,
-  visibleEdges,
-  layoutMode = 'Force',
-  message,
-  onTogglePin,
-  onToggleCollapse,
-  collapsedGroups,
-  onShowNeighborhood,
-  neighborhoodNodeId,
-  onSelectNode,
-  onOpenInEditor,
-  onTraceLoaded,
-  onClearTraceHighlight,
-}: InspectorPanelProps) {
-  if (!selectedNode) {
-    return (
-      <ProjectOverview
-        nodes={nodes}
-        edges={edges}
-        projectName={projectName}
-        analyzerStatus={analyzerStatus}
-        analyzers={analyzers}
-        pythonAnalyzer={pythonAnalyzer}
-        appState={appState}
-        filesCount={filesCount}
-        totalNodes={totalNodes ?? nodes.length}
-        totalEdges={totalEdges ?? edges.length}
-        visibleNodes={visibleNodes ?? nodes.length}
-        visibleEdges={visibleEdges ?? edges.length}
-        message={message}
-        onSelectNode={onSelectNode}
-      />
-    )
-  }
-  return <NodeInspector node={selectedNode} nodes={nodes} edges={edges} layoutMode={layoutMode} onTogglePin={onTogglePin} onToggleCollapse={onToggleCollapse} collapsedGroups={collapsedGroups} onShowNeighborhood={onShowNeighborhood} neighborhoodNodeId={neighborhoodNodeId} onSelectNode={onSelectNode} onOpenInEditor={onOpenInEditor} onTraceLoaded={onTraceLoaded} onClearTraceHighlight={onClearTraceHighlight} />
-}
-
-
-function sourceBucket(node: GraphNode) {
-  if (node.type === 'ExternalCrate' || node.reachability === 'External') return 'External'
-  if (node.reachability === 'Detached') return 'Detached'
-  if (node.reachability === 'Generated') return 'Generated'
-  return 'Active'
-}
-
-function detachedSourceFallback(node: GraphNode) {
-  if (node.language === 'rust') return 'This file is not reachable from crate roots or mod declarations.'
-  if (node.language === 'python') return 'This file is not imported or referenced by the active Python package graph.'
-  if (node.language === 'qml') return 'This QML file is not imported or rendered by the active QML graph.'
-  return 'This source file is not reachable from the active project graph.'
-}
-
-function layoutModeLabel(mode: GraphLayoutMode) {
-  if (mode === 'SemanticZones') return 'Semantic zones'
-  if (mode === 'PackageMap') return 'Package map'
-  if (mode === 'Neighborhood') return 'Local neighborhood'
-  return 'Force graph'
-}
-
-function languageDisplay(language: string) {
-  if (language === 'typescript') return 'TypeScript'
-  if (language === 'javascript') return 'JavaScript'
-  if (language === 'qml') return 'QML'
-  if (language === 'rust') return 'Rust'
-  if (language === 'python') return 'Python'
-  return 'Unknown'
-}
-
-function AnalyzerRows({ analyzers }: { analyzers: AnalyzerServiceStatus[] }) {
-  const sorted = sortAnalyzers(analyzers)
-  if (!sorted.length) {
-    return <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)' }}>No analyzer services reported yet.</div>
-  }
+export function InspectorPanel(props: InspectorPanelProps) {
   return (
-    <div className="space-y-1.5" style={{ marginTop: 8 }}>
-      {sorted.slice(0, 5).map(analyzer => {
-        const capabilities = analyzer.capabilities.slice(0, 3).map(analyzerCapabilityLabel).join(', ')
-        const color = analyzerStatusColor(analyzer.status)
-        return (
-          <div key={analyzer.id} className="rounded-lg px-2 py-1.5" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-            <div className="flex items-center gap-1.5">
-              <span style={{ width: 6, height: 6, borderRadius: 999, background: color }} />
-              <span style={{ fontSize: 10, color: 'var(--cc-text)', fontWeight: 700 }}>{analyzer.label}</span>
-              <span style={{ fontSize: 9, color: 'var(--cc-text-faint)' }}>· {analyzerEngineLabel(analyzer.engine)}</span>
-              <span style={{ marginLeft: 'auto', fontSize: 9, color }}>{analyzer.status}</span>
-            </div>
-            {capabilities && <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)', marginTop: 3 }}>{capabilities}</div>}
-          </div>
-        )
-      })}
+    <div className="flex flex-col overflow-hidden" style={{ width: 340, background: 'var(--cc-panel)', borderLeft: '1px solid var(--cc-border)', fontFamily: 'Inter, sans-serif' }}>
+      {props.selectedNode ? <NodePanel {...props} node={props.selectedNode} /> : <OverviewPanel {...props} />}
     </div>
   )
 }
 
-// ── Project overview (nothing selected) ────────────────────────────────────
-function ProjectOverview({
-  nodes,
-  edges,
-  projectName,
-  analyzerStatus,
-  analyzers,
-  pythonAnalyzer,
-  appState,
-  filesCount,
-  totalNodes,
-  totalEdges,
-  visibleNodes,
-  visibleEdges,
-  message,
-  onSelectNode,
-}: {
-  nodes: GraphNode[]
-  edges: GraphEdge[]
-  projectName?: string | null
-  analyzerStatus: AnalyzerStatus
-  analyzers?: AnalyzerServiceStatus[]
-  pythonAnalyzer?: AppStatus['pythonAnalyzer']
-  appState: AppState
-  filesCount: number
-  totalNodes: number
-  totalEdges: number
-  visibleNodes: number
-  visibleEdges: number
-  message?: string | null
-  onSelectNode: (id: string) => void
-}) {
-  const visibleScopes = new Set(nodes.map(n => n.crate ?? n.module).filter((scope): scope is string => !!scope && scope !== 'external'))
-  const scopeCount = visibleScopes.size || nodes.filter(n => n.id.startsWith('crate:')).length
-  const analyzerSummary = summarizeAnalyzers(analyzers)
-  const languageCounts = {
-    Rust: nodes.filter(node => inferNodeLanguage(node) === 'rust').length,
-    TypeScript: nodes.filter(node => inferNodeLanguage(node) === 'typescript' || inferNodeLanguage(node) === 'javascript').length,
-    Python: nodes.filter(node => inferNodeLanguage(node) === 'python').length,
-    QML: nodes.filter(node => inferNodeLanguage(node) === 'qml').length,
-  }
-  const nodeTypeCounts = {
-    Files: nodes.filter(node => node.type === 'File').length,
-    Functions: nodes.filter(node => node.type === 'Function' || node.type === 'Method').length,
-    Structs: nodes.filter(node => node.type === 'Struct').length,
-    Endpoints: nodes.filter(node => node.type === 'Endpoint').length,
-    Scopes: scopeCount,
-    External: nodes.filter(node => node.type === 'ExternalCrate').length,
-  }
-  const sourceCounts = {
-    Active: nodes.filter(node => sourceBucket(node) === 'Active').length,
-    Detached: nodes.filter(node => sourceBucket(node) === 'Detached').length,
-    Generated: nodes.filter(node => sourceBucket(node) === 'Generated').length,
-    External: nodes.filter(node => sourceBucket(node) === 'External').length,
-  }
-  const hiddenNodes = Math.max(0, totalNodes - visibleNodes)
-  const hiddenEdges = Math.max(0, totalEdges - visibleEdges)
-
-  const topConnected = [...nodes]
-    .map(n => ({
-      ...n,
-      inCount: edges.filter(e => e.target === n.id).length,
-      outCount: edges.filter(e => e.source === n.id).length,
-    }))
-    .sort((a, b) => (b.inCount + b.outCount) - (a.inCount + a.outCount))
-    .slice(0, 5)
+function OverviewPanel(props: InspectorPanelProps) {
+  const summary = summarizeAnalyzers(props.analyzers)
+  const languages = languageCounts(props.nodes)
+  const hiddenNodes = Math.max(0, (props.totalNodes ?? props.nodes.length) - (props.visibleNodes ?? props.nodes.length))
+  const hiddenEdges = Math.max(0, (props.totalEdges ?? props.edges.length) - (props.visibleEdges ?? props.edges.length))
+  const topNodes = props.nodes
+    .map(node => ({ node, degree: props.edges.filter(edge => edge.source === node.id || edge.target === node.id).length }))
+    .sort((a, b) => b.degree - a.degree)
+    .slice(0, 6)
 
   return (
-    <div
-      className="flex flex-col overflow-hidden"
-      style={{ width: 340, background: 'var(--cc-panel)', borderLeft: '1px solid var(--cc-border)', fontFamily: 'Inter, sans-serif' }}
-    >
-      <PanelHeader title="Project Overview" subtitle={projectName ?? 'workspace'} />
-
-      <div className="overflow-y-auto flex-1 p-3 space-y-4" style={{ scrollbarWidth: 'thin', scrollbarColor: 'var(--cc-border) transparent' }}>
-        {/* stats grid */}
+    <>
+      <Header title="Project Overview" subtitle={props.projectName ?? 'workspace'} />
+      <div className="overflow-y-auto flex-1 p-3 space-y-4" style={{ scrollbarWidth: 'thin' }}>
         <Card>
-          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Graph scope</p>
+          <SectionTitle>Graph scope</SectionTitle>
           <div className="grid grid-cols-2 gap-2">
-            <StatCard label="Visible nodes" value={visibleNodes} color="var(--cc-accent)" />
-            <StatCard label="Visible edges" value={visibleEdges} color="var(--cc-crate)" />
-            <StatCard label="Total nodes" value={totalNodes} color="#64748B" />
-            <StatCard label="Total edges" value={totalEdges} color="#64748B" />
+            <Stat label="Visible nodes" value={props.visibleNodes ?? props.nodes.length} color="var(--cc-accent)" />
+            <Stat label="Visible edges" value={props.visibleEdges ?? props.edges.length} color="var(--cc-crate)" />
+            <Stat label="Total nodes" value={props.totalNodes ?? props.nodes.length} color="#64748B" />
+            <Stat label="Total edges" value={props.totalEdges ?? props.edges.length} color="#64748B" />
           </div>
-          {(hiddenNodes > 0 || hiddenEdges > 0) && (
-            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)' }}>
-              Hidden by filters: {hiddenNodes} nodes · {hiddenEdges} edges
-            </div>
-          )}
+          {(hiddenNodes > 0 || hiddenEdges > 0) && <Text>Hidden by filters: {hiddenNodes} nodes - {hiddenEdges} edges</Text>}
         </Card>
 
         <Card>
-          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Languages</p>
-          <div className="grid grid-cols-4 gap-1.5">
-            {Object.entries(languageCounts).map(([label, value]) => (
-              <MetricPill key={label} label={label} value={value} />
-            ))}
+          <SectionTitle>Languages</SectionTitle>
+          <div className="grid grid-cols-5 gap-1.5">
+            {Object.entries(languages).map(([label, value]) => <SmallStat key={label} label={label} value={value} />)}
           </div>
         </Card>
 
         <Card>
-          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Node types</p>
-          <div className="grid grid-cols-3 gap-1.5">
-            {Object.entries(nodeTypeCounts).map(([label, value]) => (
-              <MetricPill key={label} label={label} value={value} />
-            ))}
-          </div>
-        </Card>
-
-        <Card>
-          <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>Sources</p>
-          <div className="grid grid-cols-4 gap-1.5">
-            {Object.entries(sourceCounts).map(([label, value]) => (
-              <MetricPill key={label} label={label} value={value} />
-            ))}
-          </div>
-        </Card>
-
-        {/* analyzer status */}
-        <Card>
-          <div className="flex items-center gap-2 mb-2">
-            <span style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 700 }}>Analyzers</span>
-            <span style={{ marginLeft: 'auto', fontSize: 10, color: analyzerSummary.error ? '#DC2626' : analyzerSummary.fallback ? '#D97706' : '#10B981' }}>
-              {analyzerSummary.ready} ready · {analyzerSummary.fallback} fallback · {analyzerSummary.error} error
-            </span>
-          </div>
-          <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>
-            {message ?? appState} · {filesCount} files indexed
-          </div>
-          <AnalyzerRows analyzers={analyzers} />
-        </Card>
-
-        {/* hotspots */}
-        <Section label="Hotspots">
-          {topConnected.slice(0, 4).map(node => (
-            <button
-              key={node.id}
-              onClick={() => onSelectNode(node.id)}
-              className="flex items-start gap-2 py-1.5 px-2 rounded-lg w-full text-left transition-colors"
-              style={{ background: 'transparent', cursor: 'pointer' }}
-            >
-              <div className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ background: NODE_TYPE_COLORS[node.type] ?? '#7D8795' }} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 11, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', overflowWrap: 'anywhere' }}>{node.label}</div>
-                <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>
-                  {node.inCount + node.outCount} links · {node.type}{node.file ? ` · ${node.file}` : ''}
+          <SectionTitle>Analyzers</SectionTitle>
+          <Text>{summary.ready} ready - {summary.fallback} fallback - {summary.error} error</Text>
+          <Text>{props.message ?? props.appState ?? 'Ready'} - {props.filesCount ?? 0} files indexed</Text>
+          <div className="space-y-1.5 mt-2">
+            {sortAnalyzers(props.analyzers ?? []).slice(0, 5).map(analyzer => (
+              <div key={analyzer.id} className="rounded-lg px-2 py-1.5" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+                <div className="flex items-center gap-1.5">
+                  <span style={{ width: 6, height: 6, borderRadius: 999, background: analyzerStatusColor(analyzer.status) }} />
+                  <span style={{ fontSize: 10, color: 'var(--cc-text)', fontWeight: 700 }}>{analyzer.label}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 9, color: analyzerStatusColor(analyzer.status) }}>{analyzer.status}</span>
                 </div>
               </div>
-            </button>
-          ))}
-        </Section>
-
-        {/* top connected */}
-        <Section label="Top Connected Nodes">
-          {topConnected.map(n => (
-            <button
-              key={n.id}
-              onClick={() => onSelectNode(n.id)}
-              className="flex items-center gap-2 w-full rounded py-1.5 px-2 transition-colors"
-              style={{ background: 'none', cursor: 'pointer' }}
-            >
-              <TypeDot type={n.type} />
-              <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', flex: 1, textAlign: 'left', fontFamily: 'JetBrains Mono, monospace' }}>{n.label}</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{n.inCount + n.outCount} links</span>
-            </button>
-          ))}
-        </Section>
-      </div>
-    </div>
-  )
-}
-
-// ── Node inspector (something selected) ────────────────────────────────────
-function NodeInspector({ node, nodes, edges, layoutMode, onTogglePin, onToggleCollapse, collapsedGroups, onShowNeighborhood, neighborhoodNodeId, onSelectNode, onOpenInEditor, onTraceLoaded, onClearTraceHighlight }: {
-  node: GraphNode; nodes: GraphNode[]; edges: GraphEdge[]; layoutMode: GraphLayoutMode; onTogglePin: (id: string) => void; onToggleCollapse: (id: string) => void; collapsedGroups: Set<string>; onShowNeighborhood: (id: string) => void; neighborhoodNodeId: string | null; onSelectNode: (id: string) => void; onOpenInEditor: (node: GraphNode) => void; onTraceLoaded: (trace: TraceExplanation) => void; onClearTraceHighlight: () => void
-}) {
-  const nodeMap = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes])
-  const [details, setDetails] = useState<NodeDetailsResponse | null>(null)
-  const [trace, setTrace] = useState<TraceExplanation | null>(null)
-  const [traceError, setTraceError] = useState<string | null>(null)
-  const [contextPack, setContextPack] = useState<ContextPack | null>(null)
-  const [contextError, setContextError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    setDetails(null)
-    fetch(`/api/node/${encodeURIComponent(node.id)}/details`)
-      .then(response => response.ok ? response.json() : null)
-      .then((payload: NodeDetailsResponse | null) => {
-        if (!cancelled) setDetails(payload)
-      })
-      .catch(() => {
-        if (!cancelled) setDetails(null)
-      })
-    return () => { cancelled = true }
-  }, [node.id])
-
-  useEffect(() => {
-    setTrace(null)
-    setTraceError(null)
-    setContextPack(null)
-    setContextError(null)
-  }, [node.id])
-
-  const loadTrace = (url: string) => {
-    setTraceError(null)
-    fetch(url)
-      .then(response => response.ok ? response.json() : Promise.reject(new Error('Trace not available')))
-      .then((payload: TraceExplanation) => {
-        setTrace(payload)
-        onTraceLoaded(payload)
-      })
-      .catch(error => setTraceError(error instanceof Error ? error.message : 'Trace not available'))
-  }
-
-  const explainNode = () => loadTrace(`/api/trace/node/${encodeURIComponent(node.id)}`)
-  const explainRoute = () => {
-    const routeKey = endpointDetails?.routeKey
-    if (routeKey) {
-      const [method, ...pathParts] = routeKey.split(' ')
-      loadTrace(`/api/trace/route?method=${encodeURIComponent(method)}&path=${encodeURIComponent(pathParts.join(' '))}`)
-    }
-    else explainNode()
-  }
-  const explainDataFlow = () => {
-    const edge = outgoingDataFlow[0] ?? incomingDataFlow[0]
-    if (edge) loadTrace(`/api/trace/edge/${encodeURIComponent(edge.id)}`)
-  }
-  const loadContext = (url: string) => {
-    setContextError(null)
-    fetch(url)
-      .then(response => response.ok ? response.json() : Promise.reject(new Error('Context not available')))
-      .then((payload: ContextPack) => setContextPack(payload))
-      .catch(error => setContextError(error instanceof Error ? error.message : 'Context not available'))
-  }
-  const buildNodeContext = () => loadContext(`/api/context/node/${encodeURIComponent(node.id)}`)
-  const buildTraceContext = (trace: TraceExplanation) => {
-    setContextError(null)
-    fetch('/api/context/trace', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(trace),
-    })
-      .then(response => response.ok ? response.json() : Promise.reject(new Error('Context not available')))
-      .then((payload: ContextPack) => setContextPack(payload))
-      .catch(error => setContextError(error instanceof Error ? error.message : 'Context not available'))
-  }
-
-  const outgoing = details?.outgoingEdges ?? edges.filter(e => e.source === node.id)
-  const incoming = details?.incomingEdges ?? edges.filter(e => e.target === node.id)
-
-  const callers = details?.callers ?? incoming.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const callees = details?.callees ?? outgoing.filter(e => e.type === 'Calls' || e.type === 'EndpointHandler').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
-  const apiCallers = incoming.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const apiTargets = outgoing.filter(e => e.type === 'ApiCall').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
-  const renders = outgoing.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
-  const renderedBy = incoming.filter(e => e.type === 'Renders').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const contained = outgoing.filter(e => e.type === 'Contains').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
-  const typeRefs = details?.relatedTypes.length ? details.relatedTypes : outgoing.filter(e => e.type === 'TypeReference').map(e => nodeMap.get(e.target)).filter(Boolean) as GraphNode[]
-  const incomingDataFlow = incoming.filter(e => e.type === 'DataFlow')
-  const outgoingDataFlow = outgoing.filter(e => e.type === 'DataFlow')
-  const implementors = incoming.filter(e => e.type === 'Implements').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const usedBy = incoming.filter(e => e.type === 'Uses' || e.type === 'TypeReference').map(e => nodeMap.get(e.source)).filter(Boolean) as GraphNode[]
-  const references = details?.references ?? referenceRecordsFromNodes(usedBy)
-  const diagnostics = details?.diagnostics ?? []
-  const endpointDetails = details?.endpointDetails
-  const semanticAssignment = useMemo(() => assignRegions([node])[0], [node])
-  const semanticPackageId = semanticAssignment ? packageRegionId(node, semanticAssignment.regionId) : null
-  const callerConfidence = confidenceByNode(incoming, 'source')
-  const calleeConfidence = confidenceByNode(outgoing, 'target')
-
-  const typeColor = NODE_TYPE_COLORS[node.type] ?? '#7D8795'
-  const collapsible = node.type === 'File' || node.type === 'Module' || node.type === 'Object'
-  const collapsed = collapsedGroups.has(node.id)
-  const showingNeighborhood = neighborhoodNodeId === node.id
-
-  return (
-    <div
-      className="flex flex-col overflow-hidden"
-      style={{ width: 340, background: 'var(--cc-panel)', borderLeft: '1px solid var(--cc-border)', fontFamily: 'Inter, sans-serif' }}
-    >
-      <PanelHeader title="Inspector" subtitle={node.type} subtitleColor={typeColor} />
-
-      <div className="overflow-y-auto flex-1 p-3 space-y-3" style={{ scrollbarWidth: 'thin', scrollbarColor: 'var(--cc-border) transparent' }}>
-        {/* symbol card */}
-        <Card>
-          <div className="flex items-start gap-3 mb-3">
-            <div className="rounded flex items-center justify-center shrink-0" style={{ width: 36, height: 36, background: `${typeColor}18`, border: `1px solid ${typeColor}30` }}>
-              <TypeIcon type={node.type} color={typeColor} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div style={{ fontSize: 15, color: 'var(--cc-text)', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.3 }}>{node.label}</div>
-              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{node.type} · {node.file ?? node.crate ?? 'unknown'}</div>
-            </div>
-          </div>
-
-          {node.description && (
-            <div className="rounded p-2 mb-3" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.4 }}>
-              {node.description}
-            </div>
-          )}
-
-          {/* badges row */}
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {node.visibility && <VisBadge vis={node.visibility} />}
-            {node.isAsync && <Badge color="#06B6D4">async</Badge>}
-            {node.isUnsafe && <Badge color="#F87171">unsafe</Badge>}
-            {node.isGeneric && <Badge color="#8B5CF6">generic</Badge>}
-            {node.reachability && <Badge color={node.reachability === 'Detached' ? '#64748B' : node.reachability === 'External' ? '#94A3B8' : node.reachability === 'Generated' ? '#8B5CF6' : '#10B981'}>{node.reachability}</Badge>}
-            {diagnostics.length > 0 && <Badge color={diagnostics.some(d => d.severity === 'Error') ? '#F87171' : '#F59E0B'}>{diagnostics.length} diagnostics</Badge>}
-          </div>
-
-          {/* signature */}
-          {node.signature && (
-            <div className="rounded p-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-              <pre style={{ fontSize: 10, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'pre-wrap', lineHeight: 1.5, margin: 0 }}>
-                {node.signature}
-              </pre>
-            </div>
-          )}
-
-          <div className="flex flex-wrap gap-1.5 mt-3">
-            {node.underlyingNodeIds?.length && <ActionBtn icon={<Layers size={12} />} label="Show internals" onClick={() => onShowNeighborhood(node.id)} />}
-            {node.type === 'Endpoint' && <ActionBtn icon={<GitBranch size={12} />} label="Explain route" onClick={explainRoute} />}
-            {(incomingDataFlow.length > 0 || outgoingDataFlow.length > 0) && <ActionBtn icon={<GitBranch size={12} />} label="Explain data flow" onClick={explainDataFlow} />}
-            <ActionBtn icon={<ChevronRight size={12} />} label="Explain node" onClick={explainNode} />
-            <ActionBtn icon={<Layers size={12} />} label="Build context" onClick={buildNodeContext} />
+            ))}
           </div>
         </Card>
 
-        {(trace || traceError) && (
-          <Card>
-            {trace ? (
-              <TracePanel trace={trace} nodeMap={nodeMap} onSelect={onSelectNode} onClearHighlight={onClearTraceHighlight} onBuildContext={buildTraceContext} />
-            ) : (
-              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{traceError}</div>
-            )}
-          </Card>
-        )}
-
-        {node.packageStats && (
-          <Card>
-            <SectionLabel label="Package Summary" />
-            <InfoRow label="Package" value={node.packagePath ?? node.label} mono />
-            <InfoRow label="Files" value={String(node.packageStats.fileCount)} mono />
-            <InfoRow label="Symbols" value={String(node.packageStats.symbolCount)} mono />
-            <InfoRow label="Public" value={String(node.packageStats.exportedSymbolCount)} mono />
-            <InfoRow label="Endpoints" value={String(node.packageStats.endpointCount)} mono />
-            <InfoRow label="Diagnostics" value={String(node.packageStats.diagnosticCount)} mono />
-            <InfoRow label="Incoming" value={String(node.packageStats.incomingEdgeCount)} mono />
-            <InfoRow label="Outgoing" value={String(node.packageStats.outgoingEdgeCount)} mono />
-            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
-              Contains {node.underlyingNodeIds?.length ?? 0} graph nodes and summarizes {node.underlyingEdgeIds?.length ?? 0} underlying edges.
-            </div>
-          </Card>
-        )}
-
-        {(contextPack || contextError) && (
-          <Card>
-            {contextPack ? (
-              <ContextPackPanel pack={contextPack} />
-            ) : (
-              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>{contextError}</div>
-            )}
-          </Card>
-        )}
-
-        {layoutMode !== 'Force' && semanticAssignment && (
-          <Card>
-            <SectionLabel label="Layout Region" />
-            <InfoRow label="Mode" value={layoutModeLabel(layoutMode)} />
-            <InfoRow label="Region" value={regionLabel(semanticAssignment.regionId)} mono />
-            {semanticPackageId && <InfoRow label="Package" value={regionLabel(semanticPackageId)} mono />}
-            <InfoRow label="Language" value={languageDisplay(inferNodeLanguage(node))} mono />
-            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
-              {semanticAssignment.reason}
-            </div>
-          </Card>
-        )}
-
-        {/* location */}
-        {(node.file || node.module) && (
-          <Card>
-            <SectionLabel label="Location" />
-            {node.file && <InfoRow label="File" value={node.file} mono />}
-            {node.module && <InfoRow label="Module" value={node.module} mono />}
-            {node.line && <InfoRow label="Line" value={`L${node.line}`} mono />}
-          </Card>
-        )}
-
-        {node.reachability === 'Detached' && (
-          <Card>
-            <SectionLabel label="Detached Source" />
-            <div style={{ fontSize: 11, color: 'var(--cc-text-muted)', lineHeight: 1.45 }}>
-              {node.detachedReason ?? detachedSourceFallback(node)}
-            </div>
-            <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>
-              Add a <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>mod</span> declaration from main.rs/lib.rs, move it to examples/, or keep it as notes/scratch.
-            </div>
-          </Card>
-        )}
-
-        {endpointDetails && (
-          <Card>
-            <SectionLabel label="Endpoint" />
-            <InfoRow label="Route" value={`${endpointDetails.routeMethod} ${endpointDetails.routePath}`} mono />
-            {endpointDetails.endpointLanguage && <InfoRow label="Language" value={endpointDetails.endpointLanguage} mono />}
-            {endpointDetails.handlers.map(handler => (
-              <button
-                key={handler.nodeId}
-                onClick={() => onSelectNode(handler.nodeId)}
-                className="w-full text-left rounded px-2 py-1.5 mt-1"
-                style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
-              >
-                <div style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>{handler.label}</div>
-                <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>
-                  {[handler.handlerLanguage, handler.handlerFile].filter(Boolean).join(' · ')}
-                </div>
-              </button>
-            ))}
-            <EndpointDataFlowSummary
-              incoming={incoming}
-              outgoing={outgoing}
-              nodeMap={nodeMap}
-            />
-          </Card>
-        )}
-
-        {/* call graph */}
-        {(callers.length > 0 || callees.length > 0 || apiCallers.length > 0 || apiTargets.length > 0 || renders.length > 0 || renderedBy.length > 0) && (
-          <Card>
-            <SectionLabel label="Call Graph" />
-            {callers.length > 0 && (
-              <NodeList label="Called by" icon={<ArrowDownRight size={11} color="#06B6D4" />} nodes={callers} onSelect={onSelectNode} confidenceByNodeId={callerConfidence} />
-            )}
-            {callees.length > 0 && (
-              <NodeList label="Calls" icon={<ArrowUpRight size={11} color="#EC4899" />} nodes={callees} onSelect={onSelectNode} confidenceByNodeId={calleeConfidence} />
-            )}
-            {apiCallers.length > 0 && (
-              <NodeList label="API called by" icon={<ArrowDownRight size={11} color="#E11D48" />} nodes={apiCallers} onSelect={onSelectNode} />
-            )}
-            {apiTargets.length > 0 && (
-              <NodeList label="API calls" icon={<ArrowUpRight size={11} color="#E11D48" />} nodes={apiTargets} onSelect={onSelectNode} />
-            )}
-            {renders.length > 0 && (
-              <NodeList label="Renders" icon={<ArrowUpRight size={11} color="#14B8A6" />} nodes={renders} onSelect={onSelectNode} />
-            )}
-            {renderedBy.length > 0 && (
-              <NodeList label="Rendered by" icon={<ArrowDownRight size={11} color="#14B8A6" />} nodes={renderedBy} onSelect={onSelectNode} />
-            )}
-          </Card>
-        )}
-
-        {node.language === 'qml' && node.type === 'Object' && contained.length > 0 && (
-          <Card>
-            <NodeList label="Contains" icon={<Layers size={11} color="#38BDF8" />} nodes={contained} onSelect={onSelectNode} />
-          </Card>
-        )}
-
-        {/* type references */}
-        {typeRefs.length > 0 && (
-          <Card>
-            <NodeList label="Type References" icon={<Layers size={11} color="#3B82F6" />} nodes={typeRefs} onSelect={onSelectNode} />
-          </Card>
-        )}
-
-        {/* data flow */}
-        {(incomingDataFlow.length > 0 || outgoingDataFlow.length > 0) && (
-          <Card>
-            <DataFlowList
-              incoming={incomingDataFlow}
-              outgoing={outgoingDataFlow}
-              nodeMap={nodeMap}
-              onSelect={onSelectNode}
-            />
-          </Card>
-        )}
-
-        {/* implementors (for traits) */}
-        {implementors.length > 0 && (
-          <Card>
-            <NodeList label="Implementors" icon={<Users size={11} color="#10B981" />} nodes={implementors} onSelect={onSelectNode} />
-          </Card>
-        )}
-
-        {/* used by */}
-        {usedBy.length > 0 && (
-          <Card>
-            <NodeList label="Used by" icon={<ChevronRight size={11} color="#F59E0B" />} nodes={usedBy.slice(0, 6)} onSelect={onSelectNode} />
-          </Card>
-        )}
-
-        {references.length > 0 && (
-          <Card>
-            <ReferenceList references={references.slice(0, 8)} onSelect={onSelectNode} />
-          </Card>
-        )}
-
-        {diagnostics.length > 0 && (
-          <Card>
-            <DiagnosticsList diagnostics={diagnostics} />
-          </Card>
-        )}
-
-        {/* stats */}
         <Card>
-          <div className="grid grid-cols-2 gap-2">
+          <SectionTitle>Most connected</SectionTitle>
+          <div className="space-y-1.5">
+            {topNodes.map(({ node, degree }) => <NodeRow key={node.id} node={node} right={String(degree)} onClick={() => props.onSelectNode(node.id)} />)}
+          </div>
+        </Card>
+      </div>
+    </>
+  )
+}
+
+function NodePanel(props: InspectorPanelProps & { node: GraphNode }) {
+  const node = props.node
+  const language = inferNodeLanguage(node)
+  const incoming = props.edges.filter(edge => edge.target === node.id)
+  const outgoing = props.edges.filter(edge => edge.source === node.id)
+  const related = [...incoming.map(edge => edge.source), ...outgoing.map(edge => edge.target)]
+    .map(id => props.nodes.find(item => item.id === id))
+    .filter((item): item is GraphNode => Boolean(item))
+    .slice(0, 8)
+  const collapsed = props.collapsedGroups.has(node.id)
+  const collapsible = node.type === 'File' || node.type === 'Module' || node.type === 'Object'
+
+  return (
+    <>
+      <Header title={node.label} subtitle={node.file ?? node.module ?? node.crate ?? node.type} />
+      <div className="overflow-y-auto flex-1 p-3 space-y-4" style={{ scrollbarWidth: 'thin' }}>
+        <Card>
+          <div className="flex flex-wrap gap-1.5">
+            <Badge color="#64748B">{node.type}</Badge>
+            <Badge color={languageColor(language)}>{languageIcon(language)} {languageDisplay(language)}</Badge>
+            {node.visibility && <Badge color="#64748B">{node.visibility}</Badge>}
+            {node.reachability === 'Detached' && <Badge color="#94A3B8">Detached</Badge>}
+          </div>
+          {node.signature && <pre className="mt-3 rounded-lg p-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', color: 'var(--cc-text-muted)', fontSize: 10, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{node.signature}</pre>}
+          {node.description && <Text>{node.description}</Text>}
+        </Card>
+
+        <Card>
+          <SectionTitle>Location</SectionTitle>
+          <Info label="File" value={node.file ?? 'unknown'} />
+          <Info label="Module" value={node.module ?? 'unknown'} />
+          <Info label="Crate" value={node.crate ?? 'unknown'} />
+          <Info label="Line" value={node.line ? String(node.line) : 'unknown'} />
+        </Card>
+
+        <Card>
+          <SectionTitle>Relations</SectionTitle>
+          <div className="grid grid-cols-2 gap-2 mb-3">
             <SmallStat label="Incoming" value={incoming.length} />
             <SmallStat label="Outgoing" value={outgoing.length} />
           </div>
+          <div className="space-y-1.5">
+            {related.map(item => <NodeRow key={item.id} node={item} onClick={() => props.onSelectNode(item.id)} />)}
+            {!related.length && <Text>No direct relations in current view.</Text>}
+          </div>
         </Card>
 
-        {/* actions */}
-        <div className="grid grid-cols-2 gap-2">
-          <ActionBtn icon={<BookMarked size={13} />} label="Bookmark" onClick={() => {}} />
-          <ActionBtn icon={<Pin size={13} />} label={node.pinned ? 'Unpin Node' : 'Pin Node'} onClick={() => onTogglePin(node.id)} active={!!node.pinned} />
-          <ActionBtn icon={<Layers size={13} />} label={collapsed ? 'Expand Group' : 'Collapse Group'} onClick={() => onToggleCollapse(node.id)} active={collapsed} disabled={!collapsible} />
-          <ActionBtn icon={<GitBranch size={13} />} label={showingNeighborhood ? 'Hide Neighborhood' : 'Show Neighborhood'} onClick={() => onShowNeighborhood(node.id)} active={showingNeighborhood} />
-          <ActionBtn icon={<ExternalLink size={13} />} label="Open in Editor" onClick={() => onOpenInEditor(node)} disabled={!node.file} />
-        </div>
+        <Card>
+          <SectionTitle>Actions</SectionTitle>
+          <div className="grid grid-cols-2 gap-2">
+            <Action icon={<Pin size={13} />} label={node.pinned ? 'Unpin Node' : 'Pin Node'} onClick={() => props.onTogglePin(node.id)} active={!!node.pinned} />
+            <Action icon={<Layers size={13} />} label={collapsed ? 'Expand Group' : 'Collapse Group'} onClick={() => props.onToggleCollapse(node.id)} active={collapsed} disabled={!collapsible} />
+            <Action icon={<ExternalLink size={13} />} label="Open in Editor" onClick={() => props.onOpenInEditor(node)} disabled={!node.file} />
+          </div>
+        </Card>
       </div>
-    </div>
+    </>
   )
 }
 
-// ── Mini components ─────────────────────────────────────────────────────────
-function PanelHeader({ title, subtitle, subtitleColor }: { title: string; subtitle?: string; subtitleColor?: string }) {
-  const subtitleBg = subtitleColor ? `${subtitleColor}18` : 'var(--cc-elevated)'
-  return (
-    <div className="flex items-center gap-2 px-3 shrink-0" style={{ height: 40, borderBottom: '1px solid var(--cc-border)' }}>
-      <span style={{ color: 'var(--cc-text-muted)', fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{title}</span>
-      {subtitle && (
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: subtitleColor ?? 'var(--cc-text-subtle)', background: subtitleBg, padding: '2px 7px', borderRadius: 4 }}>
-          {subtitle}
-        </span>
-      )}
-    </div>
-  )
+function languageCounts(nodes: GraphNode[]) {
+  return {
+    Rust: nodes.filter(node => inferNodeLanguage(node) === 'rust').length,
+    TS: nodes.filter(node => inferNodeLanguage(node) === 'typescript' || inferNodeLanguage(node) === 'javascript').length,
+    Python: nodes.filter(node => inferNodeLanguage(node) === 'python').length,
+    QML: nodes.filter(node => inferNodeLanguage(node) === 'qml').length,
+    API: nodes.filter(node => inferNodeLanguage(node) === 'endpoints').length,
+  }
+}
+
+function Header({ title, subtitle }: { title: string; subtitle?: string | null }) {
+  return <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--cc-border)' }}><div style={{ fontSize: 11, color: 'var(--cc-text-faint)', fontWeight: 750, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{title}</div>{subtitle && <div className="mt-1 truncate" style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{subtitle}</div>}</div>
 }
 
 function Card({ children }: { children: ReactNode }) {
-  return <div className="rounded-lg p-3" style={{ background: 'var(--cc-card)', border: '1px solid var(--cc-border)' }}>{children}</div>
+  return <div className="rounded-xl p-3" style={{ background: 'var(--cc-card)', border: '1px solid var(--cc-border)' }}>{children}</div>
 }
 
-function Section({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--cc-text-faint)', letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>{label}</p>
-      {children}
-    </div>
-  )
+function SectionTitle({ children }: { children: ReactNode }) {
+  return <p style={{ fontSize: 10, color: 'var(--cc-text-faint)', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 8 }}>{children}</p>
 }
 
-function SectionLabel({ label }: { label: string }) {
-  return <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--cc-text-faint)', letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>{label}</p>
+function Text({ children }: { children: ReactNode }) {
+  return <div style={{ marginTop: 8, fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.45 }}>{children}</div>
 }
 
-function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex items-start gap-2 py-0.5">
-      <span style={{ fontSize: 11, color: 'var(--cc-text-subtle)', width: 48, shrink: 0 }}>{label}</span>
-      <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: mono ? 'JetBrains Mono, monospace' : 'inherit', wordBreak: 'break-all' }}>{value}</span>
-    </div>
-  )
-}
-
-function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div className="rounded-lg p-2 text-center" style={{ background: 'var(--cc-card)', border: '1px solid var(--cc-border)' }}>
-      <div style={{ fontSize: 20, fontWeight: 750, color, lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{label}</div>
-    </div>
-  )
-}
-
-function MetricPill({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-md px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-      <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 700 }}>{value}</div>
-      <div style={{ fontSize: 9, color: 'var(--cc-text-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
-    </div>
-  )
+function Stat({ label, value, color }: { label: string; value: number; color: string }) {
+  return <div className="rounded-lg p-2 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}><div style={{ fontSize: 22, lineHeight: 1, fontWeight: 800, color }}>{value}</div><div style={{ fontSize: 9, color: 'var(--cc-text-subtle)', marginTop: 4 }}>{label}</div></div>
 }
 
 function SmallStat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="text-center py-1">
-      <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--cc-text-muted)' }}>{value}</div>
-      <div style={{ fontSize: 10, color: 'var(--cc-text-faint)' }}>{label}</div>
-    </div>
-  )
+  return <div className="rounded-md px-1.5 py-1.5 text-center" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}><div style={{ fontSize: 13, color: 'var(--cc-text)', fontWeight: 800 }}>{value}</div><div style={{ fontSize: 8, color: 'var(--cc-text-subtle)' }}>{label}</div></div>
 }
 
-function NodeList({ label, icon, nodes, onSelect, confidenceByNodeId }: {
-  label: string
-  icon: ReactNode
-  nodes: GraphNode[]
-  onSelect: (id: string) => void
-  confidenceByNodeId?: Map<string, EdgeConfidence>
-}) {
-  return (
-    <div className="mb-1">
-      <div className="flex items-center gap-1.5 mb-1.5">
-        {icon}
-        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>{label} ({nodes.length})</span>
-      </div>
-      {nodes.map(n => (
-        <button
-          key={n.id}
-          onClick={() => onSelect(n.id)}
-          className="flex items-start gap-2 w-full rounded py-1 px-1.5 transition-colors"
-          style={{ background: 'none', cursor: 'pointer' }}
-        >
-          <TypeDot type={n.type} />
-          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', textAlign: 'left', flex: 1, minWidth: 0, overflowWrap: 'anywhere', lineHeight: 1.35 }}>{n.label}</span>
-          {confidenceByNodeId?.get(n.id) && <ConfidenceBadge confidence={confidenceByNodeId.get(n.id)!} />}
-          <ChevronRight size={10} color="var(--cc-text-faint)" />
-        </button>
-      ))}
-    </div>
-  )
+function Badge({ children, color }: { children: ReactNode; color: string }) {
+  return <span className="rounded-full px-2 py-0.5" style={{ color, background: `${color}18`, border: `1px solid ${color}44`, fontSize: 10, fontWeight: 700 }}>{children}</span>
 }
 
-function ReferenceList({ references, onSelect }: { references: ReferenceRecord[]; onSelect: (id: string) => void }) {
-  return (
-    <div>
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <ChevronRight size={11} color="#F59E0B" />
-        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>References ({references.length})</span>
-      </div>
-      {references.map((reference, index) => (
-        <button
-          key={`${reference.location.file}:${reference.location.line}:${reference.location.character}:${reference.node?.id ?? index}`}
-          onClick={() => reference.node && onSelect(reference.node.id)}
-          disabled={!reference.node}
-          className="flex items-center gap-2 w-full rounded py-1 px-1.5 transition-colors"
-          style={{ background: 'none', cursor: reference.node ? 'pointer' : 'default', opacity: reference.node ? 1 : 0.82 }}
-        >
-          <TypeDot type={reference.node?.type ?? 'File'} />
-          <span style={{ fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', textAlign: 'left', flex: 1 }}>
-            {reference.node?.label ?? reference.location.file}
-          </span>
-          <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontFamily: 'JetBrains Mono, monospace' }}>
-            L{reference.location.line}
-          </span>
-        </button>
-      ))}
-    </div>
-  )
+function Info({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-start gap-2 py-1"><span style={{ width: 54, fontSize: 10, color: 'var(--cc-text-faint)' }}>{label}</span><span className="min-w-0 flex-1 break-all" style={{ fontSize: 10, color: 'var(--cc-text-muted)' }}>{value}</span></div>
 }
 
-function DataFlowList({
-  incoming,
-  outgoing,
-  nodeMap,
-  onSelect,
-}: {
-  incoming: GraphEdge[]
-  outgoing: GraphEdge[]
-  nodeMap: Map<string, GraphNode>
-  onSelect: (id: string) => void
-}) {
-  return (
-    <div>
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <GitBranch size={11} color="#8B5CF6" />
-        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>
-          Data flow ({incoming.length + outgoing.length})
-        </span>
-      </div>
-      {incoming.length > 0 && (
-        <div className="mb-2">
-          <div style={{ fontSize: 10, color: 'var(--cc-text-faint)', marginBottom: 4 }}>Incoming</div>
-          {incoming.slice(0, 6).map(edge => (
-            <DataFlowRow key={edge.id} edge={edge} node={nodeMap.get(edge.source)} direction="from" onSelect={onSelect} />
-          ))}
-        </div>
-      )}
-      {outgoing.length > 0 && (
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--cc-text-faint)', marginBottom: 4 }}>Outgoing</div>
-          {outgoing.slice(0, 6).map(edge => (
-            <DataFlowRow key={edge.id} edge={edge} node={nodeMap.get(edge.target)} direction="to" onSelect={onSelect} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
+function NodeRow({ node, right, onClick }: { node: GraphNode; right?: string; onClick?: () => void }) {
+  const language = inferNodeLanguage(node)
+  const color = languageColor(language)
+  return <button onClick={onClick} className="w-full rounded-lg px-2 py-2 text-left" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', cursor: onClick ? 'pointer' : 'default' }}><div className="flex items-center gap-2"><span style={{ width: 24, height: 16, borderRadius: 999, border: `1px solid ${color}`, color, fontSize: 8, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{languageIcon(language)}</span><span className="truncate" style={{ fontSize: 10, color: 'var(--cc-text)', fontWeight: 700, flex: 1 }}>{node.label}</span>{right && <span style={{ fontSize: 9, color: 'var(--cc-text-faint)' }}>{right}</span>}</div><div className="truncate" style={{ fontSize: 9, color: 'var(--cc-text-subtle)', marginTop: 3 }}>{node.file ?? node.module ?? node.type}</div></button>
 }
 
-function DataFlowRow({ edge, node, direction, onSelect }: { edge: GraphEdge; node?: GraphNode; direction: 'from' | 'to'; onSelect: (id: string) => void }) {
-  const confidence = edge.confidence ?? 'SyntaxFallback'
-  const nodeMeta = [node?.type, node?.language].filter(Boolean).join(' · ')
-  const evidence = shortEvidence(edge.evidence)
-  return (
-    <button
-      onClick={() => node && onSelect(node.id)}
-      className="mb-1.5 w-full rounded px-2 py-1.5 text-left"
-      style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', cursor: node ? 'pointer' : 'default' }}
-    >
-      <div className="flex items-center gap-1.5 min-w-0">
-        <Badge color="#8B5CF6">{edge.dataFlowKind ?? 'Unknown'}</Badge>
-        <ConfidenceBadge confidence={confidence} />
-        <span style={{ fontSize: 10, color: 'var(--cc-text-muted)' }}>{direction}</span>
-        <span style={{ fontSize: 10, color: 'var(--cc-text)', fontFamily: 'JetBrains Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{node?.label ?? 'unresolved'}</span>
-      </div>
-      {nodeMeta && (
-        <div style={{ marginTop: 3, fontSize: 9, color: 'var(--cc-text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {nodeMeta}
-        </div>
-      )}
-      {(edge.label || evidence) && (
-        <div style={{ marginTop: 4, fontSize: 10, color: 'var(--cc-text-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {edge.label}{edge.label && evidence ? ' · ' : ''}{evidence}
-        </div>
-      )}
-    </button>
-  )
-}
-
-function EndpointDataFlowSummary({
-  incoming,
-  outgoing,
-  nodeMap,
-}: {
-  incoming: GraphEdge[]
-  outgoing: GraphEdge[]
-  nodeMap: Map<string, GraphNode>
-}) {
-  const dataFlows = [...incoming, ...outgoing].filter(edge => edge.type === 'DataFlow')
-  const requests = dataFlows.filter(edge => edge.dataFlowKind === 'ApiRequest')
-  const responses = dataFlows.filter(edge => edge.dataFlowKind === 'ApiResponse' || edge.dataFlowKind === 'ReturnValue')
-  const models = dataFlows.filter(edge => edge.dataFlowKind === 'ModelUse')
-  const callerLanguages = languageCounts(incoming.filter(edge => edge.type === 'ApiCall').map(edge => nodeMap.get(edge.source)))
-  if (!requests.length && !responses.length && !models.length && !callerLanguages.length) return null
-  return (
-    <div className="mt-2 rounded p-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-      <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 600, marginBottom: 6 }}>Data Flow Summary</div>
-      {requests.length > 0 && <InfoRow label="Requests" value={`${requests.length} ApiRequest`} mono />}
-      {responses.length > 0 && <InfoRow label="Responses" value={`${responses.length} response/return`} mono />}
-      {models.length > 0 && <InfoRow label="Models" value={`${models.length} model flow`} mono />}
-      {callerLanguages.length > 0 && <InfoRow label="Callers" value={callerLanguages.join(', ')} mono />}
-    </div>
-  )
-}
-
-function languageCounts(nodes: Array<GraphNode | undefined>) {
-  const counts = new Map<string, number>()
-  for (const node of nodes) {
-    const language = node?.language ?? (node?.type === 'Endpoint' ? 'endpoint' : 'unknown')
-    counts.set(language, (counts.get(language) ?? 0) + 1)
-  }
-  return [...counts.entries()].map(([language, count]) => `${language}:${count}`)
-}
-
-function shortEvidence(evidence?: string) {
-  if (!evidence) return ''
-  const compact = evidence.replace(/\s+/g, ' ').trim()
-  return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact
-}
-
-function TracePanel({ trace, nodeMap, onSelect, onClearHighlight, onBuildContext }: { trace: TraceExplanation; nodeMap: Map<string, GraphNode>; onSelect: (id: string) => void; onClearHighlight: () => void; onBuildContext: (trace: TraceExplanation) => void }) {
-  const copyMarkdown = () => {
-    const markdown = traceToMarkdown(trace)
-    void navigator.clipboard?.writeText(markdown)
-  }
-  return (
-    <div>
-      <div className="flex items-start gap-2 mb-2">
-        <GitBranch size={12} color="#8B5CF6" />
-        <div className="flex-1 min-w-0">
-          <div style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 650 }}>{trace.title}</div>
-          <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{trace.summary}</div>
-        </div>
-        <button
-          onClick={copyMarkdown}
-          className="rounded px-2 py-1"
-          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
-        >
-          Copy
-        </button>
-        <button
-          onClick={onClearHighlight}
-          className="rounded px-2 py-1"
-          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
-        >
-          Clear
-        </button>
-        <button
-          onClick={() => onBuildContext(trace)}
-          className="rounded px-2 py-1"
-          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
-        >
-          Context
-        </button>
-      </div>
-      {trace.warnings.map(warning => (
-        <div key={warning} className="rounded p-1.5 mb-1.5" style={{ fontSize: 10, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B30' }}>
-          {warning}
-        </div>
-      ))}
-      <div className="space-y-1.5">
-        {trace.steps.map((step, index) => (
-          <TraceStepRow key={step.id} step={step} index={index} node={step.nodeId ? nodeMap.get(step.nodeId) : undefined} onSelect={onSelect} />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ContextPackPanel({ pack }: { pack: ContextPack }) {
-  const [expanded, setExpanded] = useState(false)
-  const copyMarkdown = () => {
-    void navigator.clipboard?.writeText(contextPackToMarkdown(pack))
-  }
-  const files = [...new Set(pack.snippets.map(snippet => snippet.file))]
-  return (
-    <div>
-      <div className="flex items-start gap-2 mb-2">
-        <Layers size={12} color="#06B6D4" />
-        <div className="flex-1 min-w-0">
-          <div style={{ fontSize: 11, color: 'var(--cc-text)', fontWeight: 650 }}>{pack.title}</div>
-          <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', marginTop: 2 }}>{pack.summary || summarizeContextPack(pack)}</div>
-        </div>
-        <button
-          onClick={copyMarkdown}
-          className="rounded px-2 py-1"
-          style={{ fontSize: 10, color: 'var(--cc-text-muted)', background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}
-        >
-          Copy context
-        </button>
-      </div>
-      {pack.warnings.map(warning => (
-        <div key={warning} className="rounded p-1.5 mb-1.5" style={{ fontSize: 10, color: '#F59E0B', background: '#F59E0B14', border: '1px solid #F59E0B30' }}>
-          {warning}
-        </div>
-      ))}
-      <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', lineHeight: 1.5 }}>
-        {pack.snippets.length} snippets · {pack.nodes.length} nodes · {pack.edges.length} edges
-      </div>
-      {files.length > 0 && (
-        <div style={{ marginTop: 6, fontSize: 10, color: 'var(--cc-text-faint)', overflowWrap: 'anywhere' }}>
-          {files.slice(0, 5).join(', ')}{files.length > 5 ? ` +${files.length - 5}` : ''}
-        </div>
-      )}
-      {pack.snippets.length > 0 && (
-        <button
-          onClick={() => setExpanded(value => !value)}
-          className="rounded px-2 py-1 mt-2"
-          style={{ fontSize: 10, color: '#06B6D4', background: 'rgba(6,182,212,0.10)', border: '1px solid rgba(6,182,212,0.25)' }}
-        >
-          {expanded ? 'Hide snippets' : 'Show snippets'}
-        </button>
-      )}
-      {expanded && (
-        <div className="mt-2 space-y-2">
-          {pack.snippets.slice(0, 4).map(snippet => (
-            <div key={snippet.id} className="rounded p-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-              <div style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontFamily: 'JetBrains Mono, monospace', marginBottom: 4 }}>
-                {snippet.file}:L{snippet.startLine}-L{snippet.endLine}
-              </div>
-              <pre style={{ margin: 0, fontSize: 10, color: 'var(--cc-text-muted)', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>{snippet.code}</pre>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function TraceStepRow({ step, index, node, onSelect }: { step: TraceStep; index: number; node?: GraphNode; onSelect: (id: string) => void }) {
-  return (
-    <button
-      onClick={() => step.nodeId && onSelect(step.nodeId)}
-      disabled={!step.nodeId}
-      className="w-full rounded px-2 py-1.5 text-left"
-      style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)', opacity: step.reachability === 'Detached' ? 0.72 : 1 }}
-    >
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span style={{ fontSize: 10, color: 'var(--cc-text-faint)', width: 18 }}>{index + 1}.</span>
-        <Badge color={traceStepColor(step.kind)}>{step.kind}</Badge>
-        {step.confidence && <ConfidenceBadge confidence={step.confidence} />}
-        {step.reachability && step.reachability !== 'Active' && <Badge color="#7D8795">{step.reachability}</Badge>}
-      </div>
-      <div style={{ marginTop: 4, fontSize: 11, color: 'var(--cc-text-muted)', fontFamily: 'JetBrains Mono, monospace', overflowWrap: 'anywhere' }}>
-        {step.title}
-      </div>
-      <div style={{ marginTop: 2, fontSize: 10, color: 'var(--cc-text-subtle)', overflowWrap: 'anywhere' }}>
-        {[step.language ?? node?.language, step.file, step.line ? `L${step.line}` : undefined].filter(Boolean).join(' · ') || step.description}
-      </div>
-      {step.evidence && (
-        <div style={{ marginTop: 4, fontSize: 10, color: 'var(--cc-text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {shortEvidence(step.evidence)}
-        </div>
-      )}
-    </button>
-  )
-}
-
-function traceStepColor(kind: TraceStep['kind']) {
-  if (kind === 'ApiRequest' || kind === 'Endpoint' || kind === 'EndpointHandler') return '#E11D48'
-  if (kind === 'BackendHandler' || kind === 'ServiceCall') return '#EC4899'
-  if (kind === 'ReturnValue' || kind === 'ApiResponse' || kind === 'ModelUse') return '#8B5CF6'
-  if (kind === 'DetachedSource') return '#7D8795'
-  return '#06B6D4'
-}
-
-function DiagnosticsList({ diagnostics }: { diagnostics: DiagnosticRecord[] }) {
-  return (
-    <div>
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <AlertTriangle size={11} color="#F87171" />
-        <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontWeight: 500 }}>Diagnostics ({diagnostics.length})</span>
-      </div>
-      {diagnostics.map(diagnostic => (
-        <div key={diagnostic.id} className="rounded p-2 mb-1.5" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-          <div className="flex items-center gap-2 mb-1">
-            <DiagnosticBadge diagnostic={diagnostic} />
-            <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)', fontFamily: 'JetBrains Mono, monospace' }}>L{diagnostic.range ? diagnostic.range.start.line + 1 : 0}</span>
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--cc-text-muted)', lineHeight: 1.35 }}>{diagnostic.message}</div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function DiagnosticBadge({ diagnostic }: { diagnostic: DiagnosticRecord }) {
-  const color = diagnostic.severity === 'Error' ? '#F87171' : diagnostic.severity === 'Warning' ? '#F59E0B' : '#7D8795'
-  return <Badge color={color}>{diagnostic.severity}</Badge>
-}
-
-function ConfidenceBadge({ confidence }: { confidence: EdgeConfidence }) {
-  const colors: Record<EdgeConfidence, string> = {
-    Exact: '#34D399',
-    Semantic: '#06B6D4',
-    SyntaxFallback: '#F59E0B',
-    Heuristic: '#7D8795',
-  }
-  return (
-    <span style={{ fontSize: 9, color: colors[confidence], border: `1px solid ${colors[confidence]}30`, background: `${colors[confidence]}18`, borderRadius: 4, padding: '1px 4px', flexShrink: 0, marginTop: 1 }}>
-      {confidence}
-    </span>
-  )
-}
-
-function confidenceByNode(edges: GraphEdge[], side: 'source' | 'target') {
-  const map = new Map<string, EdgeConfidence>()
-  edges.forEach(edge => {
-    if (edge.confidence) map.set(edge[side], edge.confidence)
-  })
-  return map
-}
-
-function referenceRecordsFromNodes(nodes: GraphNode[]): ReferenceRecord[] {
-  return nodes
-    .filter(node => node.file)
-    .map(node => ({
-      node,
-      location: {
-        file: node.file!,
-        line: node.line ?? 0,
-        character: node.selectionRange?.start.character ?? 0,
-        range: node.range,
-      },
-    }))
-}
-
-function TypeDot({ type }: { type: string }) {
-  const color = NODE_TYPE_COLORS[type] ?? '#7D8795'
-  return <div className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
-}
-
-function TypeIcon({ type, color }: { type: string; color: string }) {
-  const icons: Record<string, ReactNode> = {
-    Function: <Zap size={16} color={color} />,
-    Method: <Zap size={16} color={color} />,
-    Component: <Layers size={16} color={color} />,
-    Hook: <GitBranch size={16} color={color} />,
-    Interface: <Layers size={16} color={color} />,
-    TypeAlias: <Layers size={16} color={color} />,
-    Endpoint: <ExternalLink size={16} color={color} />,
-    Trait: <GitBranch size={16} color={color} />,
-    Struct: <Layers size={16} color={color} />,
-    default: <ChevronRight size={16} color={color} />,
-  }
-  return <>{icons[type] ?? icons.default}</>
-}
-
-function Badge({ color, children }: { color: string; children: ReactNode }) {
-  return (
-    <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: `${color}18`, color, border: `1px solid ${color}30` }}>
-      {children}
-    </span>
-  )
-}
-
-function VisBadge({ vis }: { vis: string }) {
-  const cfg: Record<string, { color: string; label: string }> = {
-    'pub': { color: '#34D399', label: 'pub' },
-    'pub(crate)': { color: '#F59E0B', label: 'pub(crate)' },
-    'private': { color: '#7D8795', label: 'private' },
-  }
-  const c = cfg[vis] ?? cfg['private']
-  return <Badge color={c.color}>{c.label}</Badge>
-}
-
-function ActionBtn({ icon, label, onClick, primary, active, disabled }: { icon: ReactNode; label: string; onClick: () => void; primary?: boolean; active?: boolean; disabled?: boolean }) {
-  const highlighted = !disabled && (primary || active)
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className="flex items-center gap-2 rounded-lg px-3 py-2 transition-all"
-      style={{
-        background: highlighted ? 'rgba(6,182,212,0.12)' : 'var(--cc-card)',
-        border: highlighted ? '1px solid rgba(6,182,212,0.3)' : '1px solid var(--cc-border)',
-        color: disabled ? 'var(--cc-text-faint)' : highlighted ? '#06B6D4' : 'var(--cc-text-muted)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        fontSize: 11,
-        fontWeight: 500,
-        opacity: disabled ? 0.55 : 1,
-        width: '100%',
-        justifyContent: 'center',
-      }}
-    >
-      {icon}
-      {label}
-    </button>
-  )
+function Action({ icon, label, onClick, active, disabled }: { icon: ReactNode; label: string; onClick: () => void; active?: boolean; disabled?: boolean }) {
+  return <button onClick={onClick} disabled={disabled} className="rounded-lg px-2 py-2 flex items-center gap-1.5 justify-center" style={{ background: active ? 'var(--cc-selected-soft)' : 'var(--cc-surface)', border: active ? '1px solid rgba(14,165,233,0.35)' : '1px solid var(--cc-border)', color: disabled ? 'var(--cc-text-faint)' : active ? 'var(--cc-accent)' : 'var(--cc-text-muted)', cursor: disabled ? 'not-allowed' : 'pointer', fontSize: 10, fontWeight: 650 }}>{icon}{label}</button>
 }
