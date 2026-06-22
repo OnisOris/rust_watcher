@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { GraphEdge, GraphFilters, GraphLabelMode, GraphLayoutMode, GraphLayoutSettings, GraphMode, GraphNode, ThemeMode, DiagnosticRecord } from '../types'
 import { inferNodeLanguage, languageColor, languageIcon } from '../api/language'
 
@@ -145,13 +146,15 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   const graphBounds = bounds(visibleNodes)
   const viewBox = `${graphBounds.minX} ${graphBounds.minY} ${graphBounds.width} ${graphBounds.height}`
 
-  const moveDragged = (event: React.PointerEvent<SVGSVGElement>) => {
+  const moveDragged = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (!draggedId) return
     const svg = event.currentTarget
     const point = svg.createSVGPoint()
     point.x = event.clientX
     point.y = event.clientY
-    const world = point.matrixTransform(svg.getScreenCTM()?.inverse())
+    const matrix = svg.getScreenCTM()
+    if (!matrix) return
+    const world = point.matrixTransform(matrix.inverse())
     const next = layout.map(node => node.id === draggedId ? { ...node, x: world.x, y: world.y, vx: 0, vy: 0, pinned: true } : node)
     setLayout(next)
   }
