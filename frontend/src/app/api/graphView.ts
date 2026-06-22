@@ -1,4 +1,5 @@
 import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphMode, GraphNode, NodeType } from '../types'
+import { inferNodeLanguage, languageFilterKey } from './language'
 
 export interface CollapsedGroupStats {
   groupId: string
@@ -238,40 +239,10 @@ export function buildRouteFlowGraph(graph: { nodes: GraphNode[]; edges: GraphEdg
   }
 }
 
-export function buildNeighborhoodGraph(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, selectedNodeId: string | null) {
-  if (!selectedNodeId) return graph
-  const keepNodes = new Set([selectedNodeId])
-  const keepEdges = new Set<string>()
-  const meaningful = new Set<EdgeType>(['Contains', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'Uses', 'Imports', 'DataFlow', 'TypeReference'])
-  for (const edge of graph.edges) {
-    if (edge.source !== selectedNodeId && edge.target !== selectedNodeId) continue
-    if (!meaningful.has(edge.type)) continue
-    keepEdges.add(edge.id)
-    keepNodes.add(edge.source)
-    keepNodes.add(edge.target)
-  }
-  for (const edge of graph.edges) {
-    if ((keepNodes.has(edge.source) || keepNodes.has(edge.target)) && (edge.type === 'ApiCall' || edge.type === 'EndpointHandler')) {
-      keepEdges.add(edge.id)
-      keepNodes.add(edge.source)
-      keepNodes.add(edge.target)
-    }
-  }
-  return {
-    nodes: graph.nodes.filter(node => keepNodes.has(node.id)),
-    edges: graph.edges.filter(edge => keepEdges.has(edge.id) && keepNodes.has(edge.source) && keepNodes.has(edge.target)),
-  }
-}
-
 export function matchesLanguageFilter(node: GraphNode, filters: GraphFilters) {
-  if (node.type === 'Endpoint') return filters.languages.has('endpoints')
-  if (node.type === 'ExternalCrate' || node.crate === 'external') return filters.languages.has('external')
-  const language = (node.language ?? '').toLowerCase()
-  if (language === 'javascript' || language === 'typescript') return filters.languages.has('typescript')
-  if (language === 'rust') return filters.languages.has('rust')
-  if (language === 'python') return filters.languages.has('python')
-  if (language === 'qml') return filters.languages.has('qml')
-  return true
+  const key = languageFilterKey(inferNodeLanguage(node))
+  if (!key) return true
+  return filters.languages.has(key)
 }
 
 export function matchesReachabilityFilter(node: GraphNode, filters: Pick<GraphFilters, 'showDetached'>) {
