@@ -131,18 +131,6 @@ export interface GraphNode {
   detachedReason?: string
   underlyingNodeIds?: string[]
   underlyingEdgeIds?: string[]
-  packagePath?: string
-  regionId?: string
-  layoutGuide?: string
-  packageStats?: {
-    fileCount: number
-    symbolCount: number
-    endpointCount: number
-    diagnosticCount: number
-    exportedSymbolCount: number
-    incomingEdgeCount: number
-    outgoingEdgeCount: number
-  }
   x: number
   y: number
   vx: number
@@ -162,7 +150,6 @@ export interface GraphEdge {
   bundledCount?: number
   bundledTypes?: EdgeType[]
   bundledEdgeIds?: string[]
-  routedPath?: Array<{ x: number; y: number }>
 }
 
 export interface LspPosition {
@@ -387,7 +374,6 @@ export interface SavedView {
   filters: Partial<GraphFilters>
   focusedNodeId?: string | null
   collapsedGroups: string[]
-  layoutOverrides?: Record<string, unknown>
   createdAt?: string
   updatedAt?: string
 }
