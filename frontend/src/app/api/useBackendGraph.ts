@@ -116,12 +116,26 @@ function edgeExists(edges: GraphEdge[], source: string, target: string) {
   return edges.some(edge => edge.source === source && edge.target === target)
 }
 
+function shouldHideWorkspaceWrapper(workspace: GraphNode, languageRoots: GraphNode[], edges: GraphEdge[]) {
+  if (languageRoots.length !== 1) return false
+  const languageRootIds = new Set(languageRoots.map(root => root.id))
+  const hasNonLanguageChild = edges.some(edge => edge.source === workspace.id && !languageRootIds.has(edge.target))
+  const hasIncomingEdge = edges.some(edge => edge.target === workspace.id)
+  return !hasNonLanguageChild && !hasIncomingEdge
+}
+
 function normalizeSnapshot(snapshot: GraphSnapshot): GraphSnapshot {
   const status = normalizeStatus(snapshot.status)
   const workspace = snapshot.nodes.find(isWorkspaceNode)
   const languageRoots = snapshot.nodes.filter(isLanguageRootNode)
   if (!workspace || languageRoots.length === 0) {
     return { ...snapshot, status }
+  }
+
+  if (shouldHideWorkspaceWrapper(workspace, languageRoots, snapshot.edges)) {
+    const nodes = snapshot.nodes.filter(node => node.id !== workspace.id)
+    const edges = snapshot.edges.filter(edge => edge.source !== workspace.id && edge.target !== workspace.id)
+    return { ...snapshot, nodes, edges, status }
   }
 
   let changed = false
@@ -396,7 +410,6 @@ export function useBackendGraph(mode: GraphMode) {
             x: node.x,
             y: node.y,
             vx: node.vx ?? 0,
-            vy: node.vy ?? 0,
             pinned: node.pinned ?? false,
           },
         }),
