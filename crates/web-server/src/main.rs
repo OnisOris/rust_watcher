@@ -9,15 +9,14 @@ use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use graph_builder::{
     build_fallback_graph, build_language_graph, enrich_api_routes_for_files, enrich_file_symbols,
-    enrich_syntax_relationships_for_files, filter_snapshot, focus_subgraph,
-    mark_rust_source_reachability, push_unique_edge_with_confidence, python, qml, typescript,
+    enrich_syntax_relationships_for_files, filter_snapshot, mark_rust_source_reachability,
+    push_unique_edge_with_confidence, python, qml, typescript,
 };
 use graph_core::{
     AnalysisEvent, AnalysisEventType, AnalyzerCapability, AnalyzerEngine, AnalyzerKind,
     AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
-    DiagnosticSeverity, EdgeConfidence, EdgeType, EndpointDetails, EndpointHandlerDetails,
-    FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphPatch, GraphSnapshot,
-    LanguageId, NodeDetailsResponse, PythonAnalyzerStatus, ReferenceRecord, SearchResult,
+    DiagnosticSeverity, EdgeConfidence, EdgeType, FocusDepth, FocusRequest, GraphMode, GraphNode,
+    GraphPatch, GraphSnapshot, LanguageId, PythonAnalyzerStatus, ReferenceRecord, SearchResult,
     ServerMessage, SourceLocation, SymbolIndex, SymbolKindName,
 };
 use parking_lot::RwLock;
@@ -62,7 +61,7 @@ use qml_lsp::{
     status_to_analyzer_status as qml_status_to_analyzer_status, QmlAnalyzerMode, QmlAnalyzerStatus,
     QmlLspState,
 };
-use trace::{active_trace_node, build_edge_trace, build_node_trace, build_route_trace};
+use trace::{build_edge_trace, build_node_trace, build_route_trace};
 use typescript_lsp::{
     enrich_typescript_semantic_edges_for_files, enrich_typescript_with_lsp, language_for_path,
     locations_from_definition_response, status_to_analyzer_status, TypeScriptAnalyzerMode,
@@ -789,66 +788,44 @@ async fn node_details(
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     let graph = state.graph.read().clone();
+
     let Some(node) = graph.nodes.iter().find(|node| node.id == id).cloned() else {
         return (StatusCode::NOT_FOUND, "node not found").into_response();
     };
+
     let node_by_id = graph
         .nodes
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect::<HashMap<_, _>>();
+
     let incoming_edges = graph
         .edges
         .iter()
         .filter(|edge| edge.target == id)
         .cloned()
         .collect::<Vec<_>>();
-    let outgoing_edges = graph
-        .edges
-        .iter()
-        .filter(|edge| edge.source == id)
-        .cloned()
-        .collect::<Vec<_>>();
-    let callers = incoming_edges
-        .iter()
-        .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
-        .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied().cloned())
-        .collect::<Vec<_>>();
-    let callees = outgoing_edges
-        .iter()
-        .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
-        .filter_map(|edge| node_by_id.get(edge.target.as_str()).copied().cloned())
-        .collect::<Vec<_>>();
-    let mut references = graph_reference_records(&incoming_edges, &node_by_id);
+
+    let mut references = graph_query::graph_reference_records(&incoming_edges, &node_by_id);
+
     references.extend(resolve_rust_references(&state, &graph, &node).await);
     references.extend(resolve_python_references(&state, &graph, &node).await);
     references.extend(resolve_typescript_references(&state, &graph, &node).await);
     references.extend(resolve_qml_references(&state, &graph, &node).await);
-    dedupe_references(&mut references);
-    let related_types = related_type_nodes(&incoming_edges, &outgoing_edges, &node_by_id);
+
+    graph_query::dedupe_references(&mut references);
+
     let diagnostics = state
         .diagnostics_by_node
         .read()
         .get(&id)
         .cloned()
         .unwrap_or_default();
-    let endpoint_details = endpoint_details_for_node(&node, &outgoing_edges, &node_by_id);
 
-    (
-        StatusCode::OK,
-        Json(NodeDetailsResponse {
-            node,
-            incoming_edges,
-            outgoing_edges,
-            callers,
-            callees,
-            references,
-            related_types,
-            diagnostics,
-            endpoint_details,
-        }),
-    )
-        .into_response()
+    match graph_query::node_details_base(&graph, &id, diagnostics, references) {
+        Some(details) => (StatusCode::OK, Json(details)).into_response(),
+        None => (StatusCode::NOT_FOUND, "node not found").into_response(),
+    }
 }
 
 async fn trace_node(
@@ -880,7 +857,7 @@ async fn trace_route_query(
 ) -> impl IntoResponse {
     let graph = state.graph.read().clone();
     let requested = graph_core::route_key(&query.method, &query.path).key;
-    match find_active_endpoint_by_route_key(&graph, &requested) {
+    match graph_query::find_active_endpoint_by_route_key(&graph, &requested) {
         Some(endpoint) => {
             (StatusCode::OK, Json(build_route_trace(&graph, endpoint))).into_response()
         }
@@ -894,24 +871,12 @@ async fn trace_route(
 ) -> impl IntoResponse {
     let graph = state.graph.read().clone();
     let requested = route_key.trim_start_matches('/');
-    match find_active_endpoint_by_route_key(&graph, requested) {
+    match graph_query::find_active_endpoint_by_route_key(&graph, requested) {
         Some(endpoint) => {
             (StatusCode::OK, Json(build_route_trace(&graph, endpoint))).into_response()
         }
         None => (StatusCode::NOT_FOUND, "active route not found").into_response(),
     }
-}
-
-fn find_active_endpoint_by_route_key<'a>(
-    graph: &'a GraphSnapshot,
-    requested: &str,
-) -> Option<&'a GraphNode> {
-    graph.nodes.iter().find(|node| {
-        node.node_type == graph_core::NodeType::Endpoint
-            && graph_core::route_key_from_label(&node.label)
-                .is_some_and(|route| route.key == requested)
-            && active_trace_node(node)
-    })
 }
 
 async fn context_node(
@@ -965,7 +930,7 @@ async fn context_route_query(
 ) -> impl IntoResponse {
     let graph = state.graph.read().clone();
     let requested = graph_core::route_key(&query.method, &query.path).key;
-    let Some(endpoint) = find_active_endpoint_by_route_key(&graph, &requested) else {
+    let Some(endpoint) = graph_query::find_active_endpoint_by_route_key(&graph, &requested) else {
         return (StatusCode::NOT_FOUND, "active route not found").into_response();
     };
     let diagnostics = state.diagnostics_by_node.read().clone();
@@ -1001,60 +966,15 @@ async fn context_trace(
         .into_response()
 }
 
-fn endpoint_details_for_node(
-    node: &GraphNode,
-    outgoing_edges: &[graph_core::GraphEdge],
-    node_by_id: &HashMap<&str, &GraphNode>,
-) -> Option<EndpointDetails> {
-    if node.node_type != graph_core::NodeType::Endpoint {
-        return None;
-    }
-    let route = graph_core::route_key_from_label(&node.label)?;
-    let handlers = outgoing_edges
-        .iter()
-        .filter(|edge| edge.edge_type == EdgeType::EndpointHandler)
-        .filter_map(|edge| node_by_id.get(edge.target.as_str()).copied())
-        .map(|handler| EndpointHandlerDetails {
-            node_id: handler.id.clone(),
-            label: handler.label.clone(),
-            handler_language: handler.language.clone(),
-            handler_file: handler.file.clone(),
-        })
-        .collect::<Vec<_>>();
-    Some(EndpointDetails {
-        route_method: route.method,
-        route_path: route.path,
-        route_key: route.key,
-        endpoint_language: node.language.clone(),
-        handlers,
-    })
-}
-
 async fn search(
     State(state): State<AppStateHandle>,
     Query(query): Query<SearchQuery>,
 ) -> Json<SearchResponse> {
-    let query = query.q.unwrap_or_default().to_lowercase();
-    let nodes = state.graph.read().nodes.clone();
-    let mut scored = nodes
-        .iter()
-        .filter_map(|node| score_node(node, &query).map(|score| (score, node)))
-        .collect::<Vec<_>>();
-    scored.sort_by(|(a_score, a), (b_score, b)| a_score.cmp(b_score).then(a.label.cmp(&b.label)));
+    let query = query.q.unwrap_or_default();
+    let graph = state.graph.read().clone();
+
     Json(SearchResponse {
-        results: scored
-            .into_iter()
-            .take(30)
-            .map(|(_, node)| SearchResult {
-                id: node.id.clone(),
-                label: node.label.clone(),
-                node_type: node.node_type,
-                file: node.file.clone(),
-                module: node.module.clone(),
-                crate_name: node.crate_name.clone(),
-                line: node.line,
-            })
-            .collect(),
+        results: graph_query::search_nodes(&graph, &query, 30),
     })
 }
 
@@ -1067,16 +987,9 @@ async fn focus(
         FocusDepth::Full(_) => None,
     };
     let graph = state.graph.read();
-    match focus_subgraph(&graph, &request.node_id, depth) {
-        Some((nodes, edges)) => (
-            StatusCode::OK,
-            Json(FocusResponse {
-                center: request.node_id,
-                nodes,
-                edges,
-            }),
-        )
-            .into_response(),
+
+    match graph_query::focus_subgraph(&graph, &request.node_id, depth) {
+        Some(response) => (StatusCode::OK, Json(response)).into_response(),
         None => (StatusCode::NOT_FOUND, "node not found").into_response(),
     }
 }
@@ -2793,60 +2706,6 @@ fn insert_semantic_call_edge(
     true
 }
 
-fn graph_reference_records(
-    incoming_edges: &[graph_core::GraphEdge],
-    node_by_id: &HashMap<&str, &GraphNode>,
-) -> Vec<ReferenceRecord> {
-    incoming_edges
-        .iter()
-        .filter(|edge| {
-            matches!(
-                edge.edge_type,
-                EdgeType::Calls
-                    | EdgeType::EndpointHandler
-                    | EdgeType::TypeReference
-                    | EdgeType::Uses
-                    | EdgeType::DataFlow
-            )
-        })
-        .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied())
-        .filter_map(|node| reference_from_node(Some(node.clone())))
-        .collect()
-}
-
-fn related_type_nodes(
-    incoming_edges: &[graph_core::GraphEdge],
-    outgoing_edges: &[graph_core::GraphEdge],
-    node_by_id: &HashMap<&str, &GraphNode>,
-) -> Vec<GraphNode> {
-    let mut seen = HashSet::new();
-    incoming_edges
-        .iter()
-        .chain(outgoing_edges.iter())
-        .filter(|edge| {
-            matches!(
-                edge.edge_type,
-                EdgeType::TypeReference | EdgeType::Implements
-            )
-        })
-        .flat_map(|edge| [edge.source.as_str(), edge.target.as_str()])
-        .filter_map(|id| node_by_id.get(id).copied())
-        .filter(|node| {
-            matches!(
-                node.node_type,
-                graph_core::NodeType::Struct
-                    | graph_core::NodeType::Enum
-                    | graph_core::NodeType::Trait
-                    | graph_core::NodeType::Impl
-                    | graph_core::NodeType::Interface
-                    | graph_core::NodeType::TypeAlias
-            )
-        })
-        .filter(|node| seen.insert(node.id.clone()))
-        .cloned()
-        .collect()
-}
-
 async fn resolve_rust_references(
     state: &AppStateHandle,
     graph: &GraphSnapshot,
@@ -3142,38 +3001,6 @@ fn reference_from_location(
             range: Some(range),
         },
     })
-}
-
-fn reference_from_node(node: Option<GraphNode>) -> Option<ReferenceRecord> {
-    let node = node?;
-    let file = node.file.clone()?;
-    let range = node.range;
-    Some(ReferenceRecord {
-        location: SourceLocation {
-            file,
-            line: node
-                .line
-                .unwrap_or_else(|| range.map(|range| range.start.line + 1).unwrap_or_default()),
-            character: node
-                .selection_range
-                .map(|range| range.start.character)
-                .unwrap_or_default(),
-            range,
-        },
-        node: Some(node),
-    })
-}
-
-fn dedupe_references(references: &mut Vec<ReferenceRecord>) {
-    let mut seen = HashSet::new();
-    references.retain(|reference| {
-        seen.insert((
-            reference.location.file.clone(),
-            reference.location.line,
-            reference.location.character,
-            reference.node.as_ref().map(|node| node.id.clone()),
-        ))
-    });
 }
 
 fn decorate_app_status(state: &AppStateHandle, status: &mut AppStatus) {
@@ -3697,28 +3524,6 @@ fn timestamp() -> String {
     format!("{secs}")
 }
 
-fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
-    if query.is_empty() {
-        return Some(3);
-    }
-    let fields = [
-        node.label.to_lowercase(),
-        node.file.clone().unwrap_or_default().to_lowercase(),
-        node.module.clone().unwrap_or_default().to_lowercase(),
-        node.crate_name.clone().unwrap_or_default().to_lowercase(),
-        format!("{:?}", node.node_type).to_lowercase(),
-    ];
-    if fields.iter().any(|field| field == query) {
-        Some(0)
-    } else if fields.iter().any(|field| field.starts_with(query)) {
-        Some(1)
-    } else if fields.iter().any(|field| field.contains(query)) {
-        Some(2)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4154,7 +3959,7 @@ mod tests {
     fn route_trace_query_lookup_uses_method_and_path_key() {
         let snapshot = trace_snapshot();
         let key = graph_core::route_key("get", "/api/users").key;
-        let endpoint = find_active_endpoint_by_route_key(&snapshot, &key).unwrap();
+        let endpoint = graph_query::find_active_endpoint_by_route_key(&snapshot, &key).unwrap();
         let trace = build_route_trace(&snapshot, endpoint);
 
         assert_eq!(trace.route_key.as_deref(), Some("GET /api/users"));
@@ -4212,84 +4017,6 @@ mod tests {
             .steps
             .iter()
             .any(|step| step.node_id.as_deref() == Some("generated")));
-    }
-
-    #[test]
-    fn search_scoring_prefers_exact_then_prefix_then_contains() {
-        let exact = test_node("main", Some("src/main.rs"), Some("app"));
-        let prefix = test_node("main_handler", Some("src/routes.rs"), Some("app"));
-        let contains = test_node("domain_main", Some("src/domain.rs"), Some("app"));
-        let miss = test_node("health", Some("src/health.rs"), Some("app"));
-
-        assert_eq!(score_node(&exact, "main"), Some(0));
-        assert_eq!(score_node(&prefix, "main"), Some(1));
-        assert_eq!(score_node(&contains, "main"), Some(2));
-        assert_eq!(score_node(&miss, "main"), None);
-    }
-
-    #[test]
-    fn node_details_shape_can_hold_confidence_edges() {
-        let node = test_node("main", Some("src/main.rs"), Some("app"));
-        let edge = test_edge(EdgeType::Calls, "a", "b", EdgeConfidence::Semantic);
-        let response = NodeDetailsResponse {
-            node,
-            incoming_edges: vec![edge.clone()],
-            outgoing_edges: vec![edge],
-            callers: Vec::new(),
-            callees: Vec::new(),
-            references: vec![ReferenceRecord {
-                node: None,
-                location: SourceLocation {
-                    file: "src/main.rs".into(),
-                    line: 1,
-                    character: 0,
-                    range: None,
-                },
-            }],
-            related_types: Vec::new(),
-            diagnostics: Vec::new(),
-            endpoint_details: None,
-        };
-        assert_eq!(
-            response.incoming_edges[0].confidence,
-            EdgeConfidence::Semantic
-        );
-        assert_eq!(response.references[0].location.file, "src/main.rs");
-    }
-
-    #[test]
-    fn endpoint_details_include_route_and_handler_context() {
-        let mut endpoint = test_node("GET /api/users", Some("backend/main.py"), Some("backend"));
-        endpoint.id = "py-endpoint:backend/main.py::GET:/api/users".into();
-        endpoint.language = Some("python".into());
-        endpoint.node_type = graph_core::NodeType::Endpoint;
-        let mut handler = test_node("users", Some("backend/main.py"), Some("backend"));
-        handler.id = "py-fn:backend/main.py::users@8".into();
-        handler.language = Some("python".into());
-        let edge = test_edge(
-            EdgeType::EndpointHandler,
-            endpoint.id.clone(),
-            handler.id.clone(),
-            EdgeConfidence::Exact,
-        );
-        let node_by_id = HashMap::from([
-            (endpoint.id.as_str(), &endpoint),
-            (handler.id.as_str(), &handler),
-        ]);
-
-        let details = endpoint_details_for_node(&endpoint, &[edge], &node_by_id).unwrap();
-        assert_eq!(details.route_method, "GET");
-        assert_eq!(details.route_path, "/api/users");
-        assert_eq!(details.route_key, "GET /api/users");
-        assert_eq!(details.endpoint_language.as_deref(), Some("python"));
-        assert_eq!(
-            details.handlers[0].handler_language.as_deref(),
-            Some("python")
-        );
-        assert_eq!(
-            details.handlers[0].handler_file.as_deref(),
-            Some("backend/main.py")
-        );
     }
 
     #[test]

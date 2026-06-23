@@ -498,6 +498,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "graph-core",
+ "graph-query",
  "project-indexer",
  "tree-sitter",
  "tree-sitter-python",
@@ -511,6 +512,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "graph-query"
+version = "0.1.0"
+dependencies = [
+ "graph-core",
 ]
 
 [[package]]
@@ -1846,6 +1854,7 @@ dependencies = [
  "futures-util",
  "graph-builder",
  "graph-core",
+ "graph-query",
  "notify",
  "parking_lot",
  "project-indexer",

@@ -1,7 +1,5 @@
-use graph_core::{
-    EdgeType, GraphEdge, GraphMode, GraphNode, GraphSnapshot, NodeType, SourceReachability,
-};
-use std::collections::{HashSet, VecDeque};
+use graph_core::{EdgeType, GraphMode, GraphSnapshot, NodeType, SourceReachability};
+use std::collections::HashSet;
 
 pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapshot {
     let (node_types, edge_types): (HashSet<NodeType>, HashSet<EdgeType>) = match mode {
@@ -227,52 +225,4 @@ pub fn filter_snapshot(snapshot: &GraphSnapshot, mode: GraphMode) -> GraphSnapsh
     filtered.nodes = nodes;
     filtered.edges = edges;
     filtered
-}
-
-pub fn focus_subgraph(
-    snapshot: &GraphSnapshot,
-    node_id: &str,
-    depth: Option<u8>,
-) -> Option<(Vec<GraphNode>, Vec<GraphEdge>)> {
-    if !snapshot.nodes.iter().any(|node| node.id == node_id) {
-        return None;
-    }
-    let max_depth = depth.unwrap_or(u8::MAX);
-    let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([(node_id.to_string(), 0u8)]);
-    seen.insert(node_id.to_string());
-
-    while let Some((current, current_depth)) = queue.pop_front() {
-        if current_depth >= max_depth {
-            continue;
-        }
-        for edge in &snapshot.edges {
-            let next = if edge.source == current {
-                Some(edge.target.clone())
-            } else if edge.target == current {
-                Some(edge.source.clone())
-            } else {
-                None
-            };
-            if let Some(next) = next {
-                if seen.insert(next.clone()) {
-                    queue.push_back((next, current_depth.saturating_add(1)));
-                }
-            }
-        }
-    }
-
-    let nodes = snapshot
-        .nodes
-        .iter()
-        .filter(|node| seen.contains(&node.id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let edges = snapshot
-        .edges
-        .iter()
-        .filter(|edge| seen.contains(&edge.source) && seen.contains(&edge.target))
-        .cloned()
-        .collect::<Vec<_>>();
-    Some((nodes, edges))
 }

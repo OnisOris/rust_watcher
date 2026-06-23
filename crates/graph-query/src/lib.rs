@@ -94,7 +94,11 @@ pub fn node_details_base(
     diagnostics: Vec<DiagnosticRecord>,
     references: Vec<ReferenceRecord>,
 ) -> Option<NodeDetailsResponse> {
-    let node = graph.nodes.iter().find(|node| node.id == node_id).cloned()?;
+    let node = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .cloned()?;
     let node_by_id = graph
         .nodes
         .iter()
@@ -168,7 +172,12 @@ pub fn related_type_nodes(
     incoming_edges
         .iter()
         .chain(outgoing_edges.iter())
-        .filter(|edge| matches!(edge.edge_type, EdgeType::TypeReference | EdgeType::Implements))
+        .filter(|edge| {
+            matches!(
+                edge.edge_type,
+                EdgeType::TypeReference | EdgeType::Implements
+            )
+        })
         .flat_map(|edge| [edge.source.as_str(), edge.target.as_str()])
         .filter_map(|id| node_by_id.get(id).copied())
         .filter(|node| {

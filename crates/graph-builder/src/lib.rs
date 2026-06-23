@@ -17,7 +17,7 @@ pub mod rust;
 pub mod typescript;
 
 pub(crate) use endpoints::*;
-pub use filters::{filter_snapshot, focus_subgraph};
+pub use filters::filter_snapshot;
 pub(crate) use ids::*;
 pub use python::PythonLanguageAdapter;
 pub use qml::QmlLanguageAdapter;
@@ -1836,21 +1836,6 @@ mod tests {
     }
 
     #[test]
-    fn focus_subgraph_returns_neighborhood() {
-        let snapshot = test_snapshot();
-        let (nodes, edges) = focus_subgraph(&snapshot, "fn:src/main.rs::main@1", Some(1)).unwrap();
-        let ids = nodes
-            .into_iter()
-            .map(|node| node.id)
-            .collect::<HashSet<_>>();
-        assert!(ids.contains("fn:src/main.rs::main@1"));
-        assert!(ids.contains("file:src/main.rs"));
-        assert!(ids.contains("fn:src/main.rs::helper@5"));
-        assert!(!ids.contains("struct:src/main.rs::Person@9"));
-        assert_eq!(edges.len(), 3);
-    }
-
-    #[test]
     fn filter_snapshot_call_flow_keeps_call_edges() {
         let snapshot = test_snapshot();
         let filtered = filter_snapshot(&snapshot, GraphMode::CallFlow);
@@ -1956,11 +1941,11 @@ export function App() {
                 && edge.data_flow_kind == Some(DataFlowKind::ApiResponse)
         }));
 
-        let (focused_nodes, focused_edges) =
-            focus_subgraph(&snapshot, &endpoint.id, Some(1)).unwrap();
-        assert!(focused_nodes.iter().any(|node| node.id == component.id));
-        assert!(focused_nodes.iter().any(|node| node.id == handler.id));
-        assert!(focused_edges
+        let focused = graph_query::focus_subgraph(&snapshot, &endpoint.id, Some(1)).unwrap();
+        assert!(focused.nodes.iter().any(|node| node.id == component.id));
+        assert!(focused.nodes.iter().any(|node| node.id == handler.id));
+        assert!(focused
+            .edges
             .iter()
             .any(|edge| edge.edge_type == EdgeType::EndpointHandler));
 
