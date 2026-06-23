@@ -768,6 +768,18 @@ function averageSpeed(nodes: GraphNode[]) {
   return nodes.reduce((sum, node) => sum + Math.sqrt((node.vx ?? 0) ** 2 + (node.vy ?? 0) ** 2), 0) / nodes.length
 }
 
+function keepContinuousMotion(nodes: GraphNode[], ts: number) {
+  return nodes.map((node, index) => {
+    if (node.pinned) return node
+    const angle = ts * 0.0013 + index * GOLDEN_ANGLE
+    return {
+      ...node,
+      vx: (node.vx ?? 0) + Math.cos(angle) * 0.045,
+      vy: (node.vy ?? 0) + Math.sin(angle) * 0.045,
+    }
+  })
+}
+
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false
   const tag = target.tagName.toLowerCase()
@@ -796,6 +808,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   const settleStartedAtRef = useRef<number | null>(null)
   const settledRef = useRef(false)
   const pausedRef = useRef(false)
+  const continuousSimulationRef = useRef(false)
   const onUpdateNodesRef = useRef(onUpdateNodes)
   const onSelectNodeRef = useRef(onSelectNode)
   const [hoveredNode, setHoveredNode] = useState<string | null>(null)
@@ -958,14 +971,28 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   }, [draw])
 
   const runLoop = useCallback((ts: number) => {
-    if (pausedRef.current) {
+    if (pausedRef.current && !continuousSimulationRef.current) {
       draw()
       return
     }
-    if (settleStartedAtRef.current === null) settleStartedAtRef.current = ts
-    const elapsed = ts - settleStartedAtRef.current
+
     const filtersNow = filtersRef.current
     const settings = layoutSettingsRef.current
+
+    if (continuousSimulationRef.current) {
+      const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings)
+      nodesRef.current = result.averageSpeed < 0.08
+        ? keepContinuousMotion(result.nodes, ts)
+        : result.nodes
+      draw()
+      if (!pausedRef.current && continuousSimulationRef.current) {
+        rafRef.current = requestAnimationFrame(runLoop)
+      }
+      return
+    }
+
+    if (settleStartedAtRef.current === null) settleStartedAtRef.current = ts
+    const elapsed = ts - settleStartedAtRef.current
 
     if (elapsed <= VISIBLE_SETTLE_MS) {
       const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings)
@@ -995,6 +1022,9 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
   const restartSimulation = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
+    continuousSimulationRef.current = false
+    pausedRef.current = false
+    setPaused(false)
     settleStartedAtRef.current = null
     settledRef.current = false
     rafRef.current = requestAnimationFrame(runLoop)
@@ -1057,19 +1087,26 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     const handler = (event: KeyboardEvent) => {
       if (event.code !== 'Space' || isEditableTarget(event.target)) return
       event.preventDefault()
-      setPaused(current => {
-        const next = !current
-        if (next) {
-          nodesRef.current = nodesRef.current.map(node => ({ ...node, vx: 0, vy: 0 }))
-          settledRef.current = true
-          scheduleDraw()
-        } else {
-          settledRef.current = false
-          settleStartedAtRef.current = null
-          requestAnimationFrame(runLoop)
-        }
-        return next
-      })
+
+      if (continuousSimulationRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        continuousSimulationRef.current = false
+        nodesRef.current = nodesRef.current.map(node => ({ ...node, vx: 0, vy: 0 }))
+        settledRef.current = true
+        settleStartedAtRef.current = null
+        pausedRef.current = true
+        setPaused(true)
+        scheduleDraw()
+        return
+      }
+
+      cancelAnimationFrame(rafRef.current)
+      continuousSimulationRef.current = true
+      settledRef.current = false
+      settleStartedAtRef.current = null
+      pausedRef.current = false
+      setPaused(false)
+      rafRef.current = requestAnimationFrame(runLoop)
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
