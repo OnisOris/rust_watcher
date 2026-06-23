@@ -28,6 +28,7 @@ export default defineConfig({
     alias: {
       // Alias @ to the src directory
       '@': path.resolve(__dirname, './src'),
+      './components/LiveCodeGraph': path.resolve(__dirname, './src/app/components/AnimatedLiveCodeGraph.tsx'),
     },
   },
 
