@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentProps } from 'react'
-import { LiveCodeGraph } from './LiveCodeGraph'
+import { LiveCodeGraph as BaseLiveCodeGraph } from './LiveCodeGraph'
 
-export function AnimatedLiveCodeGraph(props: ComponentProps<typeof LiveCodeGraph>) {
+export function LiveCodeGraph(props: ComponentProps<typeof BaseLiveCodeGraph>) {
   const [animationFrame, setAnimationFrame] = useState(0)
 
   useEffect(() => {
@@ -31,7 +31,7 @@ export function AnimatedLiveCodeGraph(props: ComponentProps<typeof LiveCodeGraph
   )
 
   return (
-    <LiveCodeGraph
+    <BaseLiveCodeGraph
       {...props}
       highlightedTraceNodeIds={highlightedTraceNodeIds}
       highlightedTraceEdgeIds={highlightedTraceEdgeIds}
