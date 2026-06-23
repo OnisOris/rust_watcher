@@ -47,6 +47,12 @@ pub(crate) fn infer_node_language(
     if let Some(language) = file.and_then(language_for_file) {
         return Some(language);
     }
+    if module == Some("python") || crate_name == Some("python") {
+        return Some(LanguageId::Python.to_string());
+    }
+    if module == Some("qml") || crate_name == Some("qml") {
+        return Some(LanguageId::Qml.to_string());
+    }
     if module.is_some_and(|module| module.contains("typescript"))
         || crate_name == Some("frontend")
         || matches!(
@@ -91,4 +97,38 @@ pub(crate) fn symbol_id(node_type: NodeType, file: &IndexedFile, name: &str, lin
         "{prefix}:{}::{}::{}@{}",
         file.package_name, file.module_path, name, line
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_roots_do_not_fall_back_to_rust() {
+        assert_eq!(
+            infer_node_language(NodeType::Module, None, Some("python"), Some("python")),
+            Some("python".into())
+        );
+        assert_eq!(
+            infer_node_language(NodeType::Module, None, Some("qml"), Some("qml")),
+            Some("qml".into())
+        );
+        assert_eq!(
+            infer_node_language(
+                NodeType::Module,
+                None,
+                Some("typescript/react"),
+                Some("frontend"),
+            ),
+            Some("typescript".into())
+        );
+    }
+
+    #[test]
+    fn rust_crates_still_infer_rust() {
+        assert_eq!(
+            infer_node_language(NodeType::Module, None, Some("crate root"), Some("backend")),
+            Some("rust".into())
+        );
+    }
 }
