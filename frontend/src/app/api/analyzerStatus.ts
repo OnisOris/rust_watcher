@@ -25,12 +25,21 @@ export interface AnalyzerSummary {
   label: string
 }
 
+export function isAnalyzerApplicable(analyzer: AnalyzerServiceStatus) {
+  return analyzer.filesIndexed > 0
+}
+
+export function filterApplicableAnalyzers(analyzers: AnalyzerServiceStatus[] = []) {
+  return analyzers.filter(isAnalyzerApplicable)
+}
+
 export function summarizeAnalyzers(analyzers: AnalyzerServiceStatus[] = []): AnalyzerSummary {
-  const ready = analyzers.filter(analyzer => analyzer.status === 'Ready').length
-  const fallback = analyzers.filter(analyzer => analyzer.status === 'Fallback').length
-  const error = analyzers.filter(analyzer => analyzer.status === 'Error').length
-  const indexing = analyzers.filter(analyzer => analyzer.status === 'Starting' || analyzer.status === 'Indexing').length
-  const stale = analyzers.filter(analyzer => analyzer.status === 'Stale').length
+  const applicable = filterApplicableAnalyzers(analyzers)
+  const ready = applicable.filter(analyzer => analyzer.status === 'Ready').length
+  const fallback = applicable.filter(analyzer => analyzer.status === 'Fallback').length
+  const error = applicable.filter(analyzer => analyzer.status === 'Error').length
+  const indexing = applicable.filter(analyzer => analyzer.status === 'Starting' || analyzer.status === 'Indexing').length
+  const stale = applicable.filter(analyzer => analyzer.status === 'Stale').length
   const parts: string[] = []
   if (error) parts.push(`${error} error`)
   if (indexing) parts.push(`${indexing} indexing`)
@@ -43,7 +52,7 @@ export function summarizeAnalyzers(analyzers: AnalyzerServiceStatus[] = []): Ana
     error,
     indexing,
     stale,
-    total: analyzers.length,
+    total: applicable.length,
     label: `Analyzers · ${parts.length ? parts.join(' · ') : 'none'}`,
   }
 }
@@ -109,7 +118,7 @@ export function analyzerEngineLabel(engine: AnalyzerEngine) {
 }
 
 export function sortAnalyzers(analyzers: AnalyzerServiceStatus[] = []) {
-  return [...analyzers].sort((left, right) => {
+  return filterApplicableAnalyzers(analyzers).sort((left, right) => {
     const kind = KIND_ORDER[left.kind] - KIND_ORDER[right.kind]
     if (kind !== 0) return kind
     const semantic = Number(!SEMANTIC_ENGINES.has(left.engine)) - Number(!SEMANTIC_ENGINES.has(right.engine))
