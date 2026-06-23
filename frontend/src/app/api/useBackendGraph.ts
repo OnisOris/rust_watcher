@@ -8,6 +8,7 @@ import {
   diagnosticsByNodeFromFileMap,
 } from './graphPatch'
 import { shouldRefreshSnapshotForPatch } from './backendMessages'
+import { filterApplicableAnalyzers } from './analyzerStatus'
 import type {
   AnalysisEvent,
   AnalyzerStatus,
@@ -25,6 +26,8 @@ import type {
 } from '../types'
 
 const DEV_FALLBACK = import.meta.env.DEV
+const ABSENT_RUST_ANALYZER_MESSAGE = /No Cargo\.toml found|rust-analyzer disabled|Rust syntax fallback active|rust-analyzer is unavailable/i
+const LANGUAGE_ROOT_IDS = new Set(['backend:python', 'frontend:typescript', 'ui:qml'])
 
 const MOCK_STATUS: AppStatus = {
   appState: 'normal',
@@ -82,6 +85,62 @@ function actionableNetworkError(action: string, error: unknown) {
   return error instanceof Error ? error.message : `${action} failed.`
 }
 
+function normalizeStatus(status: AppStatus): AppStatus {
+  const analyzers = filterApplicableAnalyzers(status.analyzers ?? [])
+  const hasRustAnalyzer = analyzers.some(analyzer => analyzer.kind === 'Rust')
+  const rustFallbackWithoutRustFiles = !hasRustAnalyzer && status.message && ABSENT_RUST_ANALYZER_MESSAGE.test(status.message)
+  const analyzerStatus: AnalyzerStatus = rustFallbackWithoutRustFiles && status.analyzerStatus === 'Fallback'
+    ? 'Ready'
+    : status.analyzerStatus
+  const message = rustFallbackWithoutRustFiles
+    ? (analyzers.length > 0 ? 'Language graph ready' : 'Detecting project languages')
+    : status.message
+
+  return {
+    ...status,
+    analyzerStatus,
+    analyzers,
+    message,
+  }
+}
+
+function isWorkspaceNode(node: GraphNode) {
+  return node.type === 'Module' && !node.file && node.id.startsWith('workspace:')
+}
+
+function isLanguageRootNode(node: GraphNode) {
+  return node.type === 'Module' && LANGUAGE_ROOT_IDS.has(node.id)
+}
+
+function edgeExists(edges: GraphEdge[], source: string, target: string) {
+  return edges.some(edge => edge.source === source && edge.target === target)
+}
+
+function normalizeSnapshot(snapshot: GraphSnapshot): GraphSnapshot {
+  const status = normalizeStatus(snapshot.status)
+  const workspace = snapshot.nodes.find(isWorkspaceNode)
+  const languageRoots = snapshot.nodes.filter(isLanguageRootNode)
+  if (!workspace || languageRoots.length === 0) {
+    return { ...snapshot, status }
+  }
+
+  let changed = false
+  const edges = [...snapshot.edges]
+  for (const root of languageRoots) {
+    if (root.id === workspace.id || edgeExists(edges, workspace.id, root.id)) continue
+    edges.push({
+      id: `Contains:${workspace.id}->${root.id}`,
+      source: workspace.id,
+      target: root.id,
+      type: 'Contains',
+      confidence: 'Exact',
+    })
+    changed = true
+  }
+
+  return changed ? { ...snapshot, edges, status } : { ...snapshot, status }
+}
+
 export function useBackendGraph(mode: GraphMode) {
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
@@ -112,23 +171,25 @@ export function useBackendGraph(mode: GraphMode) {
   }, [nodes.length])
 
   const applyStatus = useCallback((status: AppStatus) => {
-    setAppState(status.appState)
-    setAnalyzerStatus(status.analyzerStatus)
-    setAnalyzers(status.analyzers ?? [])
-    setPythonAnalyzer(status.pythonAnalyzer ?? null)
-    setProjectName(status.projectName)
-    setProjectPath(status.projectPath)
-    setLastUpdated(status.lastUpdated)
-    setMessage(status.message)
+    const normalized = normalizeStatus(status)
+    setAppState(normalized.appState)
+    setAnalyzerStatus(normalized.analyzerStatus)
+    setAnalyzers(normalized.analyzers ?? [])
+    setPythonAnalyzer(normalized.pythonAnalyzer ?? null)
+    setProjectName(normalized.projectName)
+    setProjectPath(normalized.projectPath)
+    setLastUpdated(normalized.lastUpdated)
+    setMessage(normalized.message)
   }, [])
 
   const applySnapshot = useCallback((snapshot: GraphSnapshot) => {
-    localNodeCountRef.current = snapshot.nodes.length
-    setNodes(snapshot.nodes)
-    setEdges(snapshot.edges)
-    setFiles(snapshot.files)
-    setEvents(snapshot.events)
-    applyStatus(snapshot.status)
+    const normalized = normalizeSnapshot(snapshot)
+    localNodeCountRef.current = normalized.nodes.length
+    setNodes(normalized.nodes)
+    setEdges(normalized.edges)
+    setFiles(normalized.files)
+    setEvents(normalized.events)
+    applyStatus(normalized.status)
   }, [applyStatus])
 
   useEffect(() => {
