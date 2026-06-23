@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   analyzerCapabilityLabel,
+  filterApplicableAnalyzers,
   sortAnalyzers,
   summarizeAnalyzers,
 } from './analyzerStatus'
@@ -12,7 +13,7 @@ function analyzer(partial: Partial<AnalyzerServiceStatus> & Pick<AnalyzerService
     mode: null,
     message: null,
     capabilities: ['Symbols'],
-    filesIndexed: 0,
+    filesIndexed: 1,
     ...partial,
   }
 }
@@ -30,6 +31,17 @@ describe('analyzer status helpers', () => {
     expect(summary.fallback).toBe(1)
     expect(summary.error).toBe(1)
     expect(summary.label).toBe('Analyzers · 1 error · 2 ready · 1 fallback')
+  })
+
+  it('filters analyzers for languages that were not detected', () => {
+    const analyzers = [
+      analyzer({ id: 'rust-analyzer', kind: 'Rust', engine: 'RustAnalyzer', status: 'Fallback', filesIndexed: 0 }),
+      analyzer({ id: 'typescript-language-server', kind: 'TypeScript', engine: 'TypeScriptLanguageServer', status: 'Ready', filesIndexed: 0 }),
+      analyzer({ id: 'python-ty', kind: 'Python', engine: 'Ty', status: 'Ready', filesIndexed: 50 }),
+    ]
+
+    expect(filterApplicableAnalyzers(analyzers).map(item => item.id)).toEqual(['python-ty'])
+    expect(summarizeAnalyzers(analyzers).label).toBe('Analyzers · 1 ready')
   })
 
   it('sorts analyzers by language and semantic engines before parser fallbacks', () => {
