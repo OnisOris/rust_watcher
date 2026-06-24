@@ -12,7 +12,7 @@ import {
   Wifi,
 } from 'lucide-react'
 import type { AnalyzerServiceStatus, AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
-import { exportRecordedCanvasAsSvg } from '../api/canvasSvgRecorder'
+import { exportGraphCanvasAsSvg } from '../api/exportGraphSvg'
 import { AnalyzerStatusSummary } from './AnalyzerStatusSummary'
 
 interface TopToolbarProps {
@@ -211,7 +211,7 @@ function exportVisibleGraphSvg() {
   const canvas = document.querySelector<HTMLCanvasElement>('canvas')
   if (!canvas) return
 
-  exportRecordedCanvasAsSvg(
+  exportGraphCanvasAsSvg(
     canvas,
     `rust-watcher-graph-${new Date().toISOString().replace(/[:.]/g, '-')}.svg`,
   )
