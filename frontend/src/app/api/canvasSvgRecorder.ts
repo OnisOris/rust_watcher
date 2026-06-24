@@ -15,11 +15,6 @@ type CanvasState = {
   currentPath: string[]
 }
 
-type SvgOp =
-  | { kind: 'rect'; x: number; y: number; width: number; height: number; rx?: number; fill?: Paint; stroke?: Paint; lineWidth?: number; alpha: number; dash?: number[]; transform: Matrix }
-  | { kind: 'path'; d: string; fill?: Paint; stroke?: Paint; lineWidth?: number; alpha: number; dash?: number[]; transform: Matrix }
-  | { kind: 'text'; text: string; x: number; y: number; fill: Paint; alpha: number; font: string; align: CanvasTextAlign; baseline: CanvasTextBaseline; transform: Matrix }
-
 type Paint = string | GradientPaint
 
 type GradientPaint = {
@@ -34,9 +29,13 @@ type GradientPaint = {
   stops: Array<{ offset: number; color: string }>
 }
 
+type SvgOp =
+  | { kind: 'rect'; x: number; y: number; width: number; height: number; fill?: Paint; stroke?: Paint; lineWidth?: number; alpha: number; dash?: number[]; transform: Matrix }
+  | { kind: 'path'; d: string; fill?: Paint; stroke?: Paint; lineWidth?: number; alpha: number; dash?: number[]; transform: Matrix }
+  | { kind: 'text'; text: string; x: number; y: number; fill: Paint; alpha: number; font: string; align: CanvasTextAlign; baseline: CanvasTextBaseline; transform: Matrix }
+
 type RadialGradientMeta = Omit<GradientPaint, 'id'>
 
-const EVENT_NAME = 'rust-watcher:canvas-svg-recorder-ready'
 const stateByContext = new WeakMap<CanvasRenderingContext2D, CanvasState>()
 const gradientMetaByObject = new WeakMap<CanvasGradient, RadialGradientMeta>()
 let patched = false
@@ -58,20 +57,6 @@ function multiply(left: Matrix, right: Matrix): Matrix {
     d: left.b * right.c + left.d * right.d,
     e: left.a * right.e + left.c * right.f + left.e,
     f: left.b * right.e + left.d * right.f + left.f,
-  }
-}
-
-function cloneStateForStack(state: CanvasState): Omit<CanvasState, 'stack' | 'ops' | 'currentPath'> {
-  return {
-    transform: cloneMatrix(state.transform),
-    fillStyle: state.fillStyle,
-    strokeStyle: state.strokeStyle,
-    globalAlpha: state.globalAlpha,
-    lineWidth: state.lineWidth,
-    font: state.font,
-    textAlign: state.textAlign,
-    textBaseline: state.textBaseline,
-    lineDash: [...state.lineDash],
   }
 }
 
@@ -97,29 +82,34 @@ function getState(ctx: CanvasRenderingContext2D): CanvasState {
   return state
 }
 
-function currentTransformForSvg(ctx: CanvasRenderingContext2D, matrix: Matrix): Matrix {
+function cloneStateForStack(state: CanvasState): Omit<CanvasState, 'stack' | 'ops' | 'currentPath'> {
+  return {
+    transform: cloneMatrix(state.transform),
+    fillStyle: state.fillStyle,
+    strokeStyle: state.strokeStyle,
+    globalAlpha: state.globalAlpha,
+    lineWidth: state.lineWidth,
+    font: state.font,
+    textAlign: state.textAlign,
+    textBaseline: state.textBaseline,
+    lineDash: [...state.lineDash],
+  }
+}
+
+function normalizeInitialCanvasTransform(ctx: CanvasRenderingContext2D, matrix: Matrix): Matrix {
   const dpr = window.devicePixelRatio || 1
-  const canvas = ctx.canvas
-  const rect = canvas.getBoundingClientRect()
-  const looksLikeDevicePixelRoot =
+  const rect = ctx.canvas.getBoundingClientRect()
+  const isDevicePixelRoot =
     Math.abs(matrix.a - dpr) < 0.001 &&
     Math.abs(matrix.d - dpr) < 0.001 &&
     Math.abs(matrix.b) < 0.001 &&
     Math.abs(matrix.c) < 0.001 &&
     Math.abs(matrix.e) < 0.001 &&
     Math.abs(matrix.f) < 0.001 &&
-    canvas.width === Math.round(rect.width * dpr) &&
-    canvas.height === Math.round(rect.height * dpr)
+    ctx.canvas.width === Math.round(rect.width * dpr) &&
+    ctx.canvas.height === Math.round(rect.height * dpr)
 
-  return looksLikeDevicePixelRoot ? identity() : matrix
-}
-
-function normalizeRootSetTransform(ctx: CanvasRenderingContext2D, matrix: Matrix): Matrix {
-  return currentTransformForSvg(ctx, matrix)
-}
-
-function matrixAttr(matrix: Matrix) {
-  return `matrix(${num(matrix.a)} ${num(matrix.b)} ${num(matrix.c)} ${num(matrix.d)} ${num(matrix.e)} ${num(matrix.f)})`
+  return isDevicePixelRoot ? identity() : matrix
 }
 
 function num(value: number) {
@@ -128,24 +118,23 @@ function num(value: number) {
 }
 
 function escapeText(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 function escapeAttr(value: string) {
   return escapeText(value).replace(/"/g, '&quot;')
 }
 
+function matrixAttr(matrix: Matrix) {
+  return `matrix(${num(matrix.a)} ${num(matrix.b)} ${num(matrix.c)} ${num(matrix.d)} ${num(matrix.e)} ${num(matrix.f)})`
+}
+
 function paintFrom(value: string | CanvasGradient | CanvasPattern): Paint {
   if (typeof value === 'string') return value
   const gradient = gradientMetaByObject.get(value as CanvasGradient)
-  if (gradient) {
-    gradientCounter += 1
-    return { ...gradient, id: `rw-gradient-${gradientCounter}` }
-  }
-  return '#000000'
+  if (!gradient) return '#000000'
+  gradientCounter += 1
+  return { ...gradient, id: `rw-gradient-${gradientCounter}` }
 }
 
 function paintValue(paint: Paint, defs: string[]) {
@@ -198,6 +187,16 @@ function pathFromArc(x: number, y: number, radius: number, startAngle: number, e
   return `M ${num(sx)} ${num(sy)} A ${num(radius)} ${num(radius)} 0 ${largeArc} ${sweep} ${num(ex)} ${num(ey)}`
 }
 
+function normalizeRadius(radius: unknown) {
+  if (typeof radius === 'number') return radius
+  if (Array.isArray(radius)) {
+    const first = radius[0]
+    return typeof first === 'number' ? first : typeof first?.x === 'number' ? first.x : 0
+  }
+  if (radius && typeof radius === 'object' && 'x' in radius && typeof (radius as DOMPointInit).x === 'number') return (radius as DOMPointInit).x ?? 0
+  return 0
+}
+
 function dashAttr(dash?: number[]) {
   return dash && dash.length > 0 ? ` stroke-dasharray="${dash.map(num).join(' ')}"` : ''
 }
@@ -216,8 +215,7 @@ function serializeOp(op: SvgOp, defs: string[]) {
   const strokeAttrs = op.stroke ? ` stroke-width="${num(op.lineWidth ?? 1)}" stroke-linecap="round" stroke-linejoin="round"${dashAttr(op.dash)}` : ''
 
   if (op.kind === 'rect') {
-    const rx = op.rx ? ` rx="${num(op.rx)}"` : ''
-    return `<rect x="${num(op.x)}" y="${num(op.y)}" width="${num(op.width)}" height="${num(op.height)}"${rx} ${common}${strokeAttrs}/>`
+    return `<rect x="${num(op.x)}" y="${num(op.y)}" width="${num(op.width)}" height="${num(op.height)}" ${common}${strokeAttrs}/>`
   }
   return `<path d="${escapeAttr(op.d)}" ${common}${strokeAttrs}/>`
 }
@@ -245,6 +243,7 @@ export function exportRecordedCanvasAsSvg(canvas: HTMLCanvasElement, filename: s
   const width = Math.max(1, Math.round(rect.width || canvas.width))
   const height = Math.max(1, Math.round(rect.height || canvas.height))
   gradientCounter = 0
+
   const defs: string[] = []
   const body = state.ops.map(op => serializeOp(op, defs)).join('\n  ')
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -257,18 +256,7 @@ export function exportRecordedCanvasAsSvg(canvas: HTMLCanvasElement, filename: s
   return true
 }
 
-function snapshotPath(state: CanvasState) {
-  return state.currentPath.join(' ')
-}
-
-function normalizeRadius(radius: unknown) {
-  if (typeof radius === 'number') return radius
-  if (Array.isArray(radius) && typeof radius[0] === 'number') return radius[0]
-  if (radius && typeof radius === 'object' && 'x' in radius && typeof (radius as DOMPointInit).x === 'number') return (radius as DOMPointInit).x ?? 0
-  return 0
-}
-
-function patchProperty<K extends keyof CanvasRenderingContext2D>(name: K, onSet: (state: CanvasState, value: CanvasRenderingContext2D[K]) => void) {
+function patchProperty(name: 'fillStyle' | 'strokeStyle' | 'globalAlpha' | 'lineWidth' | 'font' | 'textAlign' | 'textBaseline', onSet: (state: CanvasState, value: unknown) => void) {
   const proto = CanvasRenderingContext2D.prototype
   const descriptor = Object.getOwnPropertyDescriptor(proto, name)
   if (!descriptor?.get || !descriptor?.set) return
@@ -279,18 +267,24 @@ function patchProperty<K extends keyof CanvasRenderingContext2D>(name: K, onSet:
     get() {
       return descriptor.get!.call(this)
     },
-    set(value: CanvasRenderingContext2D[K]) {
+    set(value: unknown) {
       onSet(getState(this as CanvasRenderingContext2D), value)
       descriptor.set!.call(this, value)
     },
   })
 }
 
+function patchMethod(name: string, factory: (original: (...args: unknown[]) => unknown) => (...args: unknown[]) => unknown) {
+  const proto = CanvasRenderingContext2D.prototype as unknown as Record<string, (...args: unknown[]) => unknown>
+  const original = proto[name]
+  if (!original) return
+  proto[name] = factory(original)
+}
+
 export function ensureCanvasSvgRecorder() {
   if (patched || typeof CanvasRenderingContext2D === 'undefined') return
   patched = true
 
-  const proto = CanvasRenderingContext2D.prototype
   patchProperty('fillStyle', (state, value) => { state.fillStyle = value as string | CanvasGradient | CanvasPattern })
   patchProperty('strokeStyle', (state, value) => { state.strokeStyle = value as string | CanvasGradient | CanvasPattern })
   patchProperty('globalAlpha', (state, value) => { state.globalAlpha = Number(value) })
@@ -299,168 +293,141 @@ export function ensureCanvasSvgRecorder() {
   patchProperty('textAlign', (state, value) => { state.textAlign = value as CanvasTextAlign })
   patchProperty('textBaseline', (state, value) => { state.textBaseline = value as CanvasTextBaseline })
 
-  const save = proto.save
-  proto.save = function patchedSave(this: CanvasRenderingContext2D) {
-    const state = getState(this)
-    state.stack.push(cloneStateForStack(state))
-    return save.call(this)
-  }
+  patchMethod('save', original => function patchedSave(this: CanvasRenderingContext2D) {
+    getState(this).stack.push(cloneStateForStack(getState(this)))
+    return original.call(this)
+  })
 
-  const restore = proto.restore
-  proto.restore = function patchedRestore(this: CanvasRenderingContext2D) {
+  patchMethod('restore', original => function patchedRestore(this: CanvasRenderingContext2D) {
     const state = getState(this)
     const previous = state.stack.pop()
     if (previous) Object.assign(state, previous)
-    return restore.call(this)
-  }
+    return original.call(this)
+  })
 
-  const setTransform = proto.setTransform
-  proto.setTransform = function patchedSetTransform(this: CanvasRenderingContext2D, ...args: Parameters<CanvasRenderingContext2D['setTransform']>) {
+  patchMethod('setTransform', original => function patchedSetTransform(this: CanvasRenderingContext2D, ...args: unknown[]) {
     const state = getState(this)
     if (typeof args[0] === 'number') {
-      state.transform = normalizeRootSetTransform(this, { a: args[0], b: Number(args[1] ?? 0), c: Number(args[2] ?? 0), d: Number(args[3] ?? 1), e: Number(args[4] ?? 0), f: Number(args[5] ?? 0) })
+      state.transform = normalizeInitialCanvasTransform(this, { a: args[0], b: Number(args[1] ?? 0), c: Number(args[2] ?? 0), d: Number(args[3] ?? 1), e: Number(args[4] ?? 0), f: Number(args[5] ?? 0) })
     } else {
-      const matrix = args[0] as DOMMatrix2DInit
-      state.transform = normalizeRootSetTransform(this, { a: matrix.a ?? 1, b: matrix.b ?? 0, c: matrix.c ?? 0, d: matrix.d ?? 1, e: matrix.e ?? 0, f: matrix.f ?? 0 })
+      const matrix = (args[0] ?? {}) as DOMMatrix2DInit
+      state.transform = normalizeInitialCanvasTransform(this, { a: matrix.a ?? 1, b: matrix.b ?? 0, c: matrix.c ?? 0, d: matrix.d ?? 1, e: matrix.e ?? 0, f: matrix.f ?? 0 })
     }
-    return setTransform.apply(this, args)
-  }
+    return original.apply(this, args)
+  })
 
-  const translate = proto.translate
-  proto.translate = function patchedTranslate(this: CanvasRenderingContext2D, x: number, y: number) {
+  patchMethod('translate', original => function patchedTranslate(this: CanvasRenderingContext2D, x: unknown, y: unknown) {
     const state = getState(this)
-    state.transform = multiply(state.transform, { a: 1, b: 0, c: 0, d: 1, e: x, f: y })
-    return translate.call(this, x, y)
-  }
+    state.transform = multiply(state.transform, { a: 1, b: 0, c: 0, d: 1, e: Number(x), f: Number(y) })
+    return original.call(this, x, y)
+  })
 
-  const scale = proto.scale
-  proto.scale = function patchedScale(this: CanvasRenderingContext2D, x: number, y: number) {
+  patchMethod('scale', original => function patchedScale(this: CanvasRenderingContext2D, x: unknown, y: unknown) {
     const state = getState(this)
-    state.transform = multiply(state.transform, { a: x, b: 0, c: 0, d: y, e: 0, f: 0 })
-    return scale.call(this, x, y)
-  }
+    state.transform = multiply(state.transform, { a: Number(x), b: 0, c: 0, d: Number(y), e: 0, f: 0 })
+    return original.call(this, x, y)
+  })
 
-  const rotate = proto.rotate
-  proto.rotate = function patchedRotate(this: CanvasRenderingContext2D, angle: number) {
+  patchMethod('rotate', original => function patchedRotate(this: CanvasRenderingContext2D, angle: unknown) {
+    const cos = Math.cos(Number(angle))
+    const sin = Math.sin(Number(angle))
     const state = getState(this)
-    const cos = Math.cos(angle)
-    const sin = Math.sin(angle)
     state.transform = multiply(state.transform, { a: cos, b: sin, c: -sin, d: cos, e: 0, f: 0 })
-    return rotate.call(this, angle)
-  }
+    return original.call(this, angle)
+  })
 
-  const transform = proto.transform
-  proto.transform = function patchedTransform(this: CanvasRenderingContext2D, a: number, b: number, c: number, d: number, e: number, f: number) {
+  patchMethod('transform', original => function patchedTransform(this: CanvasRenderingContext2D, a: unknown, b: unknown, c: unknown, d: unknown, e: unknown, f: unknown) {
     const state = getState(this)
-    state.transform = multiply(state.transform, { a, b, c, d, e, f })
-    return transform.call(this, a, b, c, d, e, f)
-  }
+    state.transform = multiply(state.transform, { a: Number(a), b: Number(b), c: Number(c), d: Number(d), e: Number(e), f: Number(f) })
+    return original.call(this, a, b, c, d, e, f)
+  })
 
-  const setLineDash = proto.setLineDash
-  proto.setLineDash = function patchedSetLineDash(this: CanvasRenderingContext2D, segments: Iterable<number>) {
-    getState(this).lineDash = Array.from(segments)
-    return setLineDash.call(this, segments)
-  }
+  patchMethod('setLineDash', original => function patchedSetLineDash(this: CanvasRenderingContext2D, segments: unknown) {
+    getState(this).lineDash = Array.from(segments as Iterable<number>)
+    return original.call(this, segments)
+  })
 
-  const beginPath = proto.beginPath
-  proto.beginPath = function patchedBeginPath(this: CanvasRenderingContext2D) {
+  patchMethod('beginPath', original => function patchedBeginPath(this: CanvasRenderingContext2D) {
     getState(this).currentPath = []
-    return beginPath.call(this)
-  }
+    return original.call(this)
+  })
 
-  const moveTo = proto.moveTo
-  proto.moveTo = function patchedMoveTo(this: CanvasRenderingContext2D, x: number, y: number) {
-    getState(this).currentPath.push(`M ${num(x)} ${num(y)}`)
-    return moveTo.call(this, x, y)
-  }
+  patchMethod('moveTo', original => function patchedMoveTo(this: CanvasRenderingContext2D, x: unknown, y: unknown) {
+    getState(this).currentPath.push(`M ${num(Number(x))} ${num(Number(y))}`)
+    return original.call(this, x, y)
+  })
 
-  const lineTo = proto.lineTo
-  proto.lineTo = function patchedLineTo(this: CanvasRenderingContext2D, x: number, y: number) {
-    getState(this).currentPath.push(`L ${num(x)} ${num(y)}`)
-    return lineTo.call(this, x, y)
-  }
+  patchMethod('lineTo', original => function patchedLineTo(this: CanvasRenderingContext2D, x: unknown, y: unknown) {
+    getState(this).currentPath.push(`L ${num(Number(x))} ${num(Number(y))}`)
+    return original.call(this, x, y)
+  })
 
-  const closePath = proto.closePath
-  proto.closePath = function patchedClosePath(this: CanvasRenderingContext2D) {
+  patchMethod('closePath', original => function patchedClosePath(this: CanvasRenderingContext2D) {
     getState(this).currentPath.push('Z')
-    return closePath.call(this)
-  }
+    return original.call(this)
+  })
 
-  const arc = proto.arc
-  proto.arc = function patchedArc(this: CanvasRenderingContext2D, x: number, y: number, radius: number, startAngle: number, endAngle: number, counterclockwise?: boolean) {
-    getState(this).currentPath.push(pathFromArc(x, y, radius, startAngle, endAngle, counterclockwise))
-    return arc.call(this, x, y, radius, startAngle, endAngle, counterclockwise)
-  }
+  patchMethod('arc', original => function patchedArc(this: CanvasRenderingContext2D, x: unknown, y: unknown, radius: unknown, startAngle: unknown, endAngle: unknown, counterclockwise?: unknown) {
+    getState(this).currentPath.push(pathFromArc(Number(x), Number(y), Number(radius), Number(startAngle), Number(endAngle), Boolean(counterclockwise)))
+    return original.call(this, x, y, radius, startAngle, endAngle, counterclockwise)
+  })
 
-  const roundRect = proto.roundRect
-  proto.roundRect = function patchedRoundRect(this: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radii?: number | DOMPointInit | Iterable<number | DOMPointInit>) {
-    getState(this).currentPath.push(pathFromRoundRect(x, y, width, height, normalizeRadius(radii ?? 0)))
-    return roundRect.call(this, x, y, width, height, radii as never)
-  }
+  patchMethod('roundRect', original => function patchedRoundRect(this: CanvasRenderingContext2D, x: unknown, y: unknown, width: unknown, height: unknown, radii?: unknown) {
+    getState(this).currentPath.push(pathFromRoundRect(Number(x), Number(y), Number(width), Number(height), normalizeRadius(radii ?? 0)))
+    return original.call(this, x, y, width, height, radii)
+  })
 
-  const fill = proto.fill
-  proto.fill = function patchedFill(this: CanvasRenderingContext2D, ...args: Parameters<CanvasRenderingContext2D['fill']>) {
+  patchMethod('fill', original => function patchedFill(this: CanvasRenderingContext2D, ...args: unknown[]) {
     const state = getState(this)
-    const d = snapshotPath(state)
-    if (d) {
-      state.ops.push({ kind: 'path', d, fill: paintFrom(state.fillStyle), alpha: state.globalAlpha, transform: cloneMatrix(state.transform) })
-    }
-    return fill.apply(this, args)
-  }
+    const d = state.currentPath.join(' ')
+    if (d) state.ops.push({ kind: 'path', d, fill: paintFrom(state.fillStyle), alpha: state.globalAlpha, transform: cloneMatrix(state.transform) })
+    return original.apply(this, args)
+  })
 
-  const stroke = proto.stroke
-  proto.stroke = function patchedStroke(this: CanvasRenderingContext2D, ...args: Parameters<CanvasRenderingContext2D['stroke']>) {
+  patchMethod('stroke', original => function patchedStroke(this: CanvasRenderingContext2D, ...args: unknown[]) {
     const state = getState(this)
-    const d = snapshotPath(state)
-    if (d) {
-      state.ops.push({ kind: 'path', d, stroke: paintFrom(state.strokeStyle), lineWidth: state.lineWidth, alpha: state.globalAlpha, dash: [...state.lineDash], transform: cloneMatrix(state.transform) })
-    }
-    return stroke.apply(this, args)
-  }
+    const d = state.currentPath.join(' ')
+    if (d) state.ops.push({ kind: 'path', d, stroke: paintFrom(state.strokeStyle), lineWidth: state.lineWidth, alpha: state.globalAlpha, dash: [...state.lineDash], transform: cloneMatrix(state.transform) })
+    return original.apply(this, args)
+  })
 
-  const fillRect = proto.fillRect
-  proto.fillRect = function patchedFillRect(this: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  patchMethod('fillRect', original => function patchedFillRect(this: CanvasRenderingContext2D, x: unknown, y: unknown, width: unknown, height: unknown) {
     const state = getState(this)
-    state.ops.push({ kind: 'rect', x, y, width, height, fill: paintFrom(state.fillStyle), alpha: state.globalAlpha, transform: cloneMatrix(state.transform) })
-    return fillRect.call(this, x, y, width, height)
-  }
+    state.ops.push({ kind: 'rect', x: Number(x), y: Number(y), width: Number(width), height: Number(height), fill: paintFrom(state.fillStyle), alpha: state.globalAlpha, transform: cloneMatrix(state.transform) })
+    return original.call(this, x, y, width, height)
+  })
 
-  const strokeRect = proto.strokeRect
-  proto.strokeRect = function patchedStrokeRect(this: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  patchMethod('strokeRect', original => function patchedStrokeRect(this: CanvasRenderingContext2D, x: unknown, y: unknown, width: unknown, height: unknown) {
     const state = getState(this)
-    state.ops.push({ kind: 'rect', x, y, width, height, stroke: paintFrom(state.strokeStyle), lineWidth: state.lineWidth, alpha: state.globalAlpha, dash: [...state.lineDash], transform: cloneMatrix(state.transform) })
-    return strokeRect.call(this, x, y, width, height)
-  }
+    state.ops.push({ kind: 'rect', x: Number(x), y: Number(y), width: Number(width), height: Number(height), stroke: paintFrom(state.strokeStyle), lineWidth: state.lineWidth, alpha: state.globalAlpha, dash: [...state.lineDash], transform: cloneMatrix(state.transform) })
+    return original.call(this, x, y, width, height)
+  })
 
-  const clearRect = proto.clearRect
-  proto.clearRect = function patchedClearRect(this: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  patchMethod('clearRect', original => function patchedClearRect(this: CanvasRenderingContext2D, x: unknown, y: unknown, width: unknown, height: unknown) {
     const state = getState(this)
     const rect = this.canvas.getBoundingClientRect()
-    if (x <= 0 && y <= 0 && width >= rect.width - 1 && height >= rect.height - 1) {
+    if (Number(x) <= 0 && Number(y) <= 0 && Number(width) >= rect.width - 1 && Number(height) >= rect.height - 1) {
       state.ops = []
       state.currentPath = []
     }
-    return clearRect.call(this, x, y, width, height)
-  }
+    return original.call(this, x, y, width, height)
+  })
 
-  const fillText = proto.fillText
-  proto.fillText = function patchedFillText(this: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth?: number) {
+  patchMethod('fillText', original => function patchedFillText(this: CanvasRenderingContext2D, text: unknown, x: unknown, y: unknown, maxWidth?: unknown) {
     const state = getState(this)
-    state.ops.push({ kind: 'text', text: String(text), x, y, fill: paintFrom(state.fillStyle), alpha: state.globalAlpha, font: state.font, align: state.textAlign, baseline: state.textBaseline, transform: cloneMatrix(state.transform) })
-    return typeof maxWidth === 'number' ? fillText.call(this, text, x, y, maxWidth) : fillText.call(this, text, x, y)
-  }
+    state.ops.push({ kind: 'text', text: String(text), x: Number(x), y: Number(y), fill: paintFrom(state.fillStyle), alpha: state.globalAlpha, font: state.font, align: state.textAlign, baseline: state.textBaseline, transform: cloneMatrix(state.transform) })
+    return typeof maxWidth === 'number' ? original.call(this, text, x, y, maxWidth) : original.call(this, text, x, y)
+  })
 
-  const strokeText = proto.strokeText
-  proto.strokeText = function patchedStrokeText(this: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth?: number) {
+  patchMethod('strokeText', original => function patchedStrokeText(this: CanvasRenderingContext2D, text: unknown, x: unknown, y: unknown, maxWidth?: unknown) {
     const state = getState(this)
-    state.ops.push({ kind: 'text', text: String(text), x, y, fill: paintFrom(state.strokeStyle), alpha: state.globalAlpha, font: state.font, align: state.textAlign, baseline: state.textBaseline, transform: cloneMatrix(state.transform) })
-    return typeof maxWidth === 'number' ? strokeText.call(this, text, x, y, maxWidth) : strokeText.call(this, text, x, y)
-  }
+    state.ops.push({ kind: 'text', text: String(text), x: Number(x), y: Number(y), fill: paintFrom(state.strokeStyle), alpha: state.globalAlpha, font: state.font, align: state.textAlign, baseline: state.textBaseline, transform: cloneMatrix(state.transform) })
+    return typeof maxWidth === 'number' ? original.call(this, text, x, y, maxWidth) : original.call(this, text, x, y)
+  })
 
-  const createRadialGradient = proto.createRadialGradient
-  proto.createRadialGradient = function patchedCreateRadialGradient(this: CanvasRenderingContext2D, x0: number, y0: number, r0: number, x1: number, y1: number, r1: number) {
-    const gradient = createRadialGradient.call(this, x0, y0, r0, x1, y1, r1)
-    const meta: RadialGradientMeta = { kind: 'radial-gradient', x0, y0, r0, x1, y1, r1, stops: [] }
+  patchMethod('createRadialGradient', original => function patchedCreateRadialGradient(this: CanvasRenderingContext2D, x0: unknown, y0: unknown, r0: unknown, x1: unknown, y1: unknown, r1: unknown) {
+    const gradient = original.call(this, x0, y0, r0, x1, y1, r1) as CanvasGradient
+    const meta: RadialGradientMeta = { kind: 'radial-gradient', x0: Number(x0), y0: Number(y0), r0: Number(r0), x1: Number(x1), y1: Number(y1), r1: Number(r1), stops: [] }
     gradientMetaByObject.set(gradient, meta)
     const addColorStop = gradient.addColorStop.bind(gradient)
     try {
@@ -469,12 +436,10 @@ export function ensureCanvasSvgRecorder() {
         addColorStop(offset, color)
       }
     } catch {
-      // Some browser engines expose CanvasGradient methods as read-only. The export still works with fallback stops.
+      // CanvasGradient may expose methods as read-only. Fallback stops are still exported.
     }
     return gradient
-  }
-
-  window.dispatchEvent(new Event(EVENT_NAME))
+  })
 }
 
 ensureCanvasSvgRecorder()
