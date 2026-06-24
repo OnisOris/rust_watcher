@@ -192,7 +192,7 @@ export function TopToolbar({
       <div className="flex items-center gap-1 shrink-0">
         <ToolbarButton icon={<RefreshCw size={14} />} label="Refresh / recenter graph" onClick={onRecenter} />
         <ToolbarButton icon={<Minimize2 size={14} />} label="Architecture focus" onClick={onCollapse} />
-        <ToolbarButton icon={<Download size={14} />} label="Export graph" onClick={() => {}} />
+        <ToolbarButton icon={<Download size={14} />} label="Export graph" onClick={exportVisibleGraphCanvasSvg} />
         <ToolbarButton icon={<Wifi size={14} />} label="Live connection" onClick={() => {}} active={appState === 'normal'} accentColor={status.color} />
         <div style={{ width: 1, height: 18, background: 'var(--cc-border)', margin: '0 2px' }} />
         <ToolbarButton
@@ -204,6 +204,30 @@ export function TopToolbar({
       </div>
     </div>
   )
+}
+
+function exportVisibleGraphCanvasSvg() {
+  const canvas = document.querySelector<HTMLCanvasElement>('canvas')
+  if (!canvas) return
+
+  const rect = canvas.getBoundingClientRect()
+  const width = Math.max(1, Math.round(rect.width || canvas.width))
+  const height = Math.max(1, Math.round(rect.height || canvas.height))
+  const dataUrl = canvas.toDataURL('image/png')
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Rust watcher graph export">
+  <image href="${dataUrl}" xlink:href="${dataUrl}" x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none"/>
+</svg>`
+
+  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `rust-watcher-graph-${new Date().toISOString().replace(/[:.]/g, '-')}.svg`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function ToolbarButton({ icon, label, onClick, active, accentColor }: {
