@@ -35,11 +35,33 @@ type SvgOp =
   | { kind: 'text'; text: string; x: number; y: number; fill: Paint; alpha: number; font: string; align: CanvasTextAlign; baseline: CanvasTextBaseline; transform: Matrix }
 
 type RadialGradientMeta = Omit<GradientPaint, 'id'>
+type ExportLanguage = 'rust' | 'typescript' | 'javascript' | 'python' | 'qml' | 'endpoints' | 'external' | 'workspace'
+
+type LegendStyle = {
+  surface: string
+  border: string
+  text: string
+  textMuted: string
+}
 
 const stateByContext = new WeakMap<CanvasRenderingContext2D, CanvasState>()
 const gradientMetaByObject = new WeakMap<CanvasGradient, RadialGradientMeta>()
 let patched = false
 let gradientCounter = 0
+
+const MINIMAP_W = 160
+const MINIMAP_H = 100
+const LANGUAGE_ORDER: ExportLanguage[] = ['rust', 'typescript', 'javascript', 'python', 'qml', 'endpoints', 'external', 'workspace']
+const LANGUAGE_BY_ICON = new Map<string, ExportLanguage>([
+  ['Rs', 'rust'],
+  ['TS', 'typescript'],
+  ['JS', 'javascript'],
+  ['Py', 'python'],
+  ['QML', 'qml'],
+  ['API', 'endpoints'],
+  ['Ext', 'external'],
+  ['WS', 'workspace'],
+])
 
 function identity(): Matrix {
   return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }
@@ -58,6 +80,22 @@ function multiply(left: Matrix, right: Matrix): Matrix {
     e: left.a * right.e + left.c * right.f + left.e,
     f: left.b * right.e + left.d * right.f + left.f,
   }
+}
+
+function applyMatrix(matrix: Matrix, x: number, y: number) {
+  return {
+    x: matrix.a * x + matrix.c * y + matrix.e,
+    y: matrix.b * x + matrix.d * y + matrix.f,
+  }
+}
+
+function isIdentityMatrix(matrix: Matrix) {
+  return Math.abs(matrix.a - 1) < 0.001 &&
+    Math.abs(matrix.b) < 0.001 &&
+    Math.abs(matrix.c) < 0.001 &&
+    Math.abs(matrix.d - 1) < 0.001 &&
+    Math.abs(matrix.e) < 0.001 &&
+    Math.abs(matrix.f) < 0.001
 }
 
 function getState(ctx: CanvasRenderingContext2D): CanvasState {
@@ -143,9 +181,7 @@ function paintValue(paint: Paint, defs: string[]) {
     ? paint.stops
     : [{ offset: 0, color: '#f8fbff' }, { offset: 1, color: '#eef4fb' }]
   defs.push(
-    `<radialGradient id="${paint.id}" gradientUnits="userSpaceOnUse" cx="${num(paint.x1)}" cy="${num(paint.y1)}" r="${num(paint.r1)}" fx="${num(paint.x0)}" fy="${num(paint.y0)}">
-${stops.map(stop => `    <stop offset="${num(stop.offset * 100)}%" stop-color="${escapeAttr(stop.color)}"/>`).join('\n')}
-  </radialGradient>`,
+    `<radialGradient id="${paint.id}" gradientUnits="userSpaceOnUse" cx="${num(paint.x1)}" cy="${num(paint.y1)}" r="${num(paint.r1)}" fx="${num(paint.x0)}" fy="${num(paint.y0)}">\n${stops.map(stop => `    <stop offset="${num(stop.offset * 100)}%" stop-color="${escapeAttr(stop.color)}"/>`).join('\n')}\n  </radialGradient>`,
   )
   return `url(#${paint.id})`
 }
@@ -232,6 +268,157 @@ function downloadText(filename: string, content: string, type: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+function firstPoint(op: SvgOp) {
+  if (op.kind === 'text') return applyMatrix(op.transform, op.x, op.y)
+  if (op.kind === 'rect') return applyMatrix(op.transform, op.x, op.y)
+  const match = op.d.match(/-?\d+(?:\.\d+)?(?:e[-+]?\d+)?/gi)
+  if (!match || match.length < 2) return null
+  return applyMatrix(op.transform, Number(match[0]), Number(match[1]))
+}
+
+function findLegendTitleIndex(ops: SvgOp[]) {
+  for (let i = ops.length - 1; i >= 0; i--) {
+    const op = ops[i]
+    if (op.kind === 'text' && op.text === 'Language badges' && isIdentityMatrix(op.transform)) return i
+  }
+  return -1
+}
+
+function findMinimapStartIndex(ops: SvgOp[], width: number, height: number, beforeIndex: number) {
+  const mmX = width - MINIMAP_W - 16
+  const mmY = height - MINIMAP_H - 16
+  const limit = beforeIndex >= 0 ? beforeIndex : ops.length
+  for (let i = limit - 1; i >= 0; i--) {
+    const op = ops[i]
+    if (!isIdentityMatrix(op.transform)) continue
+    const point = firstPoint(op)
+    if (!point) continue
+    const nearFrameStart = point.x >= mmX - 2 && point.x <= mmX + 18 && point.y >= mmY - 2 && point.y <= mmY + 18
+    if (nearFrameStart) return i
+  }
+  return -1
+}
+
+function paintToString(paint: Paint | undefined, fallback: string) {
+  return typeof paint === 'string' ? paint : fallback
+}
+
+function legendStyleFromOps(ops: SvgOp[], titleIndex: number): LegendStyle {
+  const title = ops[titleIndex]
+  const panelFill = titleIndex >= 2 && ops[titleIndex - 2]?.kind !== 'text' ? ops[titleIndex - 2] : null
+  const panelStroke = titleIndex >= 1 && ops[titleIndex - 1]?.kind !== 'text' ? ops[titleIndex - 1] : null
+  const mutedText = ops.slice(titleIndex + 1).find((op): op is Extract<SvgOp, { kind: 'text' }> => op.kind === 'text' && !LANGUAGE_BY_ICON.has(op.text))
+
+  return {
+    surface: paintToString(panelFill && 'fill' in panelFill ? panelFill.fill : undefined, '#f8fbff'),
+    border: paintToString(panelStroke && 'stroke' in panelStroke ? panelStroke.stroke : undefined, '#b7c6d8'),
+    text: title?.kind === 'text' ? paintToString(title.fill, '#172033') : '#172033',
+    textMuted: paintToString(mutedText?.fill, '#52647a'),
+  }
+}
+
+function detectExportLanguages(ops: SvgOp[]) {
+  const languages = new Set<ExportLanguage>()
+  for (const op of ops) {
+    if (op.kind !== 'text') continue
+    const language = LANGUAGE_BY_ICON.get(op.text)
+    if (language) languages.add(language)
+  }
+  return LANGUAGE_ORDER.filter(language => languages.has(language))
+}
+
+function languageIcon(language: ExportLanguage) {
+  switch (language) {
+    case 'rust': return 'Rs'
+    case 'typescript': return 'TS'
+    case 'javascript': return 'JS'
+    case 'python': return 'Py'
+    case 'qml': return 'QML'
+    case 'endpoints': return 'API'
+    case 'external': return 'Ext'
+    case 'workspace': return 'WS'
+  }
+}
+
+function languageLabel(language: ExportLanguage) {
+  switch (language) {
+    case 'rust': return 'rust'
+    case 'typescript': return 'typescript'
+    case 'javascript': return 'javascript'
+    case 'python': return 'python'
+    case 'qml': return 'qml'
+    case 'endpoints': return 'API'
+    case 'external': return 'external'
+    case 'workspace': return 'workspace'
+  }
+}
+
+function languageColor(language: ExportLanguage) {
+  switch (language) {
+    case 'rust': return '#3B82F6'
+    case 'typescript': return '#14B8A6'
+    case 'javascript': return '#F59E0B'
+    case 'python': return '#F97316'
+    case 'qml': return '#8B5CF6'
+    case 'endpoints': return '#E11D48'
+    case 'external': return '#7D8795'
+    case 'workspace': return '#64748B'
+  }
+}
+
+function legendSvgPath(x: number, y: number, width: number, height: number, radius: number) {
+  return pathFromRoundRect(x, y, width, height, radius)
+}
+
+function buildLanguageLegendSvg(languages: ExportLanguage[], width: number, height: number, style: LegendStyle, paused: boolean) {
+  if (languages.length === 0 && !paused) return ''
+
+  const x = 18
+  const columns = Math.max(1, Math.min(3, languages.length || 1))
+  const rows = Math.max(1, Math.ceil(languages.length / columns))
+  const boxWidth = Math.max(132, 28 + columns * 92)
+  const boxHeight = 40 + rows * 18 + (paused ? 20 : 0)
+  const y = Math.max(92, height - boxHeight - 100)
+  const parts: string[] = []
+
+  parts.push(`<g id="language-badges" opacity="0.9">`)
+  parts.push(`  <path d="${legendSvgPath(x, y, boxWidth, boxHeight, 9)}" fill="${escapeAttr(style.surface)}" stroke="${escapeAttr(style.border)}" stroke-width="1"/>`)
+  parts.push(`  <text x="${num(x + 12)}" y="${num(y + 10)}" fill="${escapeAttr(style.text)}" text-anchor="start" dominant-baseline="text-before-edge" style="font: 700 10px Inter, sans-serif">Language badges</text>`)
+
+  languages.forEach((language, index) => {
+    const px = x + 12 + (index % columns) * 92
+    const py = y + 29 + Math.floor(index / columns) * 18
+    const color = languageColor(language)
+    parts.push(`  <path d="${legendSvgPath(px, py + 2, 22, 11, 6)}" fill="${escapeAttr(color)}" opacity="0.86"/>`)
+    parts.push(`  <text x="${num(px + 11)}" y="${num(py + 3)}" fill="#fff" opacity="0.96" text-anchor="middle" dominant-baseline="text-before-edge" style="font: 800 7.5px Inter, sans-serif">${escapeText(languageIcon(language))}</text>`)
+    parts.push(`  <text x="${num(px + 28)}" y="${num(py)}" fill="${escapeAttr(style.textMuted)}" opacity="0.82" text-anchor="start" dominant-baseline="text-before-edge" style="font: 9px Inter, sans-serif">${escapeText(languageLabel(language))}</text>`)
+  })
+
+  if (paused) {
+    parts.push(`  <text x="${num(x + 12)}" y="${num(y + boxHeight - 19)}" fill="#F59E0B" opacity="0.9" text-anchor="start" dominant-baseline="text-before-edge" style="font: 700 10px Inter, sans-serif">Paused - press Space to resume</text>`)
+  }
+
+  parts.push('</g>')
+  return parts.join('\n  ')
+}
+
+function exportOpsForSvg(ops: SvgOp[], width: number, height: number) {
+  const legendTitleIndex = findLegendTitleIndex(ops)
+  const legendStartIndex = legendTitleIndex >= 2 ? legendTitleIndex - 2 : -1
+  const minimapStartIndex = findMinimapStartIndex(ops, width, height, legendStartIndex >= 0 ? legendStartIndex : ops.length)
+  const minimapEndIndex = legendStartIndex >= 0 ? legendStartIndex : ops.length
+  const filteredOps = ops.filter((_, index) => {
+    if (minimapStartIndex >= 0 && index >= minimapStartIndex && index < minimapEndIndex) return false
+    if (legendStartIndex >= 0 && index >= legendStartIndex) return false
+    return true
+  })
+  const activeLanguages = detectExportLanguages(filteredOps)
+  const paused = legendTitleIndex >= 0 && ops.some(op => op.kind === 'text' && op.text.startsWith('Paused -'))
+  const legendStyle = legendTitleIndex >= 0 ? legendStyleFromOps(ops, legendTitleIndex) : { surface: '#f8fbff', border: '#b7c6d8', text: '#172033', textMuted: '#52647a' }
+
+  return { filteredOps, activeLanguages, paused, legendStyle }
+}
+
 export function exportRecordedCanvasAsSvg(canvas: HTMLCanvasElement, filename: string) {
   ensureCanvasSvgRecorder()
   const ctx = canvas.getContext('2d')
@@ -244,12 +431,14 @@ export function exportRecordedCanvasAsSvg(canvas: HTMLCanvasElement, filename: s
   const height = Math.max(1, Math.round(rect.height || canvas.height))
   gradientCounter = 0
 
+  const { filteredOps, activeLanguages, paused, legendStyle } = exportOpsForSvg(state.ops, width, height)
   const defs: string[] = []
-  const body = state.ops.map(op => serializeOp(op, defs)).join('\n  ')
+  const body = filteredOps.map(op => serializeOp(op, defs)).join('\n  ')
+  const legend = buildLanguageLegendSvg(activeLanguages, width, height, legendStyle, paused)
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Rust watcher graph export">
   ${defs.length > 0 ? `<defs>\n  ${defs.join('\n  ')}\n  </defs>` : ''}
-  ${body}
+  ${body}${legend ? `\n  ${legend}` : ''}
 </svg>`
 
   downloadText(filename, svg, 'image/svg+xml;charset=utf-8')
