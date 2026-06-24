@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type ComponentProps } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ComponentProps } from 'react'
+import { downloadGraphSvg } from '../api/svgExport'
 import { LiveCodeGraph as BaseLiveCodeGraph } from './LiveCodeGraph'
 
 export function LiveCodeGraph(props: ComponentProps<typeof BaseLiveCodeGraph>) {
@@ -30,11 +31,39 @@ export function LiveCodeGraph(props: ComponentProps<typeof BaseLiveCodeGraph>) {
     [props.highlightedTraceEdgeIds, animationFrame],
   )
 
+  const handleExportSvg = useCallback(() => {
+    downloadGraphSvg({
+      nodes: props.nodes,
+      edges: props.edges,
+      filters: props.filters,
+      selectedNodeId: props.selectedNodeId,
+      graphMode: props.graphMode,
+      theme: props.theme,
+    })
+  }, [props.nodes, props.edges, props.filters, props.selectedNodeId, props.graphMode, props.theme])
+
   return (
-    <BaseLiveCodeGraph
-      {...props}
-      highlightedTraceNodeIds={highlightedTraceNodeIds}
-      highlightedTraceEdgeIds={highlightedTraceEdgeIds}
-    />
+    <div className="relative w-full h-full">
+      <BaseLiveCodeGraph
+        {...props}
+        highlightedTraceNodeIds={highlightedTraceNodeIds}
+        highlightedTraceEdgeIds={highlightedTraceEdgeIds}
+      />
+      <button
+        type="button"
+        onClick={handleExportSvg}
+        className="absolute top-3 left-3 z-20 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition hover:scale-[1.02] active:scale-[0.98]"
+        style={{
+          background: 'var(--cc-overlay)',
+          border: '1px solid var(--cc-border)',
+          color: 'var(--cc-text)',
+          boxShadow: 'var(--cc-shadow)',
+          backdropFilter: 'blur(10px)',
+        }}
+        title="Export visible graph to SVG"
+      >
+        Export SVG
+      </button>
+    </div>
   )
 }
