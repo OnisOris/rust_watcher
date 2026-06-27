@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyCollapsedGroups,
+  applyDepthFilter,
   applyEdgeVisibilityLevel,
   applyGraphFilters,
   buildCollapsedGroupStats,
@@ -164,6 +165,44 @@ describe('graph view helpers', () => {
     const edges = [edge('main', 'service')]
 
     expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Micro', 1, null))).toEqual([])
+  })
+
+  it('applies depth filtering to App-level nodes and edges together', () => {
+    const nodes = [
+      node('workspace', undefined, 'Module'),
+      node('rust', 'rust', 'Module'),
+      node('file', 'rust', 'File'),
+      node('endpoint', undefined, 'Endpoint'),
+      { ...node('main', 'rust', 'Function'), label: 'main' },
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'workspace-rust', source: 'workspace', target: 'rust', type: 'Contains' },
+      { id: 'rust-file', source: 'rust', target: 'file', type: 'Contains' },
+      { id: 'file-endpoint', source: 'file', target: 'endpoint', type: 'Contains' },
+      { id: 'main-endpoint', source: 'main', target: 'endpoint', type: 'Calls' },
+    ]
+
+    const depthGraph = applyDepthFilter({ nodes, edges }, 'Macro', 2, null)
+
+    expect(depthGraph.nodes.map(node => node.id)).toEqual(['workspace', 'rust', 'file'])
+    expect(depthGraph.edges.map(edge => edge.id)).toEqual(['workspace-rust', 'rust-file'])
+  })
+
+  it('applies selected Local Symbol radius before graph consumers read counts', () => {
+    const nodes = [
+      node('selected', 'typescript', 'Function'),
+      node('callee', 'typescript', 'Function'),
+      node('model', 'typescript', 'Interface'),
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'call', source: 'selected', target: 'callee', type: 'Calls' },
+      { id: 'type', source: 'callee', target: 'model', type: 'TypeReference' },
+    ]
+
+    const depthGraph = applyDepthFilter({ nodes, edges }, 'Micro', 1, 'selected')
+
+    expect(depthGraph.nodes.map(node => node.id)).toEqual(['selected', 'callee'])
+    expect(depthGraph.edges.map(edge => edge.id)).toEqual(['call'])
   })
 
   it('filters visible graph by language without deleting source graph data', () => {

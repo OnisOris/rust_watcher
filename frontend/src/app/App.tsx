@@ -11,6 +11,7 @@ import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { useBackendGraph } from './api/useBackendGraph'
 import {
   applyCollapsedGroups,
+  applyDepthFilter,
   applyGraphFilters,
   buildCollapsedGroupStats,
   buildRouteFlowGraph,
@@ -142,9 +143,10 @@ export default function App() {
         edges: lensGraph.edges,
       }
       const filteredGraph = applyCollapsedGroups(applyGraphFilters(annotatedGraph, filters), collapsedGroups)
-      return { nodes: filteredGraph.nodes, edges: bundleEdges(filteredGraph.edges) }
+      const depthGraph = applyDepthFilter(filteredGraph, mode, filters.depth, selectedNodeId)
+      return { nodes: depthGraph.nodes, edges: bundleEdges(depthGraph.edges) }
     },
-    [graphNodes, edges, graphLens, filters, collapsedGroups, diagnosticsByNode],
+    [graphNodes, edges, mode, graphLens, selectedNodeId, filters, collapsedGroups, diagnosticsByNode],
   )
   const zeroEdgeHint = mode === 'Micro' && filters.depth !== 'full' && !selectedNodeId
     ? graphModeEmptyHint(mode)

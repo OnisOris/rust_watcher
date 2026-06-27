@@ -48,6 +48,20 @@ export function visibleNodeIdsForDepth(
   return new Set(nodes.map(node => node.id))
 }
 
+export function applyDepthFilter(
+  graph: { nodes: GraphNode[]; edges: GraphEdge[] },
+  mode: GraphMode,
+  depth: GraphFilters['depth'],
+  selectedNodeId: string | null,
+) {
+  const visibleIds = visibleNodeIdsForDepth(graph.nodes, graph.edges, mode, depth, selectedNodeId)
+  const nodes = graph.nodes.filter(node => visibleIds.has(node.id))
+  return {
+    nodes,
+    edges: graph.edges.filter(edge => visibleIds.has(edge.source) && visibleIds.has(edge.target)),
+  }
+}
+
 export function applyGraphFilters(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, filters: GraphFilters) {
   const nodes = graph.nodes.filter(node => matchesLanguageFilter(node, filters) && matchesReachabilityFilter(node, filters))
   const nodeIds = new Set(nodes.map(node => node.id))
