@@ -151,7 +151,21 @@ Generic MCP client configuration example:
 }
 ```
 
-Common tools include `get_status`, `search_symbols`, `get_graph_snapshot`, `get_node`, `get_node_context`, `get_edge_context`, `trace_node`, `trace_route`, `run_project_checks`, `list_diagnostics`, and `list_detached_rust_files`. `run_project_checks` runs fixed `cargo check --message-format=json --all-targets` commands for discovered Rust packages, then refreshes diagnostics; checks are not run during tool listing so MCP clients can start quickly. Detached Rust files use the existing `SourceReachability::Detached` metadata and should be treated as review signals, not automatic deletion advice.
+Common tools include `get_status`, `get_check_status`, `search_symbols`, `get_graph_snapshot`, `get_node`, `get_node_context`, `get_edge_context`, `trace_node`, `trace_route`, `run_project_checks`, `list_diagnostics`, and `list_detached_rust_files`. `run_project_checks` runs fixed read-only checks, then refreshes diagnostics; checks are not run during tool listing so MCP clients can start quickly. Agents should treat empty diagnostics as inconclusive until `get_check_status.canClaimClean` is true.
+
+`run_project_checks` accepts optional arguments:
+
+```json
+{
+  "target": "all",
+  "timeoutSeconds": 60,
+  "includeSlow": false
+}
+```
+
+`target` can be `all`, `rust`, `frontend`, `backend`, or `firmware`. Rust checks use `cargo check --message-format=json --all-targets` for discovered Cargo packages. Frontend checks prefer `typecheck` or `check` package scripts; `build` is treated as slow and only runs when `includeSlow` is true. Firmware/embedded Rust packages are skipped by default during `all`/`rust`; run with `target: "firmware"` or `includeSlow: true` when the toolchain is ready.
+
+Detached Rust files use the existing `SourceReachability::Detached` metadata and should be treated as review signals, not automatic deletion advice.
 
 ## API
 

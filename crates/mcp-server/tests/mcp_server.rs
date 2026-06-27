@@ -1,5 +1,5 @@
 use clap::Parser;
-use mcp_server::{Cli, RustWatcherMcpServer};
+use mcp_server::{Cli, RunProjectChecksArgs, RustWatcherMcpServer};
 use rmcp::ServerHandler;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,7 @@ fn exposes_required_tool_schemas() {
 
     for name in [
         "get_status",
+        "get_check_status",
         "search_symbols",
         "get_graph_snapshot",
         "get_node_context",
@@ -63,7 +64,7 @@ fn project_checks_collect_cargo_diagnostics() {
     .unwrap();
     let server = server_for(&root);
 
-    let checks = server.run_project_checks();
+    let checks = server.run_project_checks(RunProjectChecksArgs::default());
     assert!(checks.checks.iter().any(|check| !check.success));
     assert!(checks
         .diagnostics
@@ -75,6 +76,7 @@ fn project_checks_collect_cargo_diagnostics() {
 
     let status = server.status_response();
     assert!(status.diagnostics_count > 0);
+    assert!(!status.check_status.can_claim_clean);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -87,6 +89,12 @@ fn required_mvp_queries_work_against_fixture() {
     let status = server.status_response();
     assert!(status.node_count > 0);
     assert!(status.safety.read_only);
+    assert!(!status.check_status.can_claim_clean);
+    assert!(status
+        .check_status
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("not been run")));
 
     let results = server.search_symbols("helper", 20);
     assert!(results.iter().any(|result| result.label == "helper"));

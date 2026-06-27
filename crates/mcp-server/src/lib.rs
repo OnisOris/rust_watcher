@@ -34,6 +34,8 @@ const MAX_GRAPH_EDGES: usize = 1_000;
 const MAX_DIAGNOSTICS: usize = 100;
 const MAX_DETACHED_FILES: usize = 200;
 const CHECK_TIMEOUT_SECS: u64 = 60;
+const CHECK_TIMEOUT_MIN_SECS: u64 = 5;
+const CHECK_TIMEOUT_MAX_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "mcp-server")]
@@ -86,6 +88,7 @@ pub struct StatusResponse {
     pub file_count: usize,
     pub diagnostics_count: usize,
     pub checks: Vec<ProjectCheckResult>,
+    pub check_status: CheckStatusResponse,
     pub safety: SafetyModel,
 }
 
@@ -95,7 +98,8 @@ pub struct SafetyModel {
     pub read_only: bool,
     pub exposes_file_mutation: bool,
     pub exposes_file_deletion: bool,
-    pub exposes_shell_execution: bool,
+    pub exposes_arbitrary_shell_execution: bool,
+    pub exposes_fixed_project_checks: bool,
     pub exposes_editor_open: bool,
     pub source_reads_stay_inside_project_root: bool,
 }
@@ -121,6 +125,8 @@ pub struct DiagnosticsResponse {
     pub all_diagnostics: Vec<DiagnosticRecord>,
     pub truncated: bool,
     pub checks: Vec<ProjectCheckResult>,
+    pub check_status: CheckStatusResponse,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,21 +134,47 @@ pub struct DiagnosticsResponse {
 pub struct ProjectCheckRunResponse {
     pub checks: Vec<ProjectCheckResult>,
     pub diagnostics: DiagnosticsResponse,
+    pub check_status: CheckStatusResponse,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectCheckResult {
     pub id: String,
+    pub kind: ProjectCheckKind,
     pub label: String,
     pub command: Vec<String>,
     pub cwd: String,
     pub status: AnalyzerStatus,
     pub success: bool,
+    pub skipped: bool,
+    pub timed_out: bool,
     pub exit_code: Option<i32>,
     pub diagnostics_count: usize,
     pub duration_ms: u128,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ProjectCheckKind {
+    Rust,
+    Frontend,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckStatusResponse {
+    pub checks_run: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub timed_out: usize,
+    pub diagnostics_count: usize,
+    pub checks_complete: bool,
+    pub can_claim_clean: bool,
+    pub message: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,12 +234,41 @@ struct DiagnosticsArgs {
     limit: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProjectChecksArgs {
+    #[serde(default = "default_check_target")]
+    pub target: String,
+    #[serde(default = "default_check_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub include_slow: bool,
+}
+
+impl Default for RunProjectChecksArgs {
+    fn default() -> Self {
+        Self {
+            target: default_check_target(),
+            timeout_seconds: default_check_timeout_seconds(),
+            include_slow: false,
+        }
+    }
+}
+
 fn default_search_limit() -> usize {
     20
 }
 
 fn default_diagnostics_limit() -> usize {
     MAX_DIAGNOSTICS
+}
+
+fn default_check_target() -> String {
+    "all".to_string()
+}
+
+fn default_check_timeout_seconds() -> u64 {
+    CHECK_TIMEOUT_SECS
 }
 
 impl RustWatcherMcpServer {
@@ -280,6 +341,7 @@ impl RustWatcherMcpServer {
         let diagnostics_by_file = self.diagnostics_by_file.read().unwrap();
         let checks = self.check_results.read().unwrap().clone();
         let diagnostics_count = diagnostics_by_file.values().map(Vec::len).sum::<usize>();
+        let check_status = check_status_response(&checks, diagnostics_count);
         let mut status = self.graph.status.clone();
         status
             .analyzers
@@ -296,11 +358,13 @@ impl RustWatcherMcpServer {
             file_count: self.graph.files.len(),
             diagnostics_count,
             checks,
+            check_status,
             safety: SafetyModel {
                 read_only: true,
                 exposes_file_mutation: false,
                 exposes_file_deletion: false,
-                exposes_shell_execution: false,
+                exposes_arbitrary_shell_execution: false,
+                exposes_fixed_project_checks: true,
                 exposes_editor_open: false,
                 source_reads_stay_inside_project_root: true,
             },
@@ -397,15 +461,34 @@ impl RustWatcherMcpServer {
         ))
     }
 
-    pub fn run_project_checks(&self) -> ProjectCheckRunResponse {
-        let check_run = run_cargo_checks(&self.project_root, &self.graph);
+    pub fn run_project_checks(&self, args: RunProjectChecksArgs) -> ProjectCheckRunResponse {
+        let config = ProjectCheckConfig::from_args(args);
+        let check_run = run_project_checks_impl(&self.project_root, &self.graph, &config);
         *self.diagnostics_by_file.write().unwrap() = check_run.diagnostics_by_file;
         *self.diagnostics_by_node.write().unwrap() = check_run.diagnostics_by_node;
         *self.check_results.write().unwrap() = check_run.results;
+        let checks = self.check_results.read().unwrap().clone();
+        let diagnostics = self.diagnostics(None, None, MAX_DIAGNOSTICS);
+        let check_status = diagnostics.check_status.clone();
+        let warnings = diagnostics.warnings.clone();
         ProjectCheckRunResponse {
-            checks: self.check_results.read().unwrap().clone(),
-            diagnostics: self.diagnostics(None, None, MAX_DIAGNOSTICS),
+            checks,
+            diagnostics,
+            check_status,
+            warnings,
         }
+    }
+
+    pub fn check_status(&self) -> CheckStatusResponse {
+        let checks = self.check_results.read().unwrap();
+        let diagnostics_count = self
+            .diagnostics_by_file
+            .read()
+            .unwrap()
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        check_status_response(&checks, diagnostics_count)
     }
 
     pub fn edge_trace(&self, edge_id: &str) -> Option<graph_core::TraceExplanation> {
@@ -435,12 +518,17 @@ impl RustWatcherMcpServer {
         all.truncate(limit);
         let diagnostics_by_file = group_diagnostics_by_file(&all);
         let diagnostics_by_node = group_diagnostics_by_node(&all);
+        let checks = self.check_results.read().unwrap().clone();
+        let check_status = check_status_response(&checks, all.len());
+        let warnings = check_status.warnings.clone();
         DiagnosticsResponse {
             diagnostics_by_file,
             diagnostics_by_node,
             all_diagnostics: all,
             truncated,
-            checks: self.check_results.read().unwrap().clone(),
+            checks,
+            check_status,
+            warnings,
         }
     }
 
@@ -486,6 +574,9 @@ impl RustWatcherMcpServer {
         }
         if uri == "watcher://diagnostics" {
             return Some(json!(self.diagnostics(None, None, MAX_DIAGNOSTICS)));
+        }
+        if uri == "watcher://checks/status" {
+            return Some(json!(self.check_status()));
         }
         if uri == "watcher://detached/rust" {
             return Some(json!(self.detached_rust_files()));
@@ -593,9 +684,30 @@ impl RustWatcherMcpServer {
                 ),
             ),
             tool(
+                "get_check_status",
+                "Return whether project checks have run, completed, and can support a clean-project claim.",
+                empty_object_schema(),
+            ),
+            tool(
                 "run_project_checks",
                 "Run fixed read-only project checks and refresh diagnostics.",
-                empty_object_schema(),
+                object_schema(
+                    [
+                        (
+                            "target",
+                            json!({"type": "string", "enum": ["all", "rust", "frontend", "backend", "firmware"], "default": "all"}),
+                        ),
+                        (
+                            "timeoutSeconds",
+                            json!({"type": "integer", "default": CHECK_TIMEOUT_SECS, "minimum": CHECK_TIMEOUT_MIN_SECS, "maximum": CHECK_TIMEOUT_MAX_SECS}),
+                        ),
+                        (
+                            "includeSlow",
+                            json!({"type": "boolean", "default": false}),
+                        ),
+                    ],
+                    [],
+                ),
             ),
             tool(
                 "list_detached_rust_files",
@@ -639,6 +751,11 @@ impl RustWatcherMcpServer {
                 "Traits graph snapshot",
             ),
             ("watcher://diagnostics", "diagnostics", "Diagnostics"),
+            (
+                "watcher://checks/status",
+                "checks-status",
+                "Project check status",
+            ),
             (
                 "watcher://detached/rust",
                 "detached-rust",
@@ -869,7 +986,11 @@ impl RustWatcherMcpServer {
                     args.limit,
                 )))
             }
-            "run_project_checks" => Ok(structured(self.run_project_checks())),
+            "get_check_status" => Ok(structured(self.check_status())),
+            "run_project_checks" => {
+                let args: RunProjectChecksArgs = decode_args(request.arguments)?;
+                Ok(structured(self.run_project_checks(args)))
+            }
             "list_detached_rust_files" => Ok(structured(self.detached_rust_files())),
             other => Err(McpError::invalid_params(
                 format!("unknown tool: {other}"),
@@ -884,17 +1005,17 @@ impl RustWatcherMcpServer {
     ) -> Result<GetPromptResult, McpError> {
         let args = request.arguments.unwrap_or_default();
         let text = match request.name.as_str() {
-            "explain_architecture" => "Use get_status first, then inspect get_graph_snapshot for Macro and Meso. Search for entrypoints, routes, major modules, and explain architecture from graph evidence. Ask focused follow-up calls instead of loading entire files.".to_string(),
+            "explain_architecture" => "Use get_status first, then inspect get_graph_snapshot for Macro and Meso. Search for entrypoints, routes, major modules, and explain architecture from graph evidence. Use get_check_status before making cleanliness claims; empty diagnostics are not proof unless canClaimClean is true. Ask focused follow-up calls instead of loading entire files.".to_string(),
             "review_change_impact" => {
                 let symbol = string_arg(&args, "symbol_or_file")?;
-                format!("Use search_symbols for '{symbol}', then inspect get_node, get_node_context, trace_node, callers/callees/references, and nearby diagnostics. Summarize likely impact and uncertainty.")
+                format!("Use search_symbols for '{symbol}', then inspect get_node, get_node_context, trace_node, callers/callees/references, and nearby diagnostics. Call run_project_checks when correctness matters, then list_diagnostics. Summarize likely impact and uncertainty.")
             }
             "explain_frontend_to_backend_route" => {
                 let method = string_arg(&args, "method")?;
                 let path = string_arg(&args, "path")?;
                 format!("Use trace_route with method '{method}' and path '{path}', then inspect route/node context packs for frontend callers, endpoint handlers, and data-flow evidence.")
             }
-            "find_unused_or_detached_code" => "Use list_detached_rust_files and graph snapshots to inspect detached Rust files and low-connectivity nodes. Explicitly warn that detached does not always mean safe to delete; verify build targets, feature flags, generated code, and external references before recommending deletion.".to_string(),
+            "find_unused_or_detached_code" => "Use list_detached_rust_files and graph snapshots to inspect detached Rust files and low-connectivity nodes. Explicitly warn that detached does not always mean safe to delete; verify build targets, feature flags, generated code, external references, and get_check_status before recommending deletion.".to_string(),
             other => {
                 return Err(McpError::invalid_params(
                     format!("unknown prompt: {other}"),
@@ -948,6 +1069,58 @@ struct ProjectCheckRun {
     diagnostics_by_node: HashMap<String, Vec<DiagnosticRecord>>,
 }
 
+struct ProjectCheckConfig {
+    target: CheckTarget,
+    timeout_seconds: u64,
+    include_slow: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckTarget {
+    All,
+    Rust,
+    Frontend,
+    Backend,
+    Firmware,
+}
+
+impl ProjectCheckConfig {
+    fn from_args(args: RunProjectChecksArgs) -> Self {
+        Self {
+            target: parse_check_target(&args.target),
+            timeout_seconds: args
+                .timeout_seconds
+                .clamp(CHECK_TIMEOUT_MIN_SECS, CHECK_TIMEOUT_MAX_SECS),
+            include_slow: args.include_slow,
+        }
+    }
+
+    fn wants_rust(&self) -> bool {
+        matches!(
+            self.target,
+            CheckTarget::All | CheckTarget::Rust | CheckTarget::Backend | CheckTarget::Firmware
+        )
+    }
+
+    fn wants_frontend(&self) -> bool {
+        matches!(self.target, CheckTarget::All | CheckTarget::Frontend)
+    }
+
+    fn explicit_firmware(&self) -> bool {
+        self.target == CheckTarget::Firmware
+    }
+}
+
+fn parse_check_target(target: &str) -> CheckTarget {
+    match target {
+        "rust" => CheckTarget::Rust,
+        "frontend" => CheckTarget::Frontend,
+        "backend" => CheckTarget::Backend,
+        "firmware" => CheckTarget::Firmware,
+        _ => CheckTarget::All,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CargoJsonMessage {
     reason: String,
@@ -977,108 +1150,26 @@ struct CargoDiagnosticSpan {
     is_primary: bool,
 }
 
-fn run_cargo_checks(project_root: &Path, graph: &GraphSnapshot) -> ProjectCheckRun {
-    let cargo_projects = discover_cargo_projects(project_root);
+fn run_project_checks_impl(
+    project_root: &Path,
+    graph: &GraphSnapshot,
+    config: &ProjectCheckConfig,
+) -> ProjectCheckRun {
     let symbol_index = SymbolIndex::from_nodes(&graph.nodes);
     let mut diagnostics_by_file = HashMap::<String, Vec<DiagnosticRecord>>::new();
     let mut results = Vec::new();
 
-    if cargo_projects.is_empty() {
-        results.push(ProjectCheckResult {
-            id: "cargo-check:none".to_string(),
-            label: "cargo check".to_string(),
-            command: vec!["cargo".to_string(), "check".to_string()],
-            cwd: project_root.display().to_string(),
-            status: AnalyzerStatus::Fallback,
-            success: false,
-            exit_code: None,
-            diagnostics_count: 0,
-            duration_ms: 0,
-            message: Some("No Cargo.toml found under project root.".to_string()),
-        });
-    }
-
-    for manifest_dir in cargo_projects {
-        let started = Instant::now();
-        let mut command = Command::new("cargo");
-        command
-            .arg("check")
-            .arg("--message-format=json")
-            .arg("--all-targets")
-            .current_dir(&manifest_dir)
-            .env("CARGO_TERM_COLOR", "never")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let relative_dir = project_indexer::relative_to(project_root, &manifest_dir);
-        let check_id = format!("cargo-check:{relative_dir}");
-        let command_display = vec![
-            "cargo".to_string(),
-            "check".to_string(),
-            "--message-format=json".to_string(),
-            "--all-targets".to_string(),
-        ];
-
-        let output = match run_command_with_timeout(command, CHECK_TIMEOUT_SECS) {
-            Ok(output) => output,
-            Err(error) => {
-                results.push(ProjectCheckResult {
-                    id: check_id,
-                    label: format!("cargo check ({relative_dir})"),
-                    command: command_display,
-                    cwd: manifest_dir.display().to_string(),
-                    status: AnalyzerStatus::Error,
-                    success: false,
-                    exit_code: None,
-                    diagnostics_count: 0,
-                    duration_ms: started.elapsed().as_millis(),
-                    message: Some(error),
-                });
-                continue;
-            }
-        };
-
-        let diagnostics = parse_cargo_diagnostics(
+    if config.wants_rust() {
+        run_cargo_checks(
             project_root,
-            &manifest_dir,
             &symbol_index,
-            &String::from_utf8_lossy(&output.stdout),
+            config,
+            &mut results,
+            &mut diagnostics_by_file,
         );
-        let diagnostics_count = diagnostics.len();
-        for diagnostic in diagnostics {
-            diagnostics_by_file
-                .entry(diagnostic.file.clone())
-                .or_default()
-                .push(diagnostic);
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let message = if output.timed_out {
-            Some(format!("cargo check timed out after {CHECK_TIMEOUT_SECS}s"))
-        } else if output.status_success {
-            Some("cargo check passed".to_string())
-        } else if stderr.trim().is_empty() {
-            Some("cargo check failed".to_string())
-        } else {
-            Some(stderr.trim().lines().take(3).collect::<Vec<_>>().join("\n"))
-        };
-
-        results.push(ProjectCheckResult {
-            id: check_id,
-            label: format!("cargo check ({relative_dir})"),
-            command: command_display,
-            cwd: manifest_dir.display().to_string(),
-            status: if output.status_success {
-                AnalyzerStatus::Ready
-            } else {
-                AnalyzerStatus::Error
-            },
-            success: output.status_success,
-            exit_code: output.exit_code,
-            diagnostics_count,
-            duration_ms: started.elapsed().as_millis(),
-            message,
-        });
+    }
+    if config.wants_frontend() {
+        run_frontend_checks(project_root, config, &mut results);
     }
 
     let all_diagnostics = diagnostics_by_file
@@ -1093,6 +1184,364 @@ fn run_cargo_checks(project_root: &Path, graph: &GraphSnapshot) -> ProjectCheckR
         diagnostics_by_file,
         diagnostics_by_node,
     }
+}
+
+fn run_cargo_checks(
+    project_root: &Path,
+    symbol_index: &SymbolIndex,
+    config: &ProjectCheckConfig,
+    results: &mut Vec<ProjectCheckResult>,
+    diagnostics_by_file: &mut HashMap<String, Vec<DiagnosticRecord>>,
+) {
+    let cargo_projects = discover_cargo_projects(project_root)
+        .into_iter()
+        .filter(|manifest_dir| cargo_project_matches_target(project_root, manifest_dir, config))
+        .collect::<Vec<_>>();
+
+    if cargo_projects.is_empty() {
+        results.push(skipped_check(
+            "cargo-check:none",
+            ProjectCheckKind::Rust,
+            "cargo check",
+            project_root,
+            vec!["cargo".to_string(), "check".to_string()],
+            "No matching Cargo.toml found under project root.",
+        ));
+    }
+
+    for manifest_dir in cargo_projects {
+        let started = Instant::now();
+        let relative_dir = project_indexer::relative_to(project_root, &manifest_dir);
+        let check_id = format!("cargo-check:{relative_dir}");
+        let command_display = vec![
+            "cargo".to_string(),
+            "check".to_string(),
+            "--message-format=json".to_string(),
+            "--all-targets".to_string(),
+        ];
+        if is_slow_rust_project(&relative_dir)
+            && !config.include_slow
+            && !config.explicit_firmware()
+        {
+            results.push(skipped_check(
+                check_id,
+                ProjectCheckKind::Rust,
+                format!("cargo check ({relative_dir})"),
+                &manifest_dir,
+                command_display,
+                "Skipped slow embedded/firmware check; rerun with target='firmware' or includeSlow=true.",
+            ));
+            continue;
+        }
+
+        let mut command = Command::new("cargo");
+        command
+            .arg("check")
+            .arg("--message-format=json")
+            .arg("--all-targets")
+            .current_dir(&manifest_dir)
+            .env("CARGO_TERM_COLOR", "never")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = match run_command_with_timeout(command, config.timeout_seconds) {
+            Ok(output) => output,
+            Err(error) => {
+                results.push(ProjectCheckResult {
+                    id: check_id,
+                    kind: ProjectCheckKind::Rust,
+                    label: format!("cargo check ({relative_dir})"),
+                    command: command_display,
+                    cwd: manifest_dir.display().to_string(),
+                    status: AnalyzerStatus::Error,
+                    success: false,
+                    skipped: false,
+                    timed_out: false,
+                    exit_code: None,
+                    diagnostics_count: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    message: Some(error),
+                });
+                continue;
+            }
+        };
+
+        let diagnostics = parse_cargo_diagnostics(
+            project_root,
+            &manifest_dir,
+            symbol_index,
+            &String::from_utf8_lossy(&output.stdout),
+        );
+        let diagnostics_count = diagnostics.len();
+        for diagnostic in diagnostics {
+            diagnostics_by_file
+                .entry(diagnostic.file.clone())
+                .or_default()
+                .push(diagnostic);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = if output.timed_out {
+            Some(format!(
+                "cargo check timed out after {}s",
+                config.timeout_seconds
+            ))
+        } else if output.status_success {
+            Some("cargo check passed".to_string())
+        } else if stderr.trim().is_empty() {
+            Some("cargo check failed".to_string())
+        } else {
+            Some(stderr.trim().lines().take(3).collect::<Vec<_>>().join("\n"))
+        };
+
+        results.push(ProjectCheckResult {
+            id: check_id,
+            kind: ProjectCheckKind::Rust,
+            label: format!("cargo check ({relative_dir})"),
+            command: command_display,
+            cwd: manifest_dir.display().to_string(),
+            status: if output.status_success {
+                AnalyzerStatus::Ready
+            } else {
+                AnalyzerStatus::Error
+            },
+            success: output.status_success,
+            skipped: false,
+            timed_out: output.timed_out,
+            exit_code: output.exit_code,
+            diagnostics_count,
+            duration_ms: started.elapsed().as_millis(),
+            message,
+        });
+    }
+}
+
+fn run_frontend_checks(
+    project_root: &Path,
+    config: &ProjectCheckConfig,
+    results: &mut Vec<ProjectCheckResult>,
+) {
+    let package_dirs = discover_package_projects(project_root);
+    if package_dirs.is_empty() {
+        results.push(skipped_check(
+            "frontend-check:none",
+            ProjectCheckKind::Frontend,
+            "frontend check",
+            project_root,
+            vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "typecheck".to_string(),
+            ],
+            "No package.json found under project root.",
+        ));
+        return;
+    }
+
+    for package_dir in package_dirs {
+        let relative_dir = project_indexer::relative_to(project_root, &package_dir);
+        let Some(frontend_command) =
+            select_frontend_check_command(&package_dir, config.include_slow)
+        else {
+            results.push(skipped_check(
+                format!("frontend-check:{relative_dir}"),
+                ProjectCheckKind::Frontend,
+                format!("frontend check ({relative_dir})"),
+                &package_dir,
+                vec![],
+                "No typecheck script found; build script is treated as slow unless includeSlow=true.",
+            ));
+            continue;
+        };
+        let command_display = frontend_command.display.clone();
+        let started = Instant::now();
+        let mut command = Command::new(&frontend_command.program);
+        command
+            .args(&frontend_command.args)
+            .current_dir(&package_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = match run_command_with_timeout(command, config.timeout_seconds) {
+            Ok(output) => output,
+            Err(error) => {
+                results.push(ProjectCheckResult {
+                    id: format!("frontend-check:{relative_dir}"),
+                    kind: ProjectCheckKind::Frontend,
+                    label: format!("frontend check ({relative_dir})"),
+                    command: command_display,
+                    cwd: package_dir.display().to_string(),
+                    status: AnalyzerStatus::Error,
+                    success: false,
+                    skipped: false,
+                    timed_out: false,
+                    exit_code: None,
+                    diagnostics_count: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    message: Some(error),
+                });
+                continue;
+            }
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = if output.timed_out {
+            Some(format!(
+                "frontend check timed out after {}s",
+                config.timeout_seconds
+            ))
+        } else if output.status_success {
+            Some("frontend check passed".to_string())
+        } else {
+            Some(
+                first_nonempty_lines(&stderr, &stdout, 5).unwrap_or_else(|| {
+                    "frontend check failed; command returned no output".to_string()
+                }),
+            )
+        };
+        results.push(ProjectCheckResult {
+            id: format!("frontend-check:{relative_dir}"),
+            kind: ProjectCheckKind::Frontend,
+            label: format!("frontend check ({relative_dir})"),
+            command: command_display,
+            cwd: package_dir.display().to_string(),
+            status: if output.status_success {
+                AnalyzerStatus::Ready
+            } else {
+                AnalyzerStatus::Error
+            },
+            success: output.status_success,
+            skipped: false,
+            timed_out: output.timed_out,
+            exit_code: output.exit_code,
+            diagnostics_count: 0,
+            duration_ms: started.elapsed().as_millis(),
+            message,
+        });
+    }
+}
+
+struct FrontendCommand {
+    program: String,
+    args: Vec<String>,
+    display: Vec<String>,
+}
+
+fn select_frontend_check_command(
+    package_dir: &Path,
+    include_slow: bool,
+) -> Option<FrontendCommand> {
+    let content = std::fs::read_to_string(package_dir.join("package.json")).ok()?;
+    let value = serde_json::from_str::<Value>(&content).ok()?;
+    let scripts = value.get("scripts")?.as_object()?;
+    let script = if scripts.contains_key("typecheck") {
+        "typecheck"
+    } else if scripts.contains_key("check") {
+        "check"
+    } else if include_slow && scripts.contains_key("build") {
+        "build"
+    } else {
+        return None;
+    };
+    let manager = package_manager_for(package_dir);
+    let mut display = manager.command.clone();
+    display.extend(["run".to_string(), script.to_string()]);
+    Some(FrontendCommand {
+        program: manager.program,
+        args: manager
+            .args
+            .into_iter()
+            .chain(["run".to_string(), script.to_string()])
+            .collect(),
+        display,
+    })
+}
+
+struct PackageManagerCommand {
+    program: String,
+    args: Vec<String>,
+    command: Vec<String>,
+}
+
+fn package_manager_for(package_dir: &Path) -> PackageManagerCommand {
+    if package_dir.join("pnpm-lock.yaml").exists() {
+        return PackageManagerCommand {
+            program: "pnpm".to_string(),
+            args: Vec::new(),
+            command: vec!["pnpm".to_string()],
+        };
+    }
+    if package_dir.join("bun.lockb").exists() || package_dir.join("bun.lock").exists() {
+        return PackageManagerCommand {
+            program: "bun".to_string(),
+            args: Vec::new(),
+            command: vec!["bun".to_string()],
+        };
+    }
+    PackageManagerCommand {
+        program: "npm".to_string(),
+        args: Vec::new(),
+        command: vec!["npm".to_string()],
+    }
+}
+
+fn first_nonempty_lines(primary: &str, fallback: &str, limit: usize) -> Option<String> {
+    let lines = primary
+        .lines()
+        .chain(fallback.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(limit)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn skipped_check(
+    id: impl Into<String>,
+    kind: ProjectCheckKind,
+    label: impl Into<String>,
+    cwd: &Path,
+    command: Vec<String>,
+    message: impl Into<String>,
+) -> ProjectCheckResult {
+    ProjectCheckResult {
+        id: id.into(),
+        kind,
+        label: label.into(),
+        command,
+        cwd: cwd.display().to_string(),
+        status: AnalyzerStatus::Fallback,
+        success: false,
+        skipped: true,
+        timed_out: false,
+        exit_code: None,
+        diagnostics_count: 0,
+        duration_ms: 0,
+        message: Some(message.into()),
+    }
+}
+
+fn cargo_project_matches_target(
+    project_root: &Path,
+    manifest_dir: &Path,
+    config: &ProjectCheckConfig,
+) -> bool {
+    let relative = project_indexer::relative_to(project_root, manifest_dir);
+    match config.target {
+        CheckTarget::All | CheckTarget::Rust => true,
+        CheckTarget::Backend => relative.contains("backend"),
+        CheckTarget::Firmware => relative.contains("firmware") || relative.contains("esp32"),
+        CheckTarget::Frontend => false,
+    }
+}
+
+fn is_slow_rust_project(relative_dir: &str) -> bool {
+    relative_dir.contains("firmware")
+        || relative_dir.contains("esp32")
+        || relative_dir.contains("embedded")
 }
 
 struct CommandOutput {
@@ -1190,6 +1639,30 @@ fn discover_cargo_projects(project_root: &Path) -> Vec<PathBuf> {
         return vec![project_root.to_path_buf()];
     }
     manifests
+}
+
+fn discover_package_projects(project_root: &Path) -> Vec<PathBuf> {
+    let mut packages = Vec::new();
+    discover_package_projects_inner(project_root, &mut packages);
+    packages.sort();
+    packages.dedup();
+    packages
+}
+
+fn discover_package_projects_inner(dir: &Path, packages: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    if dir.join("package.json").exists() {
+        packages.push(dir.to_path_buf());
+    }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || should_skip_check_dir(&path) {
+            continue;
+        }
+        discover_package_projects_inner(&path, packages);
+    }
 }
 
 fn discover_cargo_projects_inner(dir: &Path, manifests: &mut Vec<PathBuf>) {
@@ -1401,6 +1874,66 @@ fn group_diagnostics_by_node(
     grouped
 }
 
+fn check_status_response(
+    checks: &[ProjectCheckResult],
+    diagnostics_count: usize,
+) -> CheckStatusResponse {
+    let checks_run = checks.iter().filter(|check| !check.skipped).count();
+    let passed = checks.iter().filter(|check| check.success).count();
+    let skipped = checks.iter().filter(|check| check.skipped).count();
+    let timed_out = checks.iter().filter(|check| check.timed_out).count();
+    let failed = checks
+        .iter()
+        .filter(|check| !check.success && !check.skipped)
+        .count();
+    let checks_complete = !checks.is_empty() && skipped == 0 && failed == 0 && timed_out == 0;
+    let can_claim_clean = checks_complete && diagnostics_count == 0;
+    let mut warnings = Vec::new();
+    if checks.is_empty() {
+        warnings.push(
+            "Project checks have not been run; empty diagnostics do not prove the project is clean."
+                .to_string(),
+        );
+    }
+    if skipped > 0 {
+        warnings.push(format!(
+            "{skipped} project check(s) were skipped; do not claim full project cleanliness."
+        ));
+    }
+    if timed_out > 0 {
+        warnings.push(format!(
+            "{timed_out} project check(s) timed out; diagnostics may be incomplete."
+        ));
+    }
+    if failed > 0 {
+        warnings.push(format!(
+            "{failed} project check(s) failed; inspect check results and diagnostics."
+        ));
+    }
+    let message = if can_claim_clean {
+        "All requested project checks passed and no diagnostics were reported.".to_string()
+    } else if checks.is_empty() {
+        "Checks not run.".to_string()
+    } else {
+        format!(
+            "{passed}/{total} check(s) passed, {failed} failed, {skipped} skipped, {timed_out} timed out, {diagnostics_count} diagnostic(s).",
+            total = checks.len()
+        )
+    };
+    CheckStatusResponse {
+        checks_run,
+        passed,
+        failed,
+        skipped,
+        timed_out,
+        diagnostics_count,
+        checks_complete,
+        can_claim_clean,
+        message,
+        warnings,
+    }
+}
+
 fn cargo_check_service_status(
     status: AnalyzerStatus,
     message: &str,
@@ -1427,28 +1960,15 @@ fn check_service_from_results(
     if checks.is_empty() {
         return cargo_check_service_status(AnalyzerStatus::Stale, "Checks not run yet", 0);
     }
-    let status = if checks
-        .iter()
-        .any(|check| check.status == AnalyzerStatus::Error)
-    {
+    let summary = check_status_response(checks, diagnostics_count as usize);
+    let status = if summary.failed > 0 || summary.timed_out > 0 {
         AnalyzerStatus::Error
-    } else if checks
-        .iter()
-        .any(|check| check.status == AnalyzerStatus::Fallback)
-    {
+    } else if summary.skipped > 0 {
         AnalyzerStatus::Fallback
     } else {
         AnalyzerStatus::Ready
     };
-    let passed = checks.iter().filter(|check| check.success).count();
-    cargo_check_service_status(
-        status,
-        &format!(
-            "{passed}/{} cargo check command(s) passed; {diagnostics_count} diagnostic(s).",
-            checks.len()
-        ),
-        diagnostics_count,
-    )
+    cargo_check_service_status(status, &summary.message, diagnostics_count)
 }
 
 fn string_arg(arguments: &Map<String, Value>, name: &str) -> Result<String, McpError> {
