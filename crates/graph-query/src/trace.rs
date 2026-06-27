@@ -22,10 +22,10 @@ pub fn build_route_trace(graph: &GraphSnapshot, endpoint: &GraphNode) -> TraceEx
     let matching_active_endpoints =
         active_endpoint_count_for_route(graph, route.as_ref().map(|route| route.key.as_str()));
     if matching_active_endpoints > 1 {
-        builder
-            .trace
-            .warnings
-            .push("Multiple active endpoint implementations match this route.".to_string());
+        builder.trace.warnings.push(format!(
+            "Multiple active endpoint implementations match this route; selected {}.",
+            endpoint.file.as_deref().unwrap_or(endpoint.id.as_str())
+        ));
     }
 
     if endpoint.reachability == Some(SourceReachability::Detached) {

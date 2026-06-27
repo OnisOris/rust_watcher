@@ -41,17 +41,16 @@ use url::Url;
 use uuid::Uuid;
 
 mod analyzer_paths;
-mod context_pack;
 mod lsp_runtime;
 mod python_ty;
 mod qml_lsp;
-mod trace;
 mod typescript_lsp;
 use analyzer_paths::resolve_rust_analyzer;
-use context_pack::{
+use graph_query::context_pack::{
     build_edge_context_pack, build_node_context_pack, build_route_context_pack,
     build_trace_context_pack,
 };
+use graph_query::trace::{build_edge_trace, build_node_trace, build_route_trace};
 use lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use python_ty::{
     enrich_python_semantic_calls_for_files, enrich_python_with_ty, PythonAnalyzerMode,
@@ -61,7 +60,6 @@ use qml_lsp::{
     status_to_analyzer_status as qml_status_to_analyzer_status, QmlAnalyzerMode, QmlAnalyzerStatus,
     QmlLspState,
 };
-use trace::{build_edge_trace, build_node_trace, build_route_trace};
 use typescript_lsp::{
     enrich_typescript_semantic_edges_for_files, enrich_typescript_with_lsp, language_for_path,
     locations_from_definition_response, status_to_analyzer_status, TypeScriptAnalyzerMode,

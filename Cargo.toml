@@ -5,6 +5,7 @@ members = [
   "crates/project-indexer",
   "crates/graph-builder",
   "crates/graph-query",
+  "crates/mcp-server",
   "crates/web-server",
   "example",
 ]

@@ -618,10 +618,7 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                     vy: 0.0,
                 });
                 new_edges.push(edge(EdgeType::Contains, &file_node_id, &id));
-                if let Some(handler_node) = node_index
-                    .first_of_type(&handler, NodeType::Function)
-                    .or_else(|| node_index.first_of_type(&handler, NodeType::Method))
-                {
+                if let Some(handler_node) = node_index.best_route_handler(&handler, file) {
                     new_edges.push(edge(EdgeType::EndpointHandler, &id, &handler_node.id));
                     push_unique_data_flow_edge(
                         &mut new_edges,
@@ -882,6 +879,7 @@ pub fn enrich_api_routes_for_files(snapshot: &mut GraphSnapshot, files: &[Indexe
 
 struct SyntaxNodeIndex {
     by_label: HashMap<String, Vec<GraphNode>>,
+    by_id: HashMap<String, GraphNode>,
     by_label_and_file: HashMap<(String, String), String>,
     by_file_and_line: HashMap<(String, u32), String>,
 }
@@ -889,6 +887,7 @@ struct SyntaxNodeIndex {
 impl SyntaxNodeIndex {
     fn new(nodes: &[GraphNode]) -> Self {
         let mut by_label: HashMap<String, Vec<GraphNode>> = HashMap::new();
+        let mut by_id = HashMap::new();
         let mut by_label_and_file = HashMap::new();
         let mut by_file_and_line = HashMap::new();
         for node in nodes {
@@ -896,6 +895,7 @@ impl SyntaxNodeIndex {
                 .entry(node.label.clone())
                 .or_default()
                 .push(node.clone());
+            by_id.insert(node.id.clone(), node.clone());
             if let Some(file) = &node.file {
                 by_label_and_file.insert((node.label.clone(), file.clone()), node.id.clone());
                 if let Some(line) = node.line {
@@ -905,9 +905,14 @@ impl SyntaxNodeIndex {
         }
         Self {
             by_label,
+            by_id,
             by_label_and_file,
             by_file_and_line,
         }
+    }
+
+    fn node(&self, id: &str) -> Option<&GraphNode> {
+        self.by_id.get(id)
     }
 
     fn first_of_type(&self, label: &str, node_type: NodeType) -> Option<&GraphNode> {
@@ -923,6 +928,45 @@ impl SyntaxNodeIndex {
             .flat_map(|nodes| nodes.iter())
             .filter(move |node| node.node_type == node_type)
     }
+
+    fn label_count_in_crate(&self, label: &str, crate_name: Option<&str>) -> usize {
+        self.by_label
+            .get(label)
+            .into_iter()
+            .flatten()
+            .filter(|node| node.crate_name.as_deref() == crate_name)
+            .count()
+    }
+
+    fn best_route_handler(&self, handler: &str, file: &IndexedFile) -> Option<&GraphNode> {
+        let mut candidates = self
+            .by_label
+            .get(handler)
+            .into_iter()
+            .flatten()
+            .filter(|node| matches!(node.node_type, NodeType::Function | NodeType::Method))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            route_handler_score(right, file)
+                .cmp(&route_handler_score(left, file))
+                .then(left.id.cmp(&right.id))
+        });
+        candidates.into_iter().next()
+    }
+}
+
+fn route_handler_score(node: &GraphNode, file: &IndexedFile) -> u8 {
+    let mut score = 0u8;
+    if node.file.as_deref() == Some(file.relative_path.as_str()) {
+        score += 100;
+    }
+    if node.crate_name.as_deref() == Some(file.package_name.as_str()) {
+        score += 30;
+    }
+    if node.module.as_deref() == Some(file.module_path.as_str()) {
+        score += 20;
+    }
+    score
 }
 
 fn add_impl_edges(
@@ -988,11 +1032,16 @@ fn add_function_relationships(
     source_id: &str,
     line: &str,
 ) {
+    let Some(source_node) = index.node(source_id) else {
+        return;
+    };
     for target in index.symbols_of_type(NodeType::Function) {
         if target.id == source_id {
             continue;
         }
-        if contains_call(line, &target.label) {
+        if contains_call(line, &target.label)
+            && function_call_candidate_allowed(index, source_node, target)
+        {
             push_unique_edge(
                 edges,
                 &HashSet::new(),
@@ -1005,7 +1054,7 @@ fn add_function_relationships(
 
     for target in index.symbols_of_type(NodeType::Method) {
         let method_name = target.label.rsplit("::").next().unwrap_or(&target.label);
-        if method_call_matches(index, target, method_name, line) {
+        if method_call_matches(index, source_node, target, method_name, line) {
             push_unique_edge(
                 edges,
                 &HashSet::new(),
@@ -1189,7 +1238,7 @@ fn contains_call(line: &str, name: &str) -> bool {
         let start = search_from + offset;
         let prev = line[..start].chars().next_back();
         let valid_prefix = prev
-            .map(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':')))
             .unwrap_or(true);
         if valid_prefix {
             return true;
@@ -1199,8 +1248,24 @@ fn contains_call(line: &str, name: &str) -> bool {
     false
 }
 
+fn function_call_candidate_allowed(
+    index: &SyntaxNodeIndex,
+    source: &GraphNode,
+    target: &GraphNode,
+) -> bool {
+    if target.file == source.file {
+        return true;
+    }
+    if target.crate_name != source.crate_name {
+        return false;
+    }
+    target.module == source.module
+        || index.label_count_in_crate(&target.label, source.crate_name.as_deref()) == 1
+}
+
 fn method_call_matches(
     index: &SyntaxNodeIndex,
+    source: &GraphNode,
     target: &GraphNode,
     method_name: &str,
     line: &str,
@@ -1208,14 +1273,37 @@ fn method_call_matches(
     if line.contains(&format!("{}(", target.label)) {
         return true;
     }
-    if !line.contains(&format!(".{method_name}(")) {
+    let Some(receiver) = method_call_receiver(line, method_name) else {
+        return false;
+    };
+    let Some((target_owner, _)) = target.label.rsplit_once("::") else {
+        return false;
+    };
+    if index.first_of_type(target_owner, NodeType::Trait).is_some() {
         return false;
     }
-    target
-        .label
-        .rsplit_once("::")
-        .map(|(owner, _)| index.first_of_type(owner, NodeType::Trait).is_none())
-        .unwrap_or(true)
+    if receiver == "self" {
+        return method_owner(source) == Some(target_owner);
+    }
+    if receiver.chars().next().is_some_and(char::is_uppercase) {
+        return receiver == target_owner;
+    }
+    target.file == source.file
+}
+
+fn method_call_receiver(line: &str, method_name: &str) -> Option<String> {
+    let pattern = format!(".{method_name}(");
+    let offset = line.find(&pattern)?;
+    let receiver = line[..offset]
+        .trim_end()
+        .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'))
+        .next()
+        .unwrap_or_default();
+    (!receiver.is_empty()).then(|| receiver.rsplit("::").next().unwrap_or(receiver).to_string())
+}
+
+fn method_owner(node: &GraphNode) -> Option<&str> {
+    node.label.rsplit_once("::").map(|(owner, _)| owner)
 }
 
 fn push_symbol(
@@ -1949,6 +2037,99 @@ export function App() {
             .iter()
             .any(|edge| edge.edge_type == EdgeType::EndpointHandler));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn route_handlers_prefer_symbols_from_route_file() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-route-handler-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"route_handler_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "mod other;\nfn health() {}\nfn main() { app.route(\"/api/health\", get(health)); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/other.rs"), "fn health() {}\n").unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/health")
+            .unwrap();
+        let handler_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == EdgeType::EndpointHandler && edge.source == endpoint.id)
+            .unwrap();
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == handler_edge.target)
+            .unwrap();
+
+        assert_eq!(handler.file.as_deref(), Some("src/main.rs"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn syntax_fallback_self_method_calls_stay_on_same_owner() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-method-noise-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"method_noise_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+struct Server;
+impl Server {
+    fn call_tool_inner(&self) {
+        self.diagnostics();
+    }
+    fn diagnostics(&self) {}
+}
+fn diagnostics() {}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/other.rs"),
+            r#"
+struct Other;
+impl Other {
+    fn diagnostics(&self) {}
+}
+"#,
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let source = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.label == "Server::call_tool_inner")
+            .unwrap();
+        let call_targets = snapshot
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == EdgeType::Calls && edge.source == source.id)
+            .filter_map(|edge| snapshot.nodes.iter().find(|node| node.id == edge.target))
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(call_targets, vec!["Server::diagnostics"]);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -5,6 +5,9 @@ use graph_core::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub mod context_pack;
+pub mod trace;
+
 pub fn focus_subgraph(
     snapshot: &GraphSnapshot,
     node_id: &str,
@@ -255,12 +258,60 @@ pub fn find_active_endpoint_by_route_key<'a>(
     graph: &'a GraphSnapshot,
     requested: &str,
 ) -> Option<&'a GraphNode> {
-    graph.nodes.iter().find(|node| {
-        node.node_type == NodeType::Endpoint
-            && graph_core::route_key_from_label(&node.label)
-                .is_some_and(|route| route.key == requested)
-            && !matches!(node.reachability, Some(SourceReachability::Detached))
-    })
+    let mut candidates = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.node_type == NodeType::Endpoint
+                && graph_core::route_key_from_label(&node.label)
+                    .is_some_and(|route| route.key == requested)
+                && !matches!(node.reachability, Some(SourceReachability::Detached))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        endpoint_route_score(graph, right)
+            .cmp(&endpoint_route_score(graph, left))
+            .then(left.id.cmp(&right.id))
+    });
+    candidates.into_iter().next()
+}
+
+fn endpoint_route_score(graph: &GraphSnapshot, endpoint: &GraphNode) -> u16 {
+    let mut score = 0u16;
+    if matches!(
+        endpoint.reachability,
+        Some(SourceReachability::Active) | None
+    ) {
+        score += 100;
+    }
+    if endpoint_has_local_handler(graph, endpoint) {
+        score += 80;
+    }
+    let crate_name = endpoint.crate_name.as_deref().unwrap_or_default();
+    let file = endpoint.file.as_deref().unwrap_or_default();
+    let module = endpoint.module.as_deref().unwrap_or_default();
+    if crate_name.contains("server") || file.contains("server") || module.contains("server") {
+        score += 60;
+    }
+    if file.ends_with("src/main.rs") || file.ends_with("src/lib.rs") {
+        score += 15;
+    }
+    if file.contains("/tests/") || file.contains(".test.") || file.contains("__tests__") {
+        score = score.saturating_sub(80);
+    }
+    score
+}
+
+fn endpoint_has_local_handler(graph: &GraphSnapshot, endpoint: &GraphNode) -> bool {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.source == endpoint.id && edge.edge_type == EdgeType::EndpointHandler)
+        .filter_map(|edge| graph.nodes.iter().find(|node| node.id == edge.target))
+        .any(|handler| {
+            handler.file == endpoint.file
+                || (handler.crate_name == endpoint.crate_name && handler.module == endpoint.module)
+        })
 }
 
 fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
@@ -426,6 +477,44 @@ mod tests {
         assert_eq!(details.route_key, "GET /api/users");
         assert_eq!(details.handlers.len(), 1);
         assert_eq!(details.handlers[0].node_id, "handler");
+    }
+
+    #[test]
+    fn route_lookup_prefers_server_endpoint_with_local_handler() {
+        let mut fixture_endpoint = test_node("fixture", "GET /api/health", NodeType::Endpoint);
+        fixture_endpoint.file = Some("crates/graph-builder/src/lib.rs".into());
+        fixture_endpoint.crate_name = Some("graph-builder".into());
+        fixture_endpoint.module = Some("crate root".into());
+        let mut fixture_handler = test_node("fixture-handler", "health", NodeType::Function);
+        fixture_handler.file = Some("crates/graph-builder/src/lib.rs".into());
+        fixture_handler.crate_name = Some("graph-builder".into());
+        fixture_handler.module = Some("crate root".into());
+
+        let mut server_endpoint = test_node("server", "GET /api/health", NodeType::Endpoint);
+        server_endpoint.file = Some("crates/web-server/src/main.rs".into());
+        server_endpoint.crate_name = Some("web-server".into());
+        server_endpoint.module = Some("crate root".into());
+        let mut server_handler = test_node("server-handler", "health", NodeType::Function);
+        server_handler.file = Some("crates/web-server/src/main.rs".into());
+        server_handler.crate_name = Some("web-server".into());
+        server_handler.module = Some("crate root".into());
+
+        let graph = test_snapshot(
+            vec![
+                fixture_endpoint,
+                fixture_handler,
+                server_endpoint,
+                server_handler,
+            ],
+            vec![
+                test_edge(EdgeType::EndpointHandler, "fixture", "fixture-handler"),
+                test_edge(EdgeType::EndpointHandler, "server", "server-handler"),
+            ],
+        );
+
+        let endpoint = find_active_endpoint_by_route_key(&graph, "GET /api/health").unwrap();
+
+        assert_eq!(endpoint.id, "server");
     }
 
     #[test]

@@ -113,6 +113,46 @@ pnpm dev
 
 Override the backend proxy target with `VITE_BACKEND_URL` when needed.
 
+## MCP Server
+
+`rust_watcher` can expose the project graph to AI coding agents through a read-only MCP server.
+It does not require the browser UI or the HTTP web server to be running.
+
+```bash
+cargo run -p mcp-server
+```
+
+By default the MCP server indexes the current working directory. Pass `--project /path/to/project` only when you want to pin it to a specific project root. The MCP server exposes bounded JSON tools and resources for graph snapshots, search, node context packs, route traces, diagnostics, project checks, and detached Rust file metadata. It does not expose file mutation, file deletion, git operations, editor-open side effects, or arbitrary command execution.
+
+Analyzer flags are aligned with the web server:
+
+```bash
+cargo run -p mcp-server -- \
+  --rust-analyzer rust-analyzer \
+  --python-analyzer auto \
+  --ty-path ty \
+  --typescript-analyzer auto \
+  --typescript-language-server-path typescript-language-server \
+  --qml-analyzer auto \
+  --qmlls-path qmlls
+```
+
+You can force parser-only behavior with `--disable-ty`, `--disable-typescript-language-server`, or `--disable-qmlls`. QML build flags `--qmlls-build-dir` and `--qmlls-no-cmake-calls` are accepted for configuration parity.
+
+Generic MCP client configuration example:
+
+```json
+{
+  "mcpServers": {
+    "rust_watcher": {
+      "command": "/path/to/rust_watcher/target/debug/mcp-server"
+    }
+  }
+}
+```
+
+Common tools include `get_status`, `search_symbols`, `get_graph_snapshot`, `get_node`, `get_node_context`, `get_edge_context`, `trace_node`, `trace_route`, `run_project_checks`, `list_diagnostics`, and `list_detached_rust_files`. `run_project_checks` runs fixed `cargo check --message-format=json --all-targets` commands for discovered Rust packages, then refreshes diagnostics; checks are not run during tool listing so MCP clients can start quickly. Detached Rust files use the existing `SourceReachability::Detached` metadata and should be treated as review signals, not automatic deletion advice.
+
 ## API
 
 - `GET /api/health`
