@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DiagnosticRecord, GraphEdge, GraphFilters, GraphLabelMode, GraphLayoutSettings, GraphMode, GraphNode, NodeType, ThemeMode } from '../types'
 import { inferNodeLanguage, languageColor, languageIcon } from '../api/language'
+import { visibleNodeIdsForDepth } from '../api/graphView'
 
 interface LiveCodeGraphProps {
   nodes: GraphNode[]
@@ -225,49 +226,6 @@ function graphSizeScale(nodeCount: number) {
   return Math.min(3.8, Math.max(1, Math.pow(Math.max(1, nodeCount) / 38, 0.38)))
 }
 
-function buildDegreeMap(nodes: GraphNode[], edges: GraphEdge[]) {
-  const degree = new Map(nodes.map(node => [node.id, 0]))
-  for (const edge of edges) {
-    if (degree.has(edge.source)) degree.set(edge.source, (degree.get(edge.source) ?? 0) + (edge.bundledCount ?? 1))
-    if (degree.has(edge.target)) degree.set(edge.target, (degree.get(edge.target) ?? 0) + (edge.bundledCount ?? 1))
-  }
-  return degree
-}
-
-function visibleNodeIdsFor(nodes: GraphNode[], edges: GraphEdge[], depth: GraphFilters['depth']) {
-  const visible = new Set<string>()
-  const pickDepthCenter = () => {
-    const nodeById = new Map(nodes.map(node => [node.id, node]))
-    const mainNode = nodes.find(node => node.type === 'Function' && node.label === 'main')
-    if (mainNode) return mainNode.id
-    const degree = buildDegreeMap(nodes, edges)
-    const semanticHub = [...degree.entries()]
-      .map(([id, count]) => ({ node: nodeById.get(id), count }))
-      .filter((entry): entry is { node: GraphNode; count: number } => !!entry.node && entry.node.type !== 'File' && entry.node.type !== 'Module')
-      .sort((a, b) => b.count - a.count)[0]
-    if (semanticHub) return semanticHub.node.id
-    return [...degree.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? nodes[0]?.id ?? null
-  }
-
-  const centerId = depth === 'full' ? null : pickDepthCenter()
-  if (!centerId) {
-    nodes.forEach(node => visible.add(node.id))
-    return visible
-  }
-
-  visible.add(centerId)
-  const maxDepth = typeof depth === 'number' ? depth : 99
-  const expand = (id: string, d: number) => {
-    if (d <= 0) return
-    for (const edge of edges) {
-      if (edge.source === id && !visible.has(edge.target)) { visible.add(edge.target); expand(edge.target, d - 1) }
-      if (edge.target === id && !visible.has(edge.source)) { visible.add(edge.source); expand(edge.source, d - 1) }
-    }
-  }
-  expand(centerId, maxDepth)
-  return visible
-}
-
 function nodeRadius(node: GraphNode) {
   return NODE_SIZES[node.type] ?? 14
 }
@@ -276,8 +234,8 @@ function clampForce(value: number, limit: number) {
   return Math.max(-limit, Math.min(limit, value))
 }
 
-function activeGraph(nodes: GraphNode[], edges: GraphEdge[], filters: GraphFilters) {
-  const visibleIds = visibleNodeIdsFor(nodes, edges, filters.depth)
+function activeGraph(nodes: GraphNode[], edges: GraphEdge[], filters: GraphFilters, graphMode: GraphMode, selectedNodeId: string | null) {
+  const visibleIds = visibleNodeIdsForDepth(nodes, edges, graphMode, filters.depth, selectedNodeId)
   const activeNodes = nodes.filter(node => visibleIds.has(node.id) && filters.nodeTypes.has(node.type))
   const activeIds = new Set(activeNodes.map(node => node.id))
   const activeEdges = edges.filter(edge => filters.edgeTypes.has(edge.type) && activeIds.has(edge.source) && activeIds.has(edge.target))
@@ -343,10 +301,27 @@ function addRepulsion(activeNodes: GraphNode[], forces: Map<string, { x: number;
   }
 }
 
-function runPhysicsTick(nodes: GraphNode[], edges: GraphEdge[], filters: GraphFilters, layoutSettings: GraphLayoutSettings, options: PhysicsOptions = {}) {
+function buildDegreeMap(nodes: GraphNode[], edges: GraphEdge[]) {
+  const degree = new Map(nodes.map(node => [node.id, 0]))
+  for (const edge of edges) {
+    if (degree.has(edge.source)) degree.set(edge.source, (degree.get(edge.source) ?? 0) + (edge.bundledCount ?? 1))
+    if (degree.has(edge.target)) degree.set(edge.target, (degree.get(edge.target) ?? 0) + (edge.bundledCount ?? 1))
+  }
+  return degree
+}
+
+function runPhysicsTick(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  filters: GraphFilters,
+  layoutSettings: GraphLayoutSettings,
+  graphMode: GraphMode,
+  selectedNodeId: string | null,
+  options: PhysicsOptions = {},
+) {
   const updated = nodes.map(node => ({ ...node }))
   const byId = new Map(updated.map(node => [node.id, node]))
-  const { activeNodes, activeEdges, activeIds } = activeGraph(updated, edges, filters)
+  const { activeNodes, activeEdges, activeIds } = activeGraph(updated, edges, filters, graphMode, selectedNodeId)
   const forces = new Map(activeNodes.map(node => [node.id, { x: 0, y: 0 }]))
   if (activeNodes.length === 0) return { nodes: updated, averageSpeed: 0 }
 
@@ -791,6 +766,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   const nodesRef = useRef<GraphNode[]>([])
   const edgesRef = useRef<GraphEdge[]>(edges)
   const filtersRef = useRef(filters)
+  const graphModeRef = useRef(graphMode)
   const layoutSettingsRef = useRef(layoutSettings)
   const diagnosticsByNodeRef = useRef(diagnosticsByNode)
   const highlightedTraceNodeIdsRef = useRef(highlightedTraceNodeIds)
@@ -816,6 +792,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
   edgesRef.current = edges
   filtersRef.current = filters
+  graphModeRef.current = graphMode
   layoutSettingsRef.current = layoutSettings
   diagnosticsByNodeRef.current = diagnosticsByNode
   highlightedTraceNodeIdsRef.current = highlightedTraceNodeIds
@@ -830,7 +807,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     if (!canvas || nodesRef.current.length === 0) return
     if (!force && userNavigatedRef.current) return
     const rect = canvas.getBoundingClientRect()
-    const { activeNodes } = activeGraph(nodesRef.current, edgesRef.current, filtersRef.current)
+    const { activeNodes } = activeGraph(nodesRef.current, edgesRef.current, filtersRef.current, graphModeRef.current, selectedNodeIdRef.current)
     fitGraphToView(activeNodes.length > 0 ? activeNodes : nodesRef.current, rect.width, rect.height, panRef.current, zoomRef)
   }, [])
 
@@ -850,7 +827,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     const colors = canvasTheme()
     const filtersNow = filtersRef.current
-    const { visibleIds, activeNodes, activeEdges } = activeGraph(nodesRef.current, edgesRef.current, filtersNow)
+    const { visibleIds, activeNodes, activeEdges } = activeGraph(nodesRef.current, edgesRef.current, filtersNow, graphModeRef.current, selectedNodeIdRef.current)
     const nodeMap = new Map(nodesRef.current.map(node => [node.id, node]))
     const degree = buildDegreeMap(activeNodes, activeEdges)
     const hovered = hoveredNodeRef.current
@@ -983,7 +960,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     const settings = layoutSettingsRef.current
 
     if (continuousSimulationRef.current) {
-      const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings)
+      const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings, graphModeRef.current, selectedNodeIdRef.current)
       nodesRef.current = result.averageSpeed < 0.08
         ? keepContinuousMotion(result.nodes, ts)
         : result.nodes
@@ -998,16 +975,24 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     const elapsed = ts - settleStartedAtRef.current
 
     if (elapsed <= VISIBLE_SETTLE_MS) {
-      const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings)
+      const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings, graphModeRef.current, selectedNodeIdRef.current)
       nodesRef.current = result.nodes
       if (!userNavigatedRef.current && elapsed < FIT_SETTLE_MS) fitCurrentGraph(false)
     } else if (!settledRef.current) {
       const fadeProgress = Math.min(1, (elapsed - VISIBLE_SETTLE_MS) / SETTLE_FADE_MS)
-      const result = runPhysicsTick(nodesRef.current, edgesRef.current, filtersNow, settings, {
-        dampingScale: 2.4 + fadeProgress * 4.6,
-        maxSpeedScale: 0.55,
-        maxForceScale: 0.45,
-      })
+      const result = runPhysicsTick(
+        nodesRef.current,
+        edgesRef.current,
+        filtersNow,
+        settings,
+        graphModeRef.current,
+        selectedNodeIdRef.current,
+        {
+          dampingScale: 2.4 + fadeProgress * 4.6,
+          maxSpeedScale: 0.55,
+          maxForceScale: 0.45,
+        },
+      )
       nodesRef.current = result.nodes.map(node => ({
         ...node,
         vx: node.vx * Math.max(0.68, 0.92 - fadeProgress * 0.18),
@@ -1052,12 +1037,12 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   }, [nodes, edges, fitCurrentGraph, restartSimulation, scheduleDraw])
 
   useEffect(() => {
-    const visibleSignature = `${filters.depth}::${[...filters.nodeTypes].sort().join('|')}::${[...filters.edgeTypes].sort().join('|')}::${filters.edgeVisibility}`
+    const visibleSignature = `${graphMode}::${selectedNodeId ?? ''}::${filters.depth}::${[...filters.nodeTypes].sort().join('|')}::${[...filters.edgeTypes].sort().join('|')}::${filters.edgeVisibility}`
     if (visibleSignature === visibleSignatureRef.current) return
     visibleSignatureRef.current = visibleSignature
     if (!userNavigatedRef.current) requestAnimationFrame(() => fitCurrentGraph(true))
     restartSimulation()
-  }, [filters, fitCurrentGraph, restartSimulation])
+  }, [filters, graphMode, selectedNodeId, fitCurrentGraph, restartSimulation])
 
   useEffect(() => {
     restartSimulation()
@@ -1131,7 +1116,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
   const hitTest = useCallback((clientX: number, clientY: number) => {
     const { x, y } = toWorld(clientX, clientY)
-    const { visibleIds, activeNodes } = activeGraph(nodesRef.current, edgesRef.current, filtersRef.current)
+    const { visibleIds, activeNodes } = activeGraph(nodesRef.current, edgesRef.current, filtersRef.current, graphModeRef.current, selectedNodeIdRef.current)
     for (let i = activeNodes.length - 1; i >= 0; i--) {
       const node = activeNodes[i]
       if (!visibleIds.has(node.id)) continue

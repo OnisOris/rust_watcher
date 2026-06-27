@@ -6,6 +6,9 @@ import {
   buildCollapsedGroupStats,
   buildRouteFlowGraph,
   bundleEdges,
+  depthControlKind,
+  depthOptionsForMode,
+  visibleNodeIdsForDepth,
 } from './graphView'
 import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphNode, LanguageFilter, NodeType } from '../types'
 
@@ -44,7 +47,125 @@ function edge(source: string, target: string): GraphEdge {
   return { id: `${source}->${target}`, source, target, type: 'Calls' }
 }
 
+function ids(ids: Set<string>) {
+  return [...ids].sort()
+}
+
 describe('graph view helpers', () => {
+  it('uses Scope labels and hierarchy tooltips for Architecture/Modules depth', () => {
+    expect(depthControlKind('Macro')).toBe('Scope')
+    expect(depthControlKind('Meso')).toBe('Scope')
+    expect(depthOptionsForMode('Macro').map(option => option.title)).toEqual([
+      'Top-level project scopes',
+      'Scopes and files/modules',
+      'Scopes, files and important symbols',
+      'Full current graph',
+    ])
+  })
+
+  it('uses Radius labels and neighborhood tooltips for local/call-flow depth', () => {
+    expect(depthControlKind('Micro')).toBe('Radius')
+    expect(depthControlKind('CallFlow')).toBe('Radius')
+    expect(depthOptionsForMode('CallFlow').map(option => option.title)).toEqual([
+      'One-hop neighborhood',
+      'Two-hop neighborhood',
+      'Three-hop neighborhood',
+      'Full current mode',
+    ])
+  })
+
+  it('Architecture depth 1 does not choose main as a center', () => {
+    const nodes = [
+      node('workspace', undefined, 'Module'),
+      node('rust', 'rust', 'Module'),
+      node('file', 'rust', 'File'),
+      { ...node('main', 'rust', 'Function'), label: 'main' },
+      node('endpoint', undefined, 'Endpoint'),
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'workspace-rust', source: 'workspace', target: 'rust', type: 'Contains' },
+      { id: 'rust-file', source: 'rust', target: 'file', type: 'Contains' },
+      { id: 'file-main', source: 'file', target: 'main', type: 'Contains' },
+      { id: 'file-endpoint', source: 'file', target: 'endpoint', type: 'Contains' },
+      { id: 'main-endpoint', source: 'main', target: 'endpoint', type: 'Calls' },
+    ]
+
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Macro', 1, null))).toEqual(['rust', 'workspace'])
+  })
+
+  it('Architecture depth expands by hierarchy levels', () => {
+    const publicSymbol = {
+      ...node('public-service', 'rust', 'Function'),
+      visibility: 'pub' as const,
+      signature: 'pub fn service()',
+    }
+    const nodes = [
+      node('workspace', undefined, 'Module'),
+      node('rust', 'rust', 'Module'),
+      node('file', 'rust', 'File'),
+      node('endpoint', undefined, 'Endpoint'),
+      publicSymbol,
+      { ...node('main', 'rust', 'Function'), label: 'main' },
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'workspace-rust', source: 'workspace', target: 'rust', type: 'Contains' },
+      { id: 'rust-file', source: 'rust', target: 'file', type: 'Contains' },
+      { id: 'file-endpoint', source: 'file', target: 'endpoint', type: 'Contains' },
+      { id: 'file-public', source: 'file', target: 'public-service', type: 'Contains' },
+      { id: 'file-main', source: 'file', target: 'main', type: 'Contains' },
+    ]
+
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Macro', 1, null))).toEqual(['rust', 'workspace'])
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Macro', 2, null))).toEqual(['file', 'rust', 'workspace'])
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Macro', 3, null))).toEqual(['endpoint', 'file', 'public-service', 'rust', 'workspace'])
+  })
+
+  it('Local Symbol depth expands around the selected node', () => {
+    const nodes = [
+      node('selected', 'typescript', 'Function'),
+      node('callee', 'typescript', 'Function'),
+      node('model', 'typescript', 'Interface'),
+      node('outside', 'typescript', 'Function'),
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'call', source: 'selected', target: 'callee', type: 'Calls' },
+      { id: 'type', source: 'callee', target: 'model', type: 'TypeReference' },
+      { id: 'outside', source: 'outside', target: 'model', type: 'Calls' },
+    ]
+
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Micro', 1, 'selected'))).toEqual(['callee', 'selected'])
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Micro', 2, 'selected'))).toEqual(['callee', 'model', 'selected'])
+  })
+
+  it('Call Flow depth with a selected node expands around that node', () => {
+    const nodes = [
+      node('caller', 'typescript', 'Component'),
+      node('handler', 'rust', 'Function'),
+      node('service', 'rust', 'Function'),
+      node('endpoint', undefined, 'Endpoint'),
+      node('outside', 'rust', 'Function'),
+    ]
+    const edges: GraphEdge[] = [
+      { id: 'api', source: 'caller', target: 'endpoint', type: 'ApiCall' },
+      { id: 'handler', source: 'endpoint', target: 'handler', type: 'EndpointHandler' },
+      { id: 'call', source: 'handler', target: 'service', type: 'Calls' },
+      { id: 'outside', source: 'outside', target: 'service', type: 'Calls' },
+    ]
+
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'CallFlow', 1, 'handler'))).toEqual(['endpoint', 'handler', 'service'])
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'CallFlow', 2, 'handler'))).toEqual(['caller', 'endpoint', 'handler', 'outside', 'service'])
+  })
+
+  it('Local Symbol without a selected node does not randomly center on main', () => {
+    const nodes = [
+      { ...node('main', 'rust', 'Function'), label: 'main' },
+      node('service', 'rust', 'Function'),
+    ]
+    const edges = [edge('main', 'service')]
+
+    expect(ids(visibleNodeIdsForDepth(nodes, edges, 'Micro', 1, null))).toEqual([])
+  })
+
   it('filters visible graph by language without deleting source graph data', () => {
     const nodes = [
       node('rust', 'rust'),

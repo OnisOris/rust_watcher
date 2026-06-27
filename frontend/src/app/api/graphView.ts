@@ -1,4 +1,4 @@
-import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphNode } from '../types'
+import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphMode, GraphNode, NodeType } from '../types'
 import { inferNodeLanguage, languageFilterKey } from './language'
 
 export interface CollapsedGroupStats {
@@ -10,6 +10,44 @@ export interface CollapsedGroupStats {
   language?: string
 }
 
+const STRUCTURAL_EDGE_TYPES = new Set<EdgeType>(['Contains', 'ModDeclaration', 'ExternalDependency'])
+const HIERARCHY_MODES = new Set<GraphMode>(['Macro', 'Meso'])
+const NEIGHBORHOOD_MODES = new Set<GraphMode>(['Micro', 'CallFlow', 'DataFlow'])
+
+export function depthControlKind(mode: GraphMode) {
+  return HIERARCHY_MODES.has(mode) ? 'Scope' : 'Radius'
+}
+
+export function depthOptionsForMode(mode: GraphMode): Array<{ value: GraphFilters['depth']; label: string; title: string }> {
+  if (HIERARCHY_MODES.has(mode)) {
+    return [
+      { value: 1, label: '1', title: 'Top-level project scopes' },
+      { value: 2, label: '2', title: 'Scopes and files/modules' },
+      { value: 3, label: '3', title: 'Scopes, files and important symbols' },
+      { value: 'full', label: 'Full', title: 'Full current graph' },
+    ]
+  }
+  return [
+    { value: 1, label: '1', title: 'One-hop neighborhood' },
+    { value: 2, label: '2', title: 'Two-hop neighborhood' },
+    { value: 3, label: '3', title: 'Three-hop neighborhood' },
+    { value: 'full', label: 'Full', title: 'Full current mode' },
+  ]
+}
+
+export function visibleNodeIdsForDepth(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  mode: GraphMode,
+  depth: GraphFilters['depth'],
+  selectedNodeId: string | null,
+) {
+  if (depth === 'full') return new Set(nodes.map(node => node.id))
+  if (HIERARCHY_MODES.has(mode)) return hierarchyVisibleNodeIds(nodes, edges, depth)
+  if (NEIGHBORHOOD_MODES.has(mode)) return neighborhoodVisibleNodeIds(nodes, edges, mode, depth, selectedNodeId)
+  return new Set(nodes.map(node => node.id))
+}
+
 export function applyGraphFilters(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, filters: GraphFilters) {
   const nodes = graph.nodes.filter(node => matchesLanguageFilter(node, filters) && matchesReachabilityFilter(node, filters))
   const nodeIds = new Set(nodes.map(node => node.id))
@@ -18,6 +56,112 @@ export function applyGraphFilters(graph: { nodes: GraphNode[]; edges: GraphEdge[
     filters,
   )
   return { nodes, edges }
+}
+
+function hierarchyVisibleNodeIds(nodes: GraphNode[], edges: GraphEdge[], depth: 1 | 2 | 3) {
+  const visible = new Set<string>()
+  const nodeIds = new Set(nodes.map(node => node.id))
+  const structuralEdges = edges.filter(edge =>
+    STRUCTURAL_EDGE_TYPES.has(edge.type)
+    && nodeIds.has(edge.source)
+    && nodeIds.has(edge.target)
+  )
+  const incomingStructural = new Set(structuralEdges.map(edge => edge.target))
+  const roots = nodes.filter(node => !incomingStructural.has(node.id))
+  const levelByNode = structuralLevels(roots.length ? roots : nodes.slice(0, 1), structuralEdges)
+
+  for (const node of nodes) {
+    const semanticDepth = hierarchyDepthForNode(node)
+    const structuralLevel = levelByNode.get(node.id)
+    if (semanticDepth <= depth && (structuralLevel === undefined || structuralLevel <= depth + 1)) {
+      visible.add(node.id)
+    }
+  }
+  return visible
+}
+
+function structuralLevels(roots: GraphNode[], edges: GraphEdge[]) {
+  const outgoing = new Map<string, string[]>()
+  for (const edge of edges) {
+    const list = outgoing.get(edge.source) ?? []
+    list.push(edge.target)
+    outgoing.set(edge.source, list)
+  }
+
+  const levelByNode = new Map<string, number>()
+  const queue = roots.map(node => ({ id: node.id, level: 0 }))
+  for (const root of roots) levelByNode.set(root.id, 0)
+  while (queue.length) {
+    const current = queue.shift()!
+    for (const target of outgoing.get(current.id) ?? []) {
+      const nextLevel = current.level + 1
+      const existing = levelByNode.get(target)
+      if (existing !== undefined && existing <= nextLevel) continue
+      levelByNode.set(target, nextLevel)
+      queue.push({ id: target, level: nextLevel })
+    }
+  }
+  return levelByNode
+}
+
+function hierarchyDepthForNode(node: GraphNode) {
+  if (node.type === 'ExternalCrate') return 1
+  if (node.type === 'Module' && !node.file) return 1
+  if (node.type === 'Module' || node.type === 'File') return 2
+  if (isImportantHierarchyNode(node)) return 3
+  return 4
+}
+
+function isImportantHierarchyNode(node: GraphNode) {
+  if (matchesNodeType(node.type, ['Endpoint', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Component', 'Hook', 'Interface', 'TypeAlias'])) {
+    return true
+  }
+  if (matchesNodeType(node.type, ['Function', 'Method', 'Handler'])) {
+    return node.visibility === 'pub'
+      || node.visibility === 'pub(crate)'
+      || !!node.signature
+      || (node.connections ?? 0) >= 2
+  }
+  return false
+}
+
+function neighborhoodVisibleNodeIds(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  mode: GraphMode,
+  depth: 1 | 2 | 3,
+  selectedNodeId: string | null,
+) {
+  const nodeIds = new Set(nodes.map(node => node.id))
+  if (selectedNodeId && nodeIds.has(selectedNodeId)) {
+    return expandNeighborhood(edges, selectedNodeId, depth, nodeIds)
+  }
+  if (mode === 'Micro') return new Set<string>()
+  return new Set(nodes.map(node => node.id))
+}
+
+function expandNeighborhood(edges: GraphEdge[], centerId: string, depth: number, nodeIds: Set<string>) {
+  const visible = new Set([centerId])
+  let frontier = new Set([centerId])
+  for (let hop = 0; hop < depth; hop += 1) {
+    const next = new Set<string>()
+    for (const edge of edges) {
+      if (frontier.has(edge.source) && nodeIds.has(edge.target) && !visible.has(edge.target)) {
+        next.add(edge.target)
+      }
+      if (frontier.has(edge.target) && nodeIds.has(edge.source) && !visible.has(edge.source)) {
+        next.add(edge.source)
+      }
+    }
+    if (!next.size) break
+    next.forEach(id => visible.add(id))
+    frontier = next
+  }
+  return visible
+}
+
+function matchesNodeType(type: NodeType, types: NodeType[]) {
+  return types.includes(type)
 }
 
 export function applyEdgeVisibilityLevel(edges: GraphEdge[], filters: Pick<GraphFilters, 'edgeTypes' | 'edgeVisibility'>) {

@@ -1,9 +1,11 @@
 import { useState, type ReactNode } from 'react'
 import { Filter, ChevronDown, Save, PinOff } from 'lucide-react'
-import type { EdgeVisibilityLevel, GraphFilters, NodeType, EdgeType, LanguageFilter, SavedView } from '../types'
+import type { EdgeVisibilityLevel, GraphFilters, GraphMode, NodeType, EdgeType, LanguageFilter, SavedView } from '../types'
+import { depthControlKind, depthOptionsForMode } from '../api/graphView'
 
 interface FilterBarProps {
   filters: GraphFilters
+  graphMode: GraphMode
   onFiltersChange: (f: GraphFilters) => void
   savedViews?: SavedView[]
   onApplyView?: (view: SavedView) => void
@@ -22,12 +24,6 @@ const NODE_COLORS: Record<NodeType, string> = {
   Endpoint: '#E11D48', Macro: '#EF4444', ExternalCrate: '#7D8795',
 }
 
-const DEPTH_OPTIONS: Array<{ value: 1 | 2 | 3 | 'full'; label: string; title: string }> = [
-  { value: 1, label: '1', title: 'Show one-hop neighborhood' },
-  { value: 2, label: '2', title: 'Show two-hop neighborhood' },
-  { value: 3, label: '3', title: 'Show three-hop neighborhood' },
-  { value: 'full', label: 'Full', title: 'Show the full current graph' },
-]
 const EDGE_VISIBILITY_OPTIONS: Array<{ value: EdgeVisibilityLevel; label: string; title: string }> = [
   { value: 'Essential', label: 'Ess', title: 'Essential containment and high-confidence edges only' },
   { value: 'Semantic', label: 'Sem', title: 'Semantic edges: calls, uses, route handlers and type references' },
@@ -42,8 +38,9 @@ const LANGUAGE_FILTERS: Array<{ id: LanguageFilter; label: string; color: string
   { id: 'external', label: 'External', color: '#7D8795' },
 ]
 
-export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyView, onSaveView, onUnpinAll }: FilterBarProps) {
+export function FilterBar({ filters, graphMode, onFiltersChange, savedViews = [], onApplyView, onSaveView, onUnpinAll }: FilterBarProps) {
   const [expanded, setExpanded] = useState(false)
+  const depthOptions = depthOptionsForMode(graphMode)
 
   const toggleNodeType = (t: NodeType) => {
     const next = new Set(filters.nodeTypes)
@@ -105,8 +102,8 @@ export function FilterBar({ filters, onFiltersChange, savedViews = [], onApplyVi
             onClick={e => e.stopPropagation()}
           >
             <SegmentGroup
-              label="Depth"
-              options={DEPTH_OPTIONS}
+              label={depthControlKind(graphMode)}
+              options={depthOptions}
               value={filters.depth}
               onChange={value => onFiltersChange({ ...filters, depth: value })}
             />

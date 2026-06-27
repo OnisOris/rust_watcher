@@ -127,10 +127,9 @@ export default function App() {
       const lensGraph = graphLens === 'route'
         ? buildRouteFlowGraph(modeGraph)
         : applyGraphLens(modeGraph.nodes, modeGraph.edges, graphLens)
-      const focusedGraph = applySelectedModeFocus(lensGraph.nodes, lensGraph.edges, mode, selectedNodeId)
-      const collapsedStats = buildCollapsedGroupStats(focusedGraph, collapsedGroups, diagnosticsByNode)
+      const collapsedStats = buildCollapsedGroupStats(lensGraph, collapsedGroups, diagnosticsByNode)
       const annotatedGraph = {
-        nodes: focusedGraph.nodes.map(node => {
+        nodes: lensGraph.nodes.map(node => {
           const stats = collapsedStats.get(node.id)
           if (!stats) return node
           const edgeTypes = [...new Set([...stats.incomingEdgeTypes, ...stats.outgoingEdgeTypes])].slice(0, 3).join(', ')
@@ -140,16 +139,18 @@ export default function App() {
             description: `Collapsed: ${stats.hiddenNodeCount} hidden · ${stats.hiddenDiagnosticCount} diagnostics${edgeTypes ? ` · ${edgeTypes}` : ''}`,
           }
         }),
-        edges: focusedGraph.edges,
+        edges: lensGraph.edges,
       }
       const filteredGraph = applyCollapsedGroups(applyGraphFilters(annotatedGraph, filters), collapsedGroups)
       return { nodes: filteredGraph.nodes, edges: bundleEdges(filteredGraph.edges) }
     },
-    [graphNodes, edges, mode, graphLens, selectedNodeId, filters, collapsedGroups, diagnosticsByNode],
+    [graphNodes, edges, graphLens, filters, collapsedGroups, diagnosticsByNode],
   )
-  const zeroEdgeHint = visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
+  const zeroEdgeHint = mode === 'Micro' && filters.depth !== 'full' && !selectedNodeId
     ? graphModeEmptyHint(mode)
-    : null
+    : visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
+      ? graphModeEmptyHint(mode)
+      : null
 
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -378,10 +379,11 @@ export default function App() {
           )}
 
           {/* floating filter bar */}
-          <FilterBar
-            filters={filters}
-            onFiltersChange={setFilters}
-            savedViews={[...DEFAULT_VIEWS, ...userSavedViews]}
+            <FilterBar
+              filters={filters}
+              graphMode={mode}
+              onFiltersChange={setFilters}
+              savedViews={[...DEFAULT_VIEWS, ...userSavedViews]}
             onApplyView={applySavedView}
             onSaveView={saveCurrentView}
             onUnpinAll={unpinAll}
@@ -500,6 +502,8 @@ function graphModeEmptyHint(mode: GraphMode) {
       return { title: 'No API/data flow detected', body: 'This mode shows API requests, responses, hook results, state updates and model usage. Try Semantic edges or inspect handler signatures.' }
     case 'Traits':
       return { title: 'No type or implementation relations found', body: 'This mode shows traits, impls, interfaces, DTOs, models and type references. Try enabling external dependencies and semantic edges.' }
+    case 'Micro':
+      return { title: 'Select a symbol to use radius', body: 'Local Symbol radius expands around selected code. Select a node, or switch Scope/Radius to Full for the full local symbol graph.' }
     default:
       return { title: 'No edges in this view', body: 'The current filters hide all relationships. Try Full depth, Semantic edges, or enable detached and external sources.' }
   }
@@ -519,30 +523,6 @@ function graphModeLabel(mode: GraphMode) {
       return 'API/Data Flow'
     case 'Traits':
       return 'Types & Impl'
-  }
-}
-
-function applySelectedModeFocus(nodes: GraphNode[], edges: GraphEdge[], mode: GraphMode, selectedNodeId: string | null) {
-  if (!selectedNodeId || (mode !== 'CallFlow' && mode !== 'Micro')) return { nodes, edges }
-  if (!nodes.some(node => node.id === selectedNodeId)) return { nodes, edges }
-
-  const maxDepth = mode === 'CallFlow' ? 2 : 1
-  const keep = new Set([selectedNodeId])
-  let frontier = new Set([selectedNodeId])
-  for (let depth = 0; depth < maxDepth; depth += 1) {
-    const next = new Set<string>()
-    for (const edge of edges) {
-      if (frontier.has(edge.source) && !keep.has(edge.target)) next.add(edge.target)
-      if (frontier.has(edge.target) && !keep.has(edge.source)) next.add(edge.source)
-    }
-    if (!next.size) break
-    next.forEach(id => keep.add(id))
-    frontier = next
-  }
-
-  return {
-    nodes: nodes.filter(node => keep.has(node.id)),
-    edges: edges.filter(edge => keep.has(edge.source) && keep.has(edge.target)),
   }
 }
 
