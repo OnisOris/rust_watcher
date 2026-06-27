@@ -30,6 +30,52 @@ pub struct IndexedFile {
     pub module_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectLanguageManifest {
+    pub root: PathBuf,
+    pub has_cargo: bool,
+    pub has_package_json: bool,
+    pub has_pyproject: bool,
+    pub has_qml: bool,
+    pub rust_files: usize,
+    pub python_files: usize,
+    pub typescript_files: usize,
+    pub javascript_files: usize,
+    pub qml_files: usize,
+    pub total_supported_files: usize,
+}
+
+pub fn scan_project_languages(root: impl AsRef<Path>) -> Result<ProjectLanguageManifest> {
+    let root = root.as_ref().canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize project root {}",
+            root.as_ref().display()
+        )
+    })?;
+    let mut manifest = ProjectLanguageManifest {
+        has_cargo: root.join("Cargo.toml").is_file(),
+        has_package_json: root.join("package.json").is_file(),
+        has_pyproject: root.join("pyproject.toml").is_file(),
+        root: root.clone(),
+        has_qml: false,
+        rust_files: 0,
+        python_files: 0,
+        typescript_files: 0,
+        javascript_files: 0,
+        qml_files: 0,
+        total_supported_files: 0,
+    };
+
+    scan_supported_files(&root, &mut manifest)?;
+    manifest.has_qml = manifest.qml_files > 0;
+    manifest.total_supported_files = manifest.rust_files
+        + manifest.python_files
+        + manifest.typescript_files
+        + manifest.javascript_files
+        + manifest.qml_files;
+    Ok(manifest)
+}
+
 pub fn index_project(root: impl AsRef<Path>) -> Result<ProjectIndex> {
     let root = root.as_ref().canonicalize().with_context(|| {
         format!(
@@ -185,6 +231,35 @@ fn collect_rs_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn scan_supported_files(root: &Path, manifest: &mut ProjectLanguageManifest) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if path.is_dir() {
+            if !is_ignored_dir_name(file_name) {
+                scan_supported_files(&path, manifest)?;
+            }
+            continue;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("rs") => manifest.rust_files += 1,
+            Some("py") => manifest.python_files += 1,
+            Some("ts" | "tsx") => manifest.typescript_files += 1,
+            Some("js" | "jsx") => manifest.javascript_files += 1,
+            Some("qml") => manifest.qml_files += 1,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn is_ignored_path(path: &Path) -> bool {
     path.components().any(|component| {
         component
@@ -257,6 +332,28 @@ pub fn files_by_package(files: &[IndexedFile]) -> HashMap<String, Vec<IndexedFil
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_root(name: &str) -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "rust-watcher-project-indexer-{name}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_file(root: &Path, relative_path: &str) {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, "").unwrap();
+    }
 
     #[test]
     fn generated_and_cache_paths_are_ignored() {
@@ -266,5 +363,113 @@ mod tests {
         assert!(is_ignored_path(Path::new("node_modules/pkg/index.ts")));
         assert!(is_ignored_path(Path::new(".venv/lib/site.py")));
         assert!(!is_ignored_path(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn scan_project_languages_empty_project() {
+        let root = test_root("empty");
+
+        let manifest = scan_project_languages(&root).unwrap();
+
+        assert_eq!(manifest.root, root.canonicalize().unwrap());
+        assert!(!manifest.has_cargo);
+        assert!(!manifest.has_package_json);
+        assert!(!manifest.has_pyproject);
+        assert!(!manifest.has_qml);
+        assert_eq!(manifest.total_supported_files, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_project_languages_rust_project() {
+        let root = test_root("rust");
+        write_file(&root, "Cargo.toml");
+        write_file(&root, "src/main.rs");
+        write_file(&root, "src/lib.rs");
+
+        let manifest = scan_project_languages(&root).unwrap();
+
+        assert!(manifest.has_cargo);
+        assert_eq!(manifest.rust_files, 2);
+        assert_eq!(manifest.total_supported_files, 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_project_languages_mixed_project() {
+        let root = test_root("mixed");
+        for file in [
+            "Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+            "src/main.rs",
+            "scripts/tool.py",
+            "frontend/App.tsx",
+            "frontend/api.ts",
+            "frontend/index.jsx",
+            "frontend/utils.js",
+            "qml/Main.qml",
+        ] {
+            write_file(&root, file);
+        }
+
+        let manifest = scan_project_languages(&root).unwrap();
+
+        assert!(manifest.has_cargo);
+        assert!(manifest.has_package_json);
+        assert!(manifest.has_pyproject);
+        assert!(manifest.has_qml);
+        assert_eq!(manifest.rust_files, 1);
+        assert_eq!(manifest.python_files, 1);
+        assert_eq!(manifest.typescript_files, 2);
+        assert_eq!(manifest.javascript_files, 2);
+        assert_eq!(manifest.qml_files, 1);
+        assert_eq!(manifest.total_supported_files, 7);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_project_languages_skips_ignored_directories() {
+        let root = test_root("ignored");
+        for file in [
+            "target/generated.rs",
+            "node_modules/pkg/index.ts",
+            ".git/hooks/test.py",
+            ".venv/lib/test.py",
+            "dist/bundle.js",
+            "build/generated.qml",
+            ".next/page.tsx",
+            ".cache/file.rs",
+            "__pycache__/cached.py",
+            "coverage/report.js",
+            ".vite/temp.ts",
+        ] {
+            write_file(&root, file);
+        }
+
+        let manifest = scan_project_languages(&root).unwrap();
+
+        assert_eq!(manifest.total_supported_files, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_project_languages_detects_root_manifests_only() {
+        let root = test_root("root-manifests");
+        write_file(&root, "nested/Cargo.toml");
+        write_file(&root, "nested/package.json");
+        write_file(&root, "nested/pyproject.toml");
+
+        let manifest = scan_project_languages(&root).unwrap();
+
+        assert!(!manifest.has_cargo);
+        assert!(!manifest.has_package_json);
+        assert!(!manifest.has_pyproject);
+
+        let _ = fs::remove_dir_all(root);
     }
 }
