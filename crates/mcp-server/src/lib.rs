@@ -1230,7 +1230,7 @@ fn normalize_cargo_file(project_root: &Path, manifest_dir: &Path, file_name: &st
     };
     absolute
         .strip_prefix(project_root)
-        .map(|path| normalize_path(path))
+        .map(normalize_path)
         .unwrap_or_else(|_| normalize_path(raw))
 }
 
