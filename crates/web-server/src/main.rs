@@ -20,7 +20,9 @@ use graph_core::{
     ServerMessage, SourceLocation, SymbolIndex, SymbolKindName,
 };
 use parking_lot::RwLock;
-use project_indexer::{index_project, start_watcher};
+use project_indexer::{
+    index_project, scan_project_languages, start_watcher, ProjectLanguageManifest,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -67,6 +69,31 @@ use typescript_lsp::{
 };
 
 type NodeLayoutState = (f64, f64, f64, f64, Option<bool>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetectedAnalyzers {
+    python: bool,
+    typescript: bool,
+    qml: bool,
+}
+
+impl DetectedAnalyzers {
+    fn all_enabled() -> Self {
+        Self {
+            python: true,
+            typescript: true,
+            qml: true,
+        }
+    }
+
+    fn from_manifest(manifest: &ProjectLanguageManifest) -> Self {
+        Self {
+            python: manifest.python_files > 0,
+            typescript: manifest.typescript_files > 0 || manifest.javascript_files > 0,
+            qml: manifest.qml_files > 0,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "rust-code-command-center")]
@@ -1454,6 +1481,38 @@ async fn websocket(socket: WebSocket, state: AppStateHandle) {
     info!("websocket disconnected");
 }
 
+fn detect_project_analyzers(project_root: &Path) -> DetectedAnalyzers {
+    match scan_project_languages(project_root) {
+        Ok(manifest) => DetectedAnalyzers::from_manifest(&manifest),
+        Err(error) => {
+            warn!(
+                ?error,
+                project_root = %project_root.display(),
+                "failed to scan project languages; optional analyzers remain enabled"
+            );
+            DetectedAnalyzers::all_enabled()
+        }
+    }
+}
+
+async fn enrich_optional_analyzers(
+    state: &AppStateHandle,
+    snapshot: &mut GraphSnapshot,
+    project_root: &Path,
+    detected: DetectedAnalyzers,
+) {
+    if detected.python {
+        start_python_ty_if_available(state).await;
+        let _ = enrich_python_with_ty(snapshot, project_root, &state.python_ty).await;
+    }
+    if detected.qml {
+        sync_qml_lsp_snapshot(state, snapshot, project_root).await;
+    }
+    if detected.typescript {
+        enrich_typescript_lsp_snapshot(state, snapshot, project_root).await;
+    }
+}
+
 async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
     if state.is_indexing.swap(true, Ordering::SeqCst) {
         info!(project_root = %project_root.display(), "indexing already in progress, skipping");
@@ -1472,6 +1531,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
         status.progress = Some(5);
     });
 
+    let detected = detect_project_analyzers(&project_root);
     let index = match index_project(&project_root) {
         Ok(index) => index,
         Err(error) => {
@@ -1489,10 +1549,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
                 status.progress = Some(80);
             });
             let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
-            start_python_ty_if_available(&state).await;
-            let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
-            sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
-            enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
+            enrich_optional_analyzers(&state, &mut snapshot, &project_root, detected).await;
             snapshot.status = fallback_status(
                 &state,
                 "No Cargo.toml found; rust-analyzer disabled; Rust syntax fallback active",
@@ -1564,10 +1621,7 @@ async fn index_and_publish(state: AppStateHandle, project_root: PathBuf) {
             status.progress = Some(92);
         });
         enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
-        start_python_ty_if_available(&state).await;
-        let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
-        sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
-        enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
+        enrich_optional_analyzers(&state, &mut snapshot, &project_root, detected).await;
         snapshot.status = ready_status(&state, "Ready");
         publish_snapshot(&state, snapshot);
     }
@@ -1707,10 +1761,11 @@ async fn index_and_patch(state: AppStateHandle, project_root: PathBuf, changed_f
         }
     }
 
+    let detected = detect_project_analyzers(&project_root);
     if let Some(index) = index {
-        rebuild_patch_snapshot(state, project_root, index, changed_files).await;
+        rebuild_patch_snapshot(state, project_root, index, changed_files, detected).await;
     } else {
-        rebuild_language_patch_snapshot(state, project_root, changed_files).await;
+        rebuild_language_patch_snapshot(state, project_root, changed_files, detected).await;
     }
 }
 
@@ -1719,6 +1774,7 @@ async fn rebuild_patch_snapshot(
     project_root: PathBuf,
     index: project_indexer::ProjectIndex,
     changed_files: Vec<String>,
+    detected: DetectedAnalyzers,
 ) {
     let old_snapshot = state.graph.read().clone();
 
@@ -1742,10 +1798,7 @@ async fn rebuild_patch_snapshot(
         }
         enrich_semantic_call_edges(&mut snapshot, &project_root, &state.analyzer).await;
     }
-    start_python_ty_if_available(&state).await;
-    let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
-    sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
-    enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
+    enrich_optional_analyzers(&state, &mut snapshot, &project_root, detected).await;
     snapshot.status = ready_status(&state, "Ready");
     let diagnostics = state
         .diagnostics_by_file
@@ -1765,13 +1818,11 @@ async fn rebuild_language_patch_snapshot(
     state: AppStateHandle,
     project_root: PathBuf,
     changed_files: Vec<String>,
+    detected: DetectedAnalyzers,
 ) {
     let old_snapshot = state.graph.read().clone();
     let mut snapshot = build_language_graph(&project_root, state.status.read().clone());
-    start_python_ty_if_available(&state).await;
-    let _ = enrich_python_with_ty(&mut snapshot, &project_root, &state.python_ty).await;
-    sync_qml_lsp_snapshot(&state, &snapshot, &project_root).await;
-    enrich_typescript_lsp_snapshot(&state, &mut snapshot, &project_root).await;
+    enrich_optional_analyzers(&state, &mut snapshot, &project_root, detected).await;
     snapshot.status = fallback_status(
         &state,
         "No Cargo.toml found; rust-analyzer disabled; Rust syntax fallback active",
@@ -3118,169 +3169,179 @@ fn analyzer_services_from_counts(
         last_updated: last_updated.clone(),
     }];
 
-    if let Some(python) = python {
-        let ty_status = analyzer_status_from_python_status(&python.status);
-        let ty_ready = ty_status == AnalyzerStatus::Ready;
-        let ty_unavailable_auto = python.mode == "auto"
-            && matches!(ty_status, AnalyzerStatus::Fallback | AnalyzerStatus::Error);
-        if python.mode == "ty" || ty_ready || ty_unavailable_auto {
+    if counts.python > 0 {
+        if let Some(python) = python {
+            let ty_status = analyzer_status_from_python_status(&python.status);
+            let ty_ready = ty_status == AnalyzerStatus::Ready;
+            let ty_unavailable_auto = python.mode == "auto"
+                && matches!(ty_status, AnalyzerStatus::Fallback | AnalyzerStatus::Error);
+            if python.mode == "ty" || ty_ready || ty_unavailable_auto {
+                services.push(AnalyzerServiceStatus {
+                    id: "python-ty".into(),
+                    kind: AnalyzerKind::Python,
+                    engine: AnalyzerEngine::Ty,
+                    label: "ty".into(),
+                    status: ty_status,
+                    mode: Some(python.mode.clone()),
+                    message: python.message.clone(),
+                    capabilities: if ty_ready {
+                        vec![
+                            AnalyzerCapability::Symbols,
+                            AnalyzerCapability::Diagnostics,
+                            AnalyzerCapability::References,
+                            AnalyzerCapability::Definitions,
+                            AnalyzerCapability::TypeDefinitions,
+                            AnalyzerCapability::CallHierarchy,
+                            AnalyzerCapability::SemanticCalls,
+                        ]
+                    } else {
+                        Vec::new()
+                    },
+                    files_indexed: counts.python,
+                    last_updated: last_updated.clone(),
+                });
+            }
+            if python.mode == "parser" || ty_unavailable_auto || python.status == "parser only" {
+                services.push(AnalyzerServiceStatus {
+                    id: "python-parser".into(),
+                    kind: AnalyzerKind::Python,
+                    engine: AnalyzerEngine::Parser,
+                    label: "Python parser".into(),
+                    status: AnalyzerStatus::Ready,
+                    mode: Some("parser".into()),
+                    message: if ty_unavailable_auto {
+                        Some(
+                            "ty not found, parser fallback active. Install with: uv tool install ty"
+                                .into(),
+                        )
+                    } else {
+                        None
+                    },
+                    capabilities: vec![AnalyzerCapability::Symbols],
+                    files_indexed: counts.python,
+                    last_updated: last_updated.clone(),
+                });
+            }
+        }
+    }
+
+    if counts.typescript > 0 {
+        let typescript = typescript.unwrap_or(TypeScriptAnalyzerStatus {
+            mode: "parser".into(),
+            status: "parser only".into(),
+            message: None,
+        });
+        let ts_status = status_to_analyzer_status(&typescript.status);
+        let ts_ready = ts_status == AnalyzerStatus::Ready;
+        let ts_unavailable_auto = typescript.mode == "auto"
+            && matches!(ts_status, AnalyzerStatus::Fallback | AnalyzerStatus::Error);
+        if typescript.mode == "typescript-language-server" || ts_ready || ts_unavailable_auto {
             services.push(AnalyzerServiceStatus {
-                id: "python-ty".into(),
-                kind: AnalyzerKind::Python,
-                engine: AnalyzerEngine::Ty,
-                label: "ty".into(),
-                status: ty_status,
-                mode: Some(python.mode.clone()),
-                message: python.message.clone(),
-                capabilities: if ty_ready {
+                id: "typescript-language-server".into(),
+                kind: AnalyzerKind::TypeScript,
+                engine: AnalyzerEngine::TypeScriptLanguageServer,
+                label: "TypeScript language server".into(),
+                status: ts_status,
+                mode: Some(typescript.mode.clone()),
+                message: typescript.message.clone(),
+                capabilities: if ts_ready {
                     vec![
                         AnalyzerCapability::Symbols,
                         AnalyzerCapability::Diagnostics,
                         AnalyzerCapability::References,
                         AnalyzerCapability::Definitions,
                         AnalyzerCapability::TypeDefinitions,
-                        AnalyzerCapability::CallHierarchy,
-                        AnalyzerCapability::SemanticCalls,
                     ]
                 } else {
                     Vec::new()
                 },
-                files_indexed: counts.python,
+                files_indexed: counts.typescript,
                 last_updated: last_updated.clone(),
             });
         }
-        if python.mode == "parser" || ty_unavailable_auto || python.status == "parser only" {
+        if typescript.mode == "parser" || ts_unavailable_auto || typescript.status == "parser only"
+        {
             services.push(AnalyzerServiceStatus {
-                id: "python-parser".into(),
-                kind: AnalyzerKind::Python,
-                engine: AnalyzerEngine::Parser,
-                label: "Python parser".into(),
+                id: "typescript-parser".into(),
+                kind: AnalyzerKind::TypeScript,
+                engine: AnalyzerEngine::TypeScriptParser,
+                label: "TypeScript parser".into(),
                 status: AnalyzerStatus::Ready,
                 mode: Some("parser".into()),
-                message: if ty_unavailable_auto {
-                    Some(
-                        "ty not found, parser fallback active. Install with: uv tool install ty"
-                            .into(),
-                    )
-                } else {
-                    None
-                },
-                capabilities: vec![AnalyzerCapability::Symbols],
-                files_indexed: counts.python,
-                last_updated: last_updated.clone(),
-            });
-        }
-    }
-
-    let typescript = typescript.unwrap_or(TypeScriptAnalyzerStatus {
-        mode: "parser".into(),
-        status: "parser only".into(),
-        message: None,
-    });
-    let ts_status = status_to_analyzer_status(&typescript.status);
-    let ts_ready = ts_status == AnalyzerStatus::Ready;
-    let ts_unavailable_auto = typescript.mode == "auto"
-        && matches!(ts_status, AnalyzerStatus::Fallback | AnalyzerStatus::Error);
-    if typescript.mode == "typescript-language-server" || ts_ready || ts_unavailable_auto {
-        services.push(AnalyzerServiceStatus {
-            id: "typescript-language-server".into(),
-            kind: AnalyzerKind::TypeScript,
-            engine: AnalyzerEngine::TypeScriptLanguageServer,
-            label: "TypeScript language server".into(),
-            status: ts_status,
-            mode: Some(typescript.mode.clone()),
-            message: typescript.message.clone(),
-            capabilities: if ts_ready {
-                vec![
-                    AnalyzerCapability::Symbols,
-                    AnalyzerCapability::Diagnostics,
-                    AnalyzerCapability::References,
-                    AnalyzerCapability::Definitions,
-                    AnalyzerCapability::TypeDefinitions,
-                ]
-            } else {
-                Vec::new()
-            },
-            files_indexed: counts.typescript,
-            last_updated: last_updated.clone(),
-        });
-    }
-    if typescript.mode == "parser" || ts_unavailable_auto || typescript.status == "parser only" {
-        services.push(AnalyzerServiceStatus {
-            id: "typescript-parser".into(),
-            kind: AnalyzerKind::TypeScript,
-            engine: AnalyzerEngine::TypeScriptParser,
-            label: "TypeScript parser".into(),
-            status: AnalyzerStatus::Ready,
-            mode: Some("parser".into()),
                 message: if ts_unavailable_auto {
                     Some(
                         "Not installed, parser fallback active. Install with: cd frontend && pnpm add -D typescript typescript-language-server".into(),
                     )
                 } else {
                     None
-            },
-            capabilities: vec![AnalyzerCapability::Symbols],
-            files_indexed: counts.typescript,
-            last_updated: last_updated.clone(),
-        });
+                },
+                capabilities: vec![AnalyzerCapability::Symbols],
+                files_indexed: counts.typescript,
+                last_updated: last_updated.clone(),
+            });
+        }
     }
-    let qml_status = qml_status.unwrap_or(QmlAnalyzerStatus {
-        mode: "parser".into(),
-        status: "parser only".into(),
-        message: None,
-    });
-    let qmlls_status = qml_status_to_analyzer_status(&qml_status.status);
-    let qmlls_ready = qmlls_status == AnalyzerStatus::Ready;
-    let qmlls_unavailable_auto = qml_status.mode == "auto"
-        && matches!(
-            qmlls_status,
-            AnalyzerStatus::Fallback | AnalyzerStatus::Error
-        );
-    if qml_status.mode == "qmlls" || qmlls_ready || qmlls_unavailable_auto {
-        services.push(AnalyzerServiceStatus {
-            id: "qmlls".into(),
-            kind: AnalyzerKind::Qml,
-            engine: AnalyzerEngine::QmlLanguageServer,
-            label: "qmlls".into(),
-            status: qmlls_status,
-            mode: Some(qml_status.mode.clone()),
-            message: qml_status.message.clone(),
-            capabilities: if qmlls_ready {
-                vec![
-                    AnalyzerCapability::Symbols,
-                    AnalyzerCapability::Diagnostics,
-                    AnalyzerCapability::References,
-                    AnalyzerCapability::Definitions,
-                ]
-            } else {
-                Vec::new()
-            },
-            files_indexed: counts.qml,
-            last_updated: last_updated.clone(),
+    if counts.qml > 0 {
+        let qml_status = qml_status.unwrap_or(QmlAnalyzerStatus {
+            mode: "parser".into(),
+            status: "parser only".into(),
+            message: None,
         });
-    }
-    if qml_status.mode == "parser" || qmlls_unavailable_auto || qml_status.status == "parser only" {
-        services.push(AnalyzerServiceStatus {
-            id: "qml-parser".into(),
-            kind: AnalyzerKind::Qml,
-            engine: AnalyzerEngine::QmlParser,
-            label: "QML parser".into(),
-            status: if qmlls_unavailable_auto {
-                AnalyzerStatus::Fallback
-            } else {
-                AnalyzerStatus::Ready
-            },
-            mode: Some("parser".into()),
-            message: if qmlls_unavailable_auto {
-                Some("qmlls not found, parser fallback active. Install Qt/qmlls or pass --qmlls-path.".into())
-            } else {
-                None
-            },
-            capabilities: vec![AnalyzerCapability::Symbols],
-            files_indexed: counts.qml,
-            last_updated,
-        });
+        let qmlls_status = qml_status_to_analyzer_status(&qml_status.status);
+        let qmlls_ready = qmlls_status == AnalyzerStatus::Ready;
+        let qmlls_unavailable_auto = qml_status.mode == "auto"
+            && matches!(
+                qmlls_status,
+                AnalyzerStatus::Fallback | AnalyzerStatus::Error
+            );
+        if qml_status.mode == "qmlls" || qmlls_ready || qmlls_unavailable_auto {
+            services.push(AnalyzerServiceStatus {
+                id: "qmlls".into(),
+                kind: AnalyzerKind::Qml,
+                engine: AnalyzerEngine::QmlLanguageServer,
+                label: "qmlls".into(),
+                status: qmlls_status,
+                mode: Some(qml_status.mode.clone()),
+                message: qml_status.message.clone(),
+                capabilities: if qmlls_ready {
+                    vec![
+                        AnalyzerCapability::Symbols,
+                        AnalyzerCapability::Diagnostics,
+                        AnalyzerCapability::References,
+                        AnalyzerCapability::Definitions,
+                    ]
+                } else {
+                    Vec::new()
+                },
+                files_indexed: counts.qml,
+                last_updated: last_updated.clone(),
+            });
+        }
+        if qml_status.mode == "parser"
+            || qmlls_unavailable_auto
+            || qml_status.status == "parser only"
+        {
+            services.push(AnalyzerServiceStatus {
+                id: "qml-parser".into(),
+                kind: AnalyzerKind::Qml,
+                engine: AnalyzerEngine::QmlParser,
+                label: "QML parser".into(),
+                status: if qmlls_unavailable_auto {
+                    AnalyzerStatus::Fallback
+                } else {
+                    AnalyzerStatus::Ready
+                },
+                mode: Some("parser".into()),
+                message: if qmlls_unavailable_auto {
+                    Some("qmlls not found, parser fallback active. Install Qt/qmlls or pass --qmlls-path.".into())
+                } else {
+                    None
+                },
+                capabilities: vec![AnalyzerCapability::Symbols],
+                files_indexed: counts.qml,
+                last_updated,
+            });
+        }
     }
     services
 }
@@ -3589,6 +3650,120 @@ mod tests {
             data_flow_kind: None,
             evidence: None,
         }
+    }
+
+    fn language_manifest(
+        python_files: usize,
+        typescript_files: usize,
+        javascript_files: usize,
+        qml_files: usize,
+    ) -> ProjectLanguageManifest {
+        let total_supported_files = python_files + typescript_files + javascript_files + qml_files;
+        ProjectLanguageManifest {
+            root: PathBuf::from("/tmp/project"),
+            has_cargo: false,
+            has_package_json: false,
+            has_pyproject: false,
+            has_qml: qml_files > 0,
+            rust_files: 0,
+            python_files,
+            typescript_files,
+            javascript_files,
+            qml_files,
+            total_supported_files,
+        }
+    }
+
+    #[test]
+    fn detected_analyzers_disable_optional_languages_when_absent() {
+        let detected = DetectedAnalyzers::from_manifest(&language_manifest(0, 0, 0, 0));
+
+        assert_eq!(
+            detected,
+            DetectedAnalyzers {
+                python: false,
+                typescript: false,
+                qml: false,
+            }
+        );
+    }
+
+    #[test]
+    fn detected_analyzers_enable_python_when_python_files_exist() {
+        let detected = DetectedAnalyzers::from_manifest(&language_manifest(2, 0, 0, 0));
+
+        assert_eq!(
+            detected,
+            DetectedAnalyzers {
+                python: true,
+                typescript: false,
+                qml: false,
+            }
+        );
+    }
+
+    #[test]
+    fn detected_analyzers_enable_typescript_for_typescript_or_javascript_files() {
+        let typescript_detected = DetectedAnalyzers::from_manifest(&language_manifest(0, 1, 0, 0));
+        let javascript_detected = DetectedAnalyzers::from_manifest(&language_manifest(0, 0, 1, 0));
+
+        assert!(typescript_detected.typescript);
+        assert!(javascript_detected.typescript);
+        assert!(!typescript_detected.python);
+        assert!(!javascript_detected.qml);
+    }
+
+    #[test]
+    fn detected_analyzers_enable_qml_when_qml_files_exist() {
+        let detected = DetectedAnalyzers::from_manifest(&language_manifest(0, 0, 0, 3));
+
+        assert_eq!(
+            detected,
+            DetectedAnalyzers {
+                python: false,
+                typescript: false,
+                qml: true,
+            }
+        );
+    }
+
+    #[test]
+    fn analyzer_services_omit_optional_languages_without_files() {
+        let services = analyzer_services_from_counts(
+            AnalyzerStatus::Ready,
+            Some("Ready".into()),
+            Some(PythonAnalyzerStatus {
+                mode: "auto".into(),
+                status: "ty unavailable".into(),
+                message: Some("missing ty".into()),
+            }),
+            Some(TypeScriptAnalyzerStatus {
+                mode: "auto".into(),
+                status: "language server unavailable".into(),
+                message: Some("missing typescript-language-server".into()),
+            }),
+            Some(QmlAnalyzerStatus {
+                mode: "auto".into(),
+                status: "qmlls unavailable".into(),
+                message: Some("missing qmlls".into()),
+            }),
+            AnalyzerFileCounts {
+                rust: 1,
+                ..AnalyzerFileCounts::default()
+            },
+            None,
+        );
+
+        assert!(services.iter().any(|service| service.id == "rust-analyzer"));
+        assert!(!services
+            .iter()
+            .any(|service| service.kind == AnalyzerKind::Python));
+        assert!(!services
+            .iter()
+            .any(|service| service.kind == AnalyzerKind::TypeScript));
+        assert!(!services
+            .iter()
+            .any(|service| service.kind == AnalyzerKind::Qml));
     }
 
     #[test]
