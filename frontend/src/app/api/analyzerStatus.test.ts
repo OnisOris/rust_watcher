@@ -14,6 +14,8 @@ function analyzer(partial: Partial<AnalyzerServiceStatus> & Pick<AnalyzerService
     message: null,
     capabilities: ['Symbols'],
     filesIndexed: 1,
+    provider: 'local',
+    billable: false,
     ...partial,
   }
 }

@@ -42,6 +42,8 @@ const MOCK_STATUS: AppStatus = {
       capabilities: ['Symbols', 'Diagnostics', 'References', 'CallHierarchy', 'SemanticCalls'],
       filesIndexed: 247,
       lastUpdated: null,
+      provider: 'local',
+      billable: false,
     },
   ],
   pythonAnalyzer: { mode: 'parser', status: 'parser only' },

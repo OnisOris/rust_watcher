@@ -69,6 +69,7 @@ export type GraphLabelMode = 'auto' | 'key' | 'all'
 export type EdgeVisibilityLevel = 'Essential' | 'Semantic' | 'All'
 export type AppState = 'empty' | 'indexing' | 'normal' | 'error'
 export type AnalyzerStatus = 'Starting' | 'Indexing' | 'Ready' | 'Fallback' | 'Stale' | 'Error'
+export type AnalyzerProvider = 'local' | 'cloud' | 'disabled'
 export type AnalyzerKind = 'Rust' | 'TypeScript' | 'Python' | 'Qml' | 'Other'
 export type AnalyzerEngine =
   | 'RustAnalyzer'
@@ -209,6 +210,9 @@ export interface AnalyzerServiceStatus {
   capabilities: AnalyzerCapability[]
   filesIndexed: number
   lastUpdated?: string | null
+  provider: AnalyzerProvider
+  billable: boolean
+  creditsUsed?: number
 }
 
 export interface GraphSnapshot {

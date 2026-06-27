@@ -14,7 +14,7 @@ use graph_builder::{
 };
 use graph_core::{
     AnalysisEvent, AnalysisEventType, AnalyzerCapability, AnalyzerEngine, AnalyzerKind,
-    AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
+    AnalyzerProvider, AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus, DiagnosticRecord,
     DiagnosticSeverity, EdgeConfidence, EdgeType, FocusDepth, FocusRequest, GraphMode, GraphNode,
     GraphPatch, GraphSnapshot, LanguageId, PythonAnalyzerStatus, ReferenceRecord, SearchResult,
     ServerMessage, SourceLocation, SymbolIndex, SymbolKindName,
@@ -3167,6 +3167,9 @@ fn analyzer_services_from_counts(
         ],
         files_indexed: counts.rust,
         last_updated: last_updated.clone(),
+        provider: AnalyzerProvider::Local,
+        billable: false,
+        credits_used: None,
     }];
 
     if counts.python > 0 {
@@ -3199,6 +3202,9 @@ fn analyzer_services_from_counts(
                     },
                     files_indexed: counts.python,
                     last_updated: last_updated.clone(),
+                    provider: AnalyzerProvider::Local,
+                    billable: false,
+                    credits_used: None,
                 });
             }
             if python.mode == "parser" || ty_unavailable_auto || python.status == "parser only" {
@@ -3220,6 +3226,9 @@ fn analyzer_services_from_counts(
                     capabilities: vec![AnalyzerCapability::Symbols],
                     files_indexed: counts.python,
                     last_updated: last_updated.clone(),
+                    provider: AnalyzerProvider::Local,
+                    billable: false,
+                    credits_used: None,
                 });
             }
         }
@@ -3257,6 +3266,9 @@ fn analyzer_services_from_counts(
                 },
                 files_indexed: counts.typescript,
                 last_updated: last_updated.clone(),
+                provider: AnalyzerProvider::Local,
+                billable: false,
+                credits_used: None,
             });
         }
         if typescript.mode == "parser" || ts_unavailable_auto || typescript.status == "parser only"
@@ -3278,6 +3290,9 @@ fn analyzer_services_from_counts(
                 capabilities: vec![AnalyzerCapability::Symbols],
                 files_indexed: counts.typescript,
                 last_updated: last_updated.clone(),
+                provider: AnalyzerProvider::Local,
+                billable: false,
+                credits_used: None,
             });
         }
     }
@@ -3315,6 +3330,9 @@ fn analyzer_services_from_counts(
                 },
                 files_indexed: counts.qml,
                 last_updated: last_updated.clone(),
+                provider: AnalyzerProvider::Local,
+                billable: false,
+                credits_used: None,
             });
         }
         if qml_status.mode == "parser"
@@ -3340,6 +3358,9 @@ fn analyzer_services_from_counts(
                 capabilities: vec![AnalyzerCapability::Symbols],
                 files_indexed: counts.qml,
                 last_updated,
+                provider: AnalyzerProvider::Local,
+                billable: false,
+                credits_used: None,
             });
         }
     }
@@ -3674,6 +3695,12 @@ mod tests {
         }
     }
 
+    fn assert_local_analyzer(service: &AnalyzerServiceStatus) {
+        assert_eq!(service.provider, AnalyzerProvider::Local);
+        assert!(!service.billable);
+        assert_eq!(service.credits_used, None);
+    }
+
     #[test]
     fn detected_analyzers_disable_optional_languages_when_absent() {
         let detected = DetectedAnalyzers::from_manifest(&language_manifest(0, 0, 0, 0));
@@ -3792,6 +3819,11 @@ mod tests {
             .iter()
             .any(|service| service.id == "typescript-parser"));
         assert!(services.iter().any(|service| service.id == "qml-parser"));
+        assert!(services.iter().all(|service| {
+            service.provider == AnalyzerProvider::Local
+                && !service.billable
+                && service.credits_used.is_none()
+        }));
     }
 
     #[test]
@@ -3820,6 +3852,7 @@ mod tests {
         assert_eq!(ty.status, AnalyzerStatus::Ready);
         assert!(ty.capabilities.contains(&AnalyzerCapability::Diagnostics));
         assert_eq!(ty.files_indexed, 5);
+        assert_local_analyzer(ty);
     }
 
     #[test]

@@ -842,6 +842,14 @@ pub enum AnalyzerCapability {
     Formatting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnalyzerProvider {
+    Local,
+    Cloud,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzerServiceStatus {
@@ -858,6 +866,11 @@ pub struct AnalyzerServiceStatus {
     pub files_indexed: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<String>,
+    pub provider: AnalyzerProvider,
+    #[serde(default)]
+    pub billable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits_used: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1080,5 +1093,30 @@ mod tests {
             route_key_from_label("POST /api/users").unwrap(),
             route_key("post", "/api/users")
         );
+    }
+
+    #[test]
+    fn analyzer_service_status_serializes_provider_metadata() {
+        let status = AnalyzerServiceStatus {
+            id: "rust-analyzer".into(),
+            kind: AnalyzerKind::Rust,
+            engine: AnalyzerEngine::RustAnalyzer,
+            label: "rust-analyzer".into(),
+            status: AnalyzerStatus::Ready,
+            mode: None,
+            message: None,
+            capabilities: vec![AnalyzerCapability::Symbols],
+            files_indexed: 2,
+            last_updated: None,
+            provider: AnalyzerProvider::Local,
+            billable: false,
+            credits_used: None,
+        };
+
+        let value = serde_json::to_value(status).expect("serialize analyzer status");
+
+        assert_eq!(value["provider"], "local");
+        assert_eq!(value["billable"], false);
+        assert!(value.get("creditsUsed").is_none());
     }
 }

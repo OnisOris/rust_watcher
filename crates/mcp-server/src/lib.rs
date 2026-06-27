@@ -2,10 +2,10 @@ use anyhow::{Context, Result as AnyResult};
 use clap::Parser;
 use graph_builder::{build_fallback_graph, build_language_graph, filter_snapshot};
 use graph_core::{
-    AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerServiceStatus, AnalyzerStatus,
-    AppState, AppStatus, DiagnosticRecord, DiagnosticSeverity, GraphEdge, GraphMode, GraphNode,
-    GraphSnapshot, LanguageId, NodeDetailsResponse, NodeType, SearchResult, SourceReachability,
-    SymbolIndex, TextPosition, TextRange,
+    AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
+    AnalyzerStatus, AppState, AppStatus, DiagnosticRecord, DiagnosticSeverity, GraphEdge,
+    GraphMode, GraphNode, GraphSnapshot, LanguageId, NodeDetailsResponse, NodeType, SearchResult,
+    SourceReachability, SymbolIndex, TextPosition, TextRange,
 };
 use graph_query::context_pack::{
     build_edge_context_pack, build_node_context_pack, build_route_context_pack,
@@ -1950,6 +1950,9 @@ fn cargo_check_service_status(
         capabilities: vec![AnalyzerCapability::Diagnostics],
         files_indexed,
         last_updated: Some(timestamp()),
+        provider: AnalyzerProvider::Local,
+        billable: false,
+        credits_used: None,
     }
 }
 
