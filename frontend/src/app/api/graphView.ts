@@ -1,4 +1,4 @@
-import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphMode, GraphNode, NodeType } from '../types'
+import type { DiagnosticRecord, EdgeType, GraphEdge, GraphFilters, GraphNode } from '../types'
 import { inferNodeLanguage, languageFilterKey } from './language'
 
 export interface CollapsedGroupStats {
@@ -8,41 +8,6 @@ export interface CollapsedGroupStats {
   incomingEdgeTypes: EdgeType[]
   outgoingEdgeTypes: EdgeType[]
   language?: string
-}
-
-export function applyGraphMode(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, mode: GraphMode) {
-  const { nodeTypes, edgeTypes } = modeVisibility(mode)
-  let nodes = graph.nodes.filter(node => nodeTypes.has(node.type))
-  const nodeIds = new Set(nodes.map(node => node.id))
-  let edges = graph.edges.filter(edge =>
-    edgeTypes.has(edge.type) && nodeIds.has(edge.source) && nodeIds.has(edge.target)
-  )
-
-  if (mode === 'CallFlow' && edges.length === 0) {
-    edges = graph.edges.filter(edge =>
-      edge.type === 'Contains' && nodeIds.has(edge.source) && nodeIds.has(edge.target)
-    )
-  }
-
-  if (mode === 'CallFlow' || mode === 'DataFlow' || mode === 'Traits') {
-    const semanticEdgeTypes = mode === 'CallFlow'
-      ? new Set<EdgeType>(['Calls', 'Renders', 'ApiCall', 'EndpointHandler'])
-      : mode === 'DataFlow'
-        ? new Set<EdgeType>(['DataFlow', 'ApiCall', 'EndpointHandler'])
-        : null
-    const semanticNodeIds = new Set<string>()
-    for (const edge of edges) {
-      if (semanticEdgeTypes && !semanticEdgeTypes.has(edge.type)) continue
-      semanticNodeIds.add(edge.source)
-      semanticNodeIds.add(edge.target)
-    }
-    if (semanticNodeIds.size) {
-      nodes = nodes.filter(node => semanticNodeIds.has(node.id))
-      edges = edges.filter(edge => semanticNodeIds.has(edge.source) && semanticNodeIds.has(edge.target))
-    }
-  }
-
-  return { nodes, edges }
 }
 
 export function applyGraphFilters(graph: { nodes: GraphNode[]; edges: GraphEdge[] }, filters: GraphFilters) {
@@ -247,37 +212,6 @@ export function matchesLanguageFilter(node: GraphNode, filters: GraphFilters) {
 
 export function matchesReachabilityFilter(node: GraphNode, filters: Pick<GraphFilters, 'showDetached'>) {
   return filters.showDetached || node.reachability !== 'Detached'
-}
-
-function modeVisibility(mode: GraphMode): { nodeTypes: Set<NodeType>; edgeTypes: Set<EdgeType> } {
-  if (mode === 'Macro') {
-    return {
-      nodeTypes: new Set(['Module', 'File', 'Endpoint', 'ExternalCrate']),
-      edgeTypes: new Set(['Contains', 'Imports', 'Uses', 'ApiCall', 'EndpointHandler', 'ModDeclaration', 'ExternalDependency']),
-    }
-  }
-  if (mode === 'CallFlow') {
-    return {
-      nodeTypes: new Set(['Function', 'Method', 'Handler', 'Component', 'Hook', 'Endpoint']),
-      edgeTypes: new Set(['Calls', 'Renders', 'ApiCall', 'EndpointHandler']),
-    }
-  }
-  if (mode === 'DataFlow') {
-    return {
-      nodeTypes: new Set(['Function', 'Method', 'Component', 'Hook', 'Endpoint', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler']),
-      edgeTypes: new Set(['DataFlow', 'ApiCall', 'EndpointHandler', 'Calls', 'TypeReference', 'Uses']),
-    }
-  }
-  if (mode === 'Traits') {
-    return {
-      nodeTypes: new Set(['File', 'Module', 'Trait', 'Impl', 'Struct', 'Class', 'Object', 'Enum', 'Interface', 'TypeAlias', 'Function', 'Method', 'Property']),
-      edgeTypes: new Set(['Implements', 'Contains', 'TypeReference', 'Imports', 'Uses']),
-    }
-  }
-  return {
-    nodeTypes: new Set(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro']),
-    edgeTypes: new Set(['Contains', 'Calls', 'Renders', 'ApiCall', 'EndpointHandler', 'TypeReference', 'Implements', 'Imports', 'Uses']),
-  }
 }
 
 function isEssentialEdge(edge: GraphEdge) {

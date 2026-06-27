@@ -225,7 +225,14 @@ export function useBackendGraph(mode: GraphMode) {
   }, [applyDiagnosticsSnapshot])
 
   const applyPatch = useCallback((patch: GraphPatch) => {
-    const needsSnapshot = shouldRefreshSnapshotForPatch(patch, localNodeCountRef.current)
+    const touchesGraph = patch.fullRebuild
+      || patch.addedNodes.length > 0
+      || patch.updatedNodes.length > 0
+      || patch.removedNodeIds.length > 0
+      || patch.addedEdges.length > 0
+      || patch.updatedEdges.length > 0
+      || patch.removedEdgeIds.length > 0
+    const needsSnapshot = touchesGraph || shouldRefreshSnapshotForPatch(patch, localNodeCountRef.current)
     if (!needsSnapshot) {
       setNodes(prev => {
         const next = applyGraphPatchToNodes(prev, patch)
@@ -275,10 +282,10 @@ export function useBackendGraph(mode: GraphMode) {
     applyDevFallbackRef.current = applyDevFallback
   }, [applyDevFallback, applyStatus])
 
-  const refreshSnapshot = useCallback(async (_nextMode?: GraphMode) => {
+  const refreshSnapshot = useCallback(async (nextMode: GraphMode = mode) => {
     const requestSeq = ++snapshotRequestSeq.current
     try {
-      const response = await fetch('/api/graph/snapshot')
+      const response = await fetch(`/api/graph/snapshot?mode=${encodeURIComponent(nextMode)}`)
       if (!response.ok) throw await responseError(response, 'Loading graph snapshot')
       const snapshot = await response.json()
       if (requestSeq !== snapshotRequestSeq.current) return
@@ -289,13 +296,13 @@ export function useBackendGraph(mode: GraphMode) {
       setMessage(actionableNetworkError('Loading graph snapshot', error))
       applyDevFallback()
     }
-  }, [applyDevFallback, applySnapshot, refreshDiagnostics])
+  }, [applyDevFallback, applySnapshot, refreshDiagnostics, mode])
 
   useEffect(() => {
     refreshSnapshotRef.current = async () => {
-      await refreshSnapshot()
+      await refreshSnapshot(mode)
     }
-  }, [refreshSnapshot])
+  }, [mode, refreshSnapshot])
 
   useEffect(() => {
     let cancelled = false
@@ -320,6 +327,10 @@ export function useBackendGraph(mode: GraphMode) {
     boot()
     return () => { cancelled = true }
   }, [applyDevFallback, applyStatus, refreshSnapshot])
+
+  useEffect(() => {
+    if (backendAvailable) void refreshSnapshot(mode)
+  }, [backendAvailable, mode, refreshSnapshot])
 
   useEffect(() => {
     if (!backendAvailable) return

@@ -3,7 +3,6 @@ import {
   applyCollapsedGroups,
   applyEdgeVisibilityLevel,
   applyGraphFilters,
-  applyGraphMode,
   buildCollapsedGroupStats,
   buildRouteFlowGraph,
   bundleEdges,
@@ -120,44 +119,6 @@ describe('graph view helpers', () => {
     const bundled = bundleEdges(collapsed.edges)
 
     expect(bundled.find(edge => edge.type === 'ApiCall')?.bundledCount).toBe(2)
-  })
-
-  it('derives Macro view from full graph state', () => {
-    const nodes = [
-      node('file:a', 'rust', 'File'),
-      node('fn:a', 'rust', 'Function'),
-      node('endpoint', undefined, 'Endpoint'),
-    ]
-    const edges: GraphEdge[] = [
-      { id: 'contains', source: 'file:a', target: 'fn:a', type: 'Contains' },
-      { id: 'handler', source: 'endpoint', target: 'fn:a', type: 'EndpointHandler' },
-    ]
-
-    const macro = applyGraphMode({ nodes, edges }, 'Macro')
-
-    expect(macro.nodes.map(n => n.id)).toEqual(['file:a', 'endpoint'])
-    expect(macro.edges).toEqual([])
-  })
-
-  it('Types & Impl mode keeps Python package structure readable', () => {
-    const nodes = [
-      node('module:python', 'python', 'Module'),
-      { ...node('file:pion.py', 'python', 'File'), file: 'pion.py' },
-      { ...node('class:Apion', 'python', 'Class'), file: 'pion.py' },
-      { ...node('fn:message_handler', 'python', 'Function'), file: 'pion.py' },
-      node('component', 'typescript', 'Component'),
-    ]
-    const edges: GraphEdge[] = [
-      { id: 'module-file', source: 'module:python', target: 'file:pion.py', type: 'Contains' },
-      { id: 'file-class', source: 'file:pion.py', target: 'class:Apion', type: 'Contains' },
-      { id: 'file-fn', source: 'file:pion.py', target: 'fn:message_handler', type: 'Contains' },
-      { id: 'render', source: 'component', target: 'class:Apion', type: 'Renders' },
-    ]
-
-    const types = applyGraphMode({ nodes, edges }, 'Traits')
-
-    expect(types.nodes.map(n => n.id)).toEqual(['module:python', 'file:pion.py', 'class:Apion', 'fn:message_handler'])
-    expect(types.edges.map(e => e.id)).toEqual(['module-file', 'file-class', 'file-fn'])
   })
 
   it('bundles visually duplicate edges and preserves count', () => {

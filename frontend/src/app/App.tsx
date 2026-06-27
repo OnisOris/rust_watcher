@@ -12,7 +12,6 @@ import { useBackendGraph } from './api/useBackendGraph'
 import {
   applyCollapsedGroups,
   applyGraphFilters,
-  applyGraphMode,
   buildCollapsedGroupStats,
   buildRouteFlowGraph,
   bundleEdges,
@@ -124,13 +123,14 @@ export default function App() {
     () => {
       const modeGraph = graphLens === 'route'
         ? { nodes: graphNodes, edges }
-        : applyGraphMode({ nodes: graphNodes, edges }, mode)
+        : { nodes: graphNodes, edges }
       const lensGraph = graphLens === 'route'
         ? buildRouteFlowGraph(modeGraph)
         : applyGraphLens(modeGraph.nodes, modeGraph.edges, graphLens)
-      const collapsedStats = buildCollapsedGroupStats(lensGraph, collapsedGroups, diagnosticsByNode)
+      const focusedGraph = applySelectedModeFocus(lensGraph.nodes, lensGraph.edges, mode, selectedNodeId)
+      const collapsedStats = buildCollapsedGroupStats(focusedGraph, collapsedGroups, diagnosticsByNode)
       const annotatedGraph = {
-        nodes: lensGraph.nodes.map(node => {
+        nodes: focusedGraph.nodes.map(node => {
           const stats = collapsedStats.get(node.id)
           if (!stats) return node
           const edgeTypes = [...new Set([...stats.incomingEdgeTypes, ...stats.outgoingEdgeTypes])].slice(0, 3).join(', ')
@@ -140,12 +140,12 @@ export default function App() {
             description: `Collapsed: ${stats.hiddenNodeCount} hidden · ${stats.hiddenDiagnosticCount} diagnostics${edgeTypes ? ` · ${edgeTypes}` : ''}`,
           }
         }),
-        edges: lensGraph.edges,
+        edges: focusedGraph.edges,
       }
       const filteredGraph = applyCollapsedGroups(applyGraphFilters(annotatedGraph, filters), collapsedGroups)
       return { nodes: filteredGraph.nodes, edges: bundleEdges(filteredGraph.edges) }
     },
-    [graphNodes, edges, mode, graphLens, filters, collapsedGroups, diagnosticsByNode],
+    [graphNodes, edges, mode, graphLens, selectedNodeId, filters, collapsedGroups, diagnosticsByNode],
   )
   const zeroEdgeHint = visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
     ? graphModeEmptyHint(mode)
@@ -495,18 +495,55 @@ export default function App() {
 function graphModeEmptyHint(mode: GraphMode) {
   switch (mode) {
     case 'CallFlow':
-      return { title: 'No call flow edges detected', body: 'This mode expects endpoint-to-handler or function-call edges. Try Semantic or All edges, or check route extraction.' }
+      return { title: 'No call flow edges detected', body: 'This mode shows function calls, renders and endpoint-to-handler chains. Try Semantic or All edges, or focus a selected symbol.' }
     case 'DataFlow':
-      return { title: 'No data flow detected', body: 'This mode shows request parameters, DTOs and response types. Try Semantic edges or inspect handler signatures.' }
+      return { title: 'No API/data flow detected', body: 'This mode shows API requests, responses, hook results, state updates and model usage. Try Semantic edges or inspect handler signatures.' }
     case 'Traits':
-      return { title: 'No type or implementation relations found', body: 'This mode shows Rust traits/impls plus class and type-reference relationships in other languages. Try enabling external dependencies and semantic edges.' }
+      return { title: 'No type or implementation relations found', body: 'This mode shows traits, impls, interfaces, DTOs, models and type references. Try enabling external dependencies and semantic edges.' }
     default:
       return { title: 'No edges in this view', body: 'The current filters hide all relationships. Try Full depth, Semantic edges, or enable detached and external sources.' }
   }
 }
 
 function graphModeLabel(mode: GraphMode) {
-  return mode === 'Traits' ? 'Types & Impl' : mode
+  switch (mode) {
+    case 'Macro':
+      return 'Architecture'
+    case 'Meso':
+      return 'Modules'
+    case 'Micro':
+      return 'Local Symbol'
+    case 'CallFlow':
+      return 'Call Flow'
+    case 'DataFlow':
+      return 'API/Data Flow'
+    case 'Traits':
+      return 'Types & Impl'
+  }
+}
+
+function applySelectedModeFocus(nodes: GraphNode[], edges: GraphEdge[], mode: GraphMode, selectedNodeId: string | null) {
+  if (!selectedNodeId || (mode !== 'CallFlow' && mode !== 'Micro')) return { nodes, edges }
+  if (!nodes.some(node => node.id === selectedNodeId)) return { nodes, edges }
+
+  const maxDepth = mode === 'CallFlow' ? 2 : 1
+  const keep = new Set([selectedNodeId])
+  let frontier = new Set([selectedNodeId])
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const next = new Set<string>()
+    for (const edge of edges) {
+      if (frontier.has(edge.source) && !keep.has(edge.target)) next.add(edge.target)
+      if (frontier.has(edge.target) && !keep.has(edge.source)) next.add(edge.source)
+    }
+    if (!next.size) break
+    next.forEach(id => keep.add(id))
+    frontier = next
+  }
+
+  return {
+    nodes: nodes.filter(node => keep.has(node.id)),
+    edges: edges.filter(edge => keep.has(edge.source) && keep.has(edge.target)),
+  }
 }
 
 function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens) {

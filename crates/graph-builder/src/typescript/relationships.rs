@@ -2,7 +2,9 @@ use graph_core::{DataFlowKind, EdgeConfidence, EdgeType, GraphEdge, GraphSnapsho
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
-use super::api_calls::{build_endpoint_path_index, extract_api_paths, propagate_ts_api_call_edges};
+use super::api_calls::{
+    build_endpoint_route_index, extract_api_calls, propagate_ts_api_call_edges, EndpointRouteIndex,
+};
 use super::imports::add_ts_import_edges;
 use super::parser::{node_text, parse_ts_tree};
 use super::{TsFile, TsSymbol};
@@ -16,7 +18,7 @@ pub(super) fn enrich_ts_relationships(
     files: &[TsFile],
     symbols_by_file: &HashMap<String, Vec<TsSymbol>>,
 ) {
-    let endpoint_by_path = build_endpoint_path_index(&snapshot.nodes);
+    let endpoint_routes = build_endpoint_route_index(&snapshot.nodes);
     let existing_edges: HashSet<_> = snapshot.edges.iter().map(|edge| edge.id.clone()).collect();
     let all_symbols = symbols_by_file
         .values()
@@ -61,7 +63,7 @@ pub(super) fn enrich_ts_relationships(
             &symbols_by_label,
             &components,
             &callables,
-            &endpoint_by_path,
+            &endpoint_routes,
             &existing_edges,
         ) {
             continue;
@@ -110,16 +112,16 @@ pub(super) fn enrich_ts_relationships(
                     ));
                 }
             }
-            for api_path in extract_api_paths(line) {
-                if let Some(endpoint_ids) = endpoint_by_path.get(&api_path) {
-                    for endpoint_id in endpoint_ids {
-                        snapshot.edges.push(edge_with_confidence(
-                            EdgeType::ApiCall,
-                            source_id,
-                            endpoint_id,
-                            EdgeConfidence::SyntaxFallback,
-                        ));
-                    }
+            for api_call in extract_api_calls(line) {
+                for (endpoint_id, confidence) in
+                    endpoint_routes.matches(&api_call, EdgeConfidence::SyntaxFallback)
+                {
+                    snapshot.edges.push(edge_with_confidence(
+                        EdgeType::ApiCall,
+                        source_id,
+                        &endpoint_id,
+                        confidence,
+                    ));
                 }
             }
 
@@ -145,7 +147,7 @@ fn enrich_ts_ast_relationships(
     symbols_by_label: &HashMap<String, String>,
     components: &[TsSymbol],
     callables: &[TsSymbol],
-    endpoint_by_path: &HashMap<String, Vec<String>>,
+    endpoint_routes: &EndpointRouteIndex,
     existing_edges: &HashSet<String>,
 ) -> bool {
     let Some(tree) = parse_ts_tree(file) else {
@@ -170,7 +172,7 @@ fn enrich_ts_ast_relationships(
         symbols_by_label,
         components,
         callables,
-        endpoint_by_path,
+        endpoint_routes,
         existing_edges,
         &file_node_id,
         &mut new_edges,
@@ -190,7 +192,7 @@ fn collect_ts_ast_relationship_edges(
     symbols_by_label: &HashMap<String, String>,
     components: &[TsSymbol],
     callables: &[TsSymbol],
-    endpoint_by_path: &HashMap<String, Vec<String>>,
+    endpoint_routes: &EndpointRouteIndex,
     existing_edges: &HashSet<String>,
     file_node_id: &str,
     edges: &mut Vec<GraphEdge>,
@@ -255,28 +257,29 @@ fn collect_ts_ast_relationship_edges(
                     );
                 }
             }
-            for api_path in extract_api_paths(&node_text(node, source)) {
-                if let Some(endpoint_ids) = endpoint_by_path.get(&api_path) {
-                    for endpoint_id in endpoint_ids {
-                        push_unique_edge_with_confidence(
-                            edges,
-                            existing_edges,
-                            EdgeType::ApiCall,
-                            source_id,
-                            endpoint_id,
-                            EdgeConfidence::Semantic,
-                        );
-                        push_unique_data_flow_edge(
-                            edges,
-                            existing_edges,
-                            source_id,
-                            endpoint_id,
-                            EdgeConfidence::Semantic,
-                            DataFlowKind::ApiRequest,
-                            format!("request {api_path}"),
-                            node_text(node, source),
-                        );
-                    }
+            let call_text = node_text(node, source);
+            for api_call in extract_api_calls(&call_text) {
+                for (endpoint_id, confidence) in
+                    endpoint_routes.matches(&api_call, EdgeConfidence::Semantic)
+                {
+                    push_unique_edge_with_confidence(
+                        edges,
+                        existing_edges,
+                        EdgeType::ApiCall,
+                        source_id,
+                        &endpoint_id,
+                        confidence,
+                    );
+                    push_unique_data_flow_edge(
+                        edges,
+                        existing_edges,
+                        source_id,
+                        &endpoint_id,
+                        confidence,
+                        DataFlowKind::ApiRequest,
+                        format!("request {}", api_call.path),
+                        call_text.clone(),
+                    );
                 }
             }
             if callee_name.starts_with("use") && callee_name.len() > 3 {
@@ -336,7 +339,7 @@ fn collect_ts_ast_relationship_edges(
                     symbols_by_label,
                     components,
                     callables,
-                    endpoint_by_path,
+                    endpoint_routes,
                     existing_edges,
                     file_node_id,
                     edges,

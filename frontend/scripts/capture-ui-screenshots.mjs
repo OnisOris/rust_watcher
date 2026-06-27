@@ -13,11 +13,11 @@ const url = `http://127.0.0.1:${port}`
 const shouldBuild = process.env.UI_REVIEW_SKIP_BUILD !== '1'
 
 const modes = [
-  { label: 'Macro', slug: 'macro' },
-  { label: 'Meso', slug: 'meso' },
-  { label: 'Micro', slug: 'micro' },
+  { label: 'Architecture', slug: 'architecture' },
+  { label: 'Modules', slug: 'modules' },
+  { label: 'Local Symbol', slug: 'local-symbol' },
   { label: 'Call Flow', slug: 'callflow' },
-  { label: 'Data Flow', slug: 'dataflow' },
+  { label: 'API/Data Flow', slug: 'api-dataflow' },
   { label: 'Types & Impl', slug: 'types' },
 ]
 
@@ -161,7 +161,7 @@ Captured from \`./example\` at ${new Date().toISOString()}.
 ## Matrix
 
 - Layout: Force graph only
-- Modes: Macro, Meso, Micro, Call Flow, Data Flow, Types & Impl
+- Modes: Architecture, Modules, Local Symbol, Call Flow, API/Data Flow, Types & Impl
 - Viewports: 1600x900, 1920x1080
 
 ## Console

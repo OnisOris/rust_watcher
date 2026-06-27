@@ -1846,7 +1846,7 @@ mod tests {
     }
 
     fn test_snapshot() -> GraphSnapshot {
-        let nodes = vec![
+        let mut nodes = vec![
             node(
                 "file:src/main.rs".into(),
                 NodeType::File,
@@ -1892,6 +1892,8 @@ mod tests {
                 0.0,
             ),
         ];
+        nodes[1].visibility = Some(Visibility::Pub);
+        nodes[1].signature = Some("pub fn main()".into());
         let edges = vec![
             edge(
                 EdgeType::Contains,
@@ -1932,6 +1934,7 @@ mod tests {
             node.node_type,
             NodeType::Function
                 | NodeType::Method
+                | NodeType::Handler
                 | NodeType::Component
                 | NodeType::Hook
                 | NodeType::Endpoint
@@ -1952,6 +1955,148 @@ mod tests {
             .find(|node| node.id == "fn:src/main.rs::main@1")
             .unwrap();
         assert_eq!(main.language.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn filter_snapshot_macro_keeps_high_level_nodes_and_excludes_detached() {
+        let mut snapshot = test_snapshot();
+        let mut detached = node(
+            "file:src/detached.rs".into(),
+            NodeType::File,
+            "detached.rs".into(),
+            Some("src/detached.rs".into()),
+            Some("detached".into()),
+            Some("test".into()),
+            None,
+            0.0,
+            0.0,
+        );
+        detached.reachability = Some(SourceReachability::Detached);
+        snapshot.nodes.push(detached);
+
+        let filtered = filter_snapshot(&snapshot, GraphMode::Macro);
+
+        assert!(filtered.nodes.iter().all(|node| matches!(
+            node.node_type,
+            NodeType::File | NodeType::Module | NodeType::Endpoint | NodeType::ExternalCrate
+        )));
+        assert!(!filtered
+            .nodes
+            .iter()
+            .any(|node| node.id == "file:src/detached.rs"));
+    }
+
+    #[test]
+    fn filter_snapshot_meso_and_micro_are_distinct() {
+        let snapshot = test_snapshot();
+
+        let meso = filter_snapshot(&snapshot, GraphMode::Meso);
+        let micro = filter_snapshot(&snapshot, GraphMode::Micro);
+
+        assert!(meso.nodes.iter().any(|node| node.id == "file:src/main.rs"));
+        assert!(!meso
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Calls));
+        assert!(micro
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Calls));
+        assert_ne!(
+            meso.edges
+                .iter()
+                .map(|edge| edge.edge_type)
+                .collect::<HashSet<_>>(),
+            micro
+                .edges
+                .iter()
+                .map(|edge| edge.edge_type)
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn filter_snapshot_call_flow_keeps_only_call_flow_edges() {
+        let snapshot = test_snapshot();
+        let filtered = filter_snapshot(&snapshot, GraphMode::CallFlow);
+
+        assert!(filtered.edges.iter().all(|edge| matches!(
+            edge.edge_type,
+            EdgeType::Calls | EdgeType::Renders | EdgeType::ApiCall | EdgeType::EndpointHandler
+        )));
+    }
+
+    #[test]
+    fn filter_snapshot_data_flow_prioritizes_api_data_edges() {
+        let mut snapshot = test_snapshot();
+        snapshot.edges.push(edge(
+            EdgeType::DataFlow,
+            "fn:src/main.rs::helper@5",
+            "struct:src/main.rs::Person@9",
+        ));
+
+        let filtered = filter_snapshot(&snapshot, GraphMode::DataFlow);
+
+        assert!(filtered
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::DataFlow));
+        assert!(!filtered
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Contains));
+    }
+
+    #[test]
+    fn filter_snapshot_traits_keeps_type_relations() {
+        let mut snapshot = test_snapshot();
+        snapshot.nodes.push(node(
+            "trait:src/main.rs::Named@13".into(),
+            NodeType::Trait,
+            "Named".into(),
+            Some("src/main.rs".into()),
+            Some("main".into()),
+            Some("test".into()),
+            Some(13),
+            0.0,
+            0.0,
+        ));
+        snapshot.nodes.push(node(
+            "method:src/main.rs::Person::name@17".into(),
+            NodeType::Method,
+            "Person::name".into(),
+            Some("src/main.rs".into()),
+            Some("main".into()),
+            Some("test".into()),
+            Some(17),
+            0.0,
+            0.0,
+        ));
+        snapshot.edges.push(edge(
+            EdgeType::Implements,
+            "struct:src/main.rs::Person@9",
+            "trait:src/main.rs::Named@13",
+        ));
+        snapshot.edges.push(edge(
+            EdgeType::TypeReference,
+            "method:src/main.rs::Person::name@17",
+            "struct:src/main.rs::Person@9",
+        ));
+
+        let filtered = filter_snapshot(&snapshot, GraphMode::Traits);
+
+        assert!(filtered
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Implements));
+        assert!(filtered
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::TypeReference));
+        assert!(!filtered
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == EdgeType::Calls));
     }
 
     #[test]
@@ -2457,6 +2602,92 @@ export type UserId = User['id']
                 && edge.target == get_users.id
                 && edge.data_flow_kind == Some(DataFlowKind::ApiResponse)
                 && edge.label.as_deref() == Some("response.json()")
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typescript_api_matching_uses_http_method_when_known() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-ts-api-method-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"ts_api_method_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"
+fn list_users() {}
+fn create_user() {}
+
+fn main() {
+    app.route("/api/users", get(list_users).post(create_user));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frontend/src/api.ts"),
+            r#"
+export async function getUsers() {
+  return fetch('/api/users')
+}
+
+export async function createUser() {
+  return fetch('/api/users', { method: 'POST' })
+}
+"#,
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let get_users = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "getUsers")
+            .unwrap();
+        let create_user_call = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "createUser")
+            .unwrap();
+        let get_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "GET /api/users")
+            .unwrap();
+        let post_endpoint = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Endpoint && node.label == "POST /api/users")
+            .unwrap();
+
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == get_users.id
+                && edge.target == get_endpoint.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == create_user_call.id
+                && edge.target == post_endpoint.id
+                && edge.confidence == EdgeConfidence::Semantic
+        }));
+        assert!(!snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == get_users.id
+                && edge.target == post_endpoint.id
+        }));
+        assert!(!snapshot.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::ApiCall
+                && edge.source == create_user_call.id
+                && edge.target == get_endpoint.id
         }));
 
         let _ = std::fs::remove_dir_all(root);

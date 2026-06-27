@@ -786,7 +786,7 @@ function isEditableTarget(target: EventTarget | null) {
   return target.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select'
 }
 
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, graphMode, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>([])
   const edgesRef = useRef<GraphEdge[]>(edges)
@@ -910,7 +910,10 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
       const edgeInTrace = traceEdgeIds?.has(edge.id) || edge.bundledEdgeIds?.some(id => traceEdgeIds?.has(id))
       const isActive = !!edgeInTrace || (hoveredConnections.has(edge.source) && hoveredConnections.has(edge.target)) || (selectedConnections.has(edge.source) && selectedConnections.has(edge.target))
       const base = edgeColor(edge)
-      const alpha = edgeInTrace ? 0.95 : isActive ? 0.84 : traceActive ? 0.18 : activeEdges.length > 1400 ? 0.34 : 0.52
+      const baseAlpha = edgeInTrace ? 0.95 : isActive ? 0.84 : traceActive ? 0.18 : activeEdges.length > 1400 ? 0.34 : 0.52
+      const alpha = graphMode === 'DataFlow' && edge.type !== 'DataFlow'
+        ? Math.min(baseAlpha, edge.type === 'ApiCall' || edge.type === 'EndpointHandler' ? 0.38 : 0.22)
+        : baseAlpha
       drawArrow(ctx, src, tgt, base, isActive ? edgeWidth(edge) + 1.2 : edgeWidth(edge), alpha, edge.type === 'DataFlow' || edge.type === 'ApiCall' || edge.type === 'EndpointHandler', performance.now())
       if ((edge.bundledCount ?? 1) > 1 && (isActive || zoomRef.current > 0.7)) {
         ctx.save()
@@ -963,7 +966,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
 
     drawMiniMap(ctx, activeNodes, panRef.current, zoomRef.current, W, H, colors)
     drawLanguageLegend(ctx, H, pausedRef.current, colors)
-  }, [labelMode])
+  }, [graphMode, labelMode])
 
   const scheduleDraw = useCallback(() => {
     cancelAnimationFrame(renderRafRef.current)

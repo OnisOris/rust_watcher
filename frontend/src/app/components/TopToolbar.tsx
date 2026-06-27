@@ -37,12 +37,12 @@ interface TopToolbarProps {
 }
 
 const MODES: { key: GraphMode; label: string; hint: string }[] = [
-  { key: 'Macro', label: 'Macro', hint: 'Project scopes, files and external dependencies' },
-  { key: 'Meso', label: 'Meso', hint: 'Important symbols with file context' },
-  { key: 'Micro', label: 'Micro', hint: 'Detailed symbol-level relations' },
-  { key: 'CallFlow', label: 'Call Flow', hint: 'Endpoint-to-handler and function chains' },
-  { key: 'DataFlow', label: 'Data Flow', hint: 'Request, DTO and response type flow' },
-  { key: 'Traits', label: 'Types & Impl', hint: 'Traits, impls, classes and type relationships' },
+  { key: 'Macro', label: 'Architecture', hint: 'Project scopes, files, endpoints and external dependencies.' },
+  { key: 'Meso', label: 'Modules', hint: 'Files, modules and important public symbols.' },
+  { key: 'Micro', label: 'Local Symbol', hint: 'Detailed symbol-level neighborhood around selected code.' },
+  { key: 'CallFlow', label: 'Call Flow', hint: 'Function calls, renders and endpoint-to-handler chains.' },
+  { key: 'DataFlow', label: 'API/Data Flow', hint: 'API requests, responses, hook results, state updates and model usage.' },
+  { key: 'Traits', label: 'Types & Impl', hint: 'Traits, impls, interfaces, DTOs, models and type references.' },
 ]
 
 const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: string; dot: string; pulse: boolean }> = {
