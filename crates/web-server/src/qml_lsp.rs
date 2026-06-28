@@ -1,9 +1,10 @@
 use crate::analyzer_paths::resolve_qmlls;
-use crate::lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus};
 use anyhow::Result;
 use clap::ValueEnum;
 use graph_core::AnalyzerStatus;
-use ra_client::{LspLocation, LspNotification};
+use ra_client::{
+    LspLocation, LspNotification, LspRuntime, LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus,
+};
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 

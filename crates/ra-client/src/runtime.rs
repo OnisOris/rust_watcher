@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Context, Result};
-use graph_core::DiscoveredSymbol;
-use parking_lot::RwLock;
-use ra_client::{
+use crate::{
     LspCallHierarchyIncomingCall, LspCallHierarchyItem, LspCallHierarchyOutgoingCall, LspClient,
     LspGotoDefinitionResponse, LspLocation, LspNotification,
 };
+use anyhow::{anyhow, Context, Result};
+use graph_core::DiscoveredSymbol;
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,7 +103,6 @@ impl LspRuntime {
         should_log
     }
 
-    #[cfg(test)]
     pub fn start_attempts(&self) -> usize {
         self.start_attempts.load(Ordering::SeqCst)
     }
@@ -116,7 +115,6 @@ impl LspRuntime {
             .copied()
     }
 
-    #[cfg(test)]
     pub fn args(&self) -> &[String] {
         &self.args
     }
@@ -435,15 +433,20 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn missing_binary_resolver(configured: &Path, _root: &Path) -> PathBuf {
         configured.to_path_buf()
     }
 
     fn temp_root() -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("rust-watcher-lsp-runtime-{}", Uuid::new_v4()));
+        let id = TEST_ROOT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "rust-watcher-lsp-runtime-{}-{id}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         root
     }

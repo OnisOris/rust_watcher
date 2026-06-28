@@ -1,5 +1,4 @@
 use crate::analyzer_paths::resolve_ty;
-use crate::lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus};
 use anyhow::Result;
 use clap::ValueEnum;
 use graph_builder::push_unique_edge_with_confidence;
@@ -7,7 +6,10 @@ use graph_core::{
     DiscoveredSymbol, EdgeConfidence, EdgeType, GraphSnapshot, LanguageId, NodeType,
     PythonAnalyzerStatus, SymbolIndex, SymbolKindName, Visibility,
 };
-use ra_client::{LspCallHierarchyItem, LspCallHierarchyOutgoingCall, LspLocation, LspNotification};
+use ra_client::{
+    LspCallHierarchyItem, LspCallHierarchyOutgoingCall, LspLocation, LspNotification, LspRuntime,
+    LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;

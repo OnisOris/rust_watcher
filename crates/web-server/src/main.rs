@@ -17,6 +17,7 @@ use graph_core::{
 };
 use parking_lot::RwLock;
 use project_indexer::start_watcher;
+use ra_client::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -38,7 +39,6 @@ use uuid::Uuid;
 
 mod analysis;
 mod analyzer_paths;
-mod lsp_runtime;
 mod python_ty;
 mod qml_lsp;
 mod typescript_lsp;
@@ -48,7 +48,6 @@ use graph_query::context_pack::{
     build_trace_context_pack,
 };
 use graph_query::trace::{build_edge_trace, build_node_trace, build_route_trace};
-use lsp_runtime::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use python_ty::{PythonAnalyzerMode, PythonTyState};
 use qml_lsp::{
     status_to_analyzer_status as qml_status_to_analyzer_status, QmlAnalyzerMode, QmlAnalyzerStatus,

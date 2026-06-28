@@ -21,6 +21,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, oneshot};
 use url::Url;
 
+pub mod runtime;
+
 pub use lsp_types::{
     CallHierarchyIncomingCall as LspCallHierarchyIncomingCall,
     CallHierarchyItem as LspCallHierarchyItem,
@@ -28,6 +30,10 @@ pub use lsp_types::{
     DiagnosticSeverity as LspDiagnosticSeverity,
     GotoDefinitionResponse as LspGotoDefinitionResponse, Location as LspLocation,
     NumberOrString as LspNumberOrString, PublishDiagnosticsParams as LspPublishDiagnosticsParams,
+};
+pub use runtime::{
+    BinaryResolver, LspRuntime, LspRuntimeConfig, LspRuntimeMode, LspRuntimeStatus,
+    START_RETRY_COOLDOWN,
 };
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
