@@ -27,8 +27,11 @@ use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
+
+mod storage;
+use storage::{CloudMetadataStore, PersistedCloudState};
 
 #[derive(Parser)]
 #[command(name = "cloud-api")]
@@ -53,6 +56,8 @@ struct ServeArgs {
     blobs_dir: PathBuf,
     #[arg(long, default_value = ".rust-watcher-cloud/workspaces")]
     workspaces_dir: PathBuf,
+    #[arg(long, default_value = ".rust-watcher-cloud/cloud-api.sqlite")]
+    db_path: PathBuf,
     #[arg(long, default_value = "rust-analyzer")]
     rust_analyzer: PathBuf,
     #[arg(long, default_value_t = 120)]
@@ -73,6 +78,7 @@ struct CloudApiState {
     blobs_dir: Arc<PathBuf>,
     workspaces_dir: Arc<PathBuf>,
     analysis_config: Arc<CloudAnalysisConfig>,
+    store: Arc<CloudMetadataStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,19 +124,47 @@ impl CloudApiState {
         blobs_dir: PathBuf,
         workspaces_dir: PathBuf,
         analysis_config: CloudAnalysisConfig,
-    ) -> Self {
-        Self {
-            jobs: Arc::new(RwLock::new(HashMap::new())),
-            job_revision_targets: Arc::new(RwLock::new(HashMap::new())),
-            workspaces: Arc::new(RwLock::new(HashMap::new())),
-            revisions: Arc::new(RwLock::new(HashMap::new())),
-            blobs: Arc::new(RwLock::new(HashMap::new())),
-            analysis_results: Arc::new(RwLock::new(HashMap::new())),
-            analysis_usage: Arc::new(RwLock::new(HashMap::new())),
+        store: CloudMetadataStore,
+    ) -> Result<Self> {
+        Self::from_persisted(
+            blobs_dir,
+            workspaces_dir,
+            analysis_config,
+            store,
+            PersistedCloudState::default(),
+        )
+    }
+
+    fn from_persisted(
+        blobs_dir: PathBuf,
+        workspaces_dir: PathBuf,
+        analysis_config: CloudAnalysisConfig,
+        store: CloudMetadataStore,
+        persisted: PersistedCloudState,
+    ) -> Result<Self> {
+        let mut jobs = persisted.jobs;
+        recover_running_jobs(&mut jobs);
+        for (id, job) in &jobs {
+            let target = persisted.job_revision_targets.get(id);
+            store.save_job(
+                job,
+                target.map(|target| target.workspace_id.as_str()),
+                target.map(|target| target.revision_id.as_str()),
+            )?;
+        }
+        Ok(Self {
+            jobs: Arc::new(RwLock::new(jobs)),
+            job_revision_targets: Arc::new(RwLock::new(persisted.job_revision_targets)),
+            workspaces: Arc::new(RwLock::new(persisted.workspaces)),
+            revisions: Arc::new(RwLock::new(persisted.revisions)),
+            blobs: Arc::new(RwLock::new(persisted.blobs)),
+            analysis_results: Arc::new(RwLock::new(persisted.analysis_results)),
+            analysis_usage: Arc::new(RwLock::new(persisted.analysis_usage)),
             blobs_dir: Arc::new(blobs_dir),
             workspaces_dir: Arc::new(workspaces_dir),
             analysis_config: Arc::new(analysis_config),
-        }
+            store: Arc::new(store),
+        })
     }
 
     fn create_job(&self, request: CreateAnalysisJobRequest) -> Result<AnalysisJob, ApiError> {
@@ -199,6 +233,7 @@ impl CloudApiState {
                 .write()
                 .insert(job.id.clone(), target);
         }
+        self.persist_job(&job);
         Ok(job)
     }
 
@@ -217,15 +252,19 @@ impl CloudApiState {
         message: &str,
         progress: Option<u8>,
     ) -> Option<AnalysisJob> {
-        let mut jobs = self.jobs.write();
-        let job = jobs.get_mut(id)?;
-        job.status = status;
-        job.message = Some(message.into());
-        job.progress = progress;
-        if job.started_at.is_none() {
-            job.started_at = Some(timestamp());
-        }
-        Some(job.clone())
+        let job = {
+            let mut jobs = self.jobs.write();
+            let job = jobs.get_mut(id)?;
+            job.status = status;
+            job.message = Some(message.into());
+            job.progress = progress;
+            if job.started_at.is_none() {
+                job.started_at = Some(timestamp());
+            }
+            job.clone()
+        };
+        self.persist_job(&job);
+        Some(job)
     }
 
     fn set_job_analyzer_statuses(
@@ -233,10 +272,14 @@ impl CloudApiState {
         id: &str,
         analyzer_statuses: Vec<AnalyzerServiceStatus>,
     ) -> Option<AnalysisJob> {
-        let mut jobs = self.jobs.write();
-        let job = jobs.get_mut(id)?;
-        job.analyzer_statuses = analyzer_statuses;
-        Some(job.clone())
+        let job = {
+            let mut jobs = self.jobs.write();
+            let job = jobs.get_mut(id)?;
+            job.analyzer_statuses = analyzer_statuses;
+            job.clone()
+        };
+        self.persist_job(&job);
+        Some(job)
     }
 
     fn complete_job(
@@ -245,38 +288,57 @@ impl CloudApiState {
         snapshot: &GraphSnapshot,
         credits_used: u32,
     ) -> Option<AnalysisJob> {
-        let mut jobs = self.jobs.write();
-        let job = jobs.get_mut(id)?;
-        job.status = AnalysisJobStatus::Completed;
-        job.message = Some("Cloud analysis completed".into());
-        job.progress = Some(100);
-        job.finished_at = Some(timestamp());
-        job.error = None;
-        if job.analyzer_statuses.is_empty() {
-            job.analyzer_statuses = parser_analyzer_statuses(snapshot);
-        }
-        job.credits_used = Some(credits_used);
-        Some(job.clone())
+        let job = {
+            let mut jobs = self.jobs.write();
+            let job = jobs.get_mut(id)?;
+            job.status = AnalysisJobStatus::Completed;
+            job.message = Some("Cloud analysis completed".into());
+            job.progress = Some(100);
+            job.finished_at = Some(timestamp());
+            job.error = None;
+            if job.analyzer_statuses.is_empty() {
+                job.analyzer_statuses = parser_analyzer_statuses(snapshot);
+            }
+            job.credits_used = Some(credits_used);
+            job.clone()
+        };
+        self.persist_job(&job);
+        Some(job)
     }
 
     fn fail_job(&self, id: &str, error: impl Into<String>) -> Option<AnalysisJob> {
         let error = error.into();
-        let mut jobs = self.jobs.write();
-        let job = jobs.get_mut(id)?;
-        if requests_rust_analyzer(job) {
-            job.analyzer_statuses = vec![rust_analyzer_status(
-                AnalyzerStatus::Error,
-                Some(error.clone()),
-                0,
-                None,
-            )];
+        let job = {
+            let mut jobs = self.jobs.write();
+            let job = jobs.get_mut(id)?;
+            if requests_rust_analyzer(job) {
+                job.analyzer_statuses = vec![rust_analyzer_status(
+                    AnalyzerStatus::Error,
+                    Some(error.clone()),
+                    0,
+                    None,
+                )];
+            }
+            job.status = AnalysisJobStatus::Failed;
+            job.message = Some("Cloud analysis failed".into());
+            job.progress = None;
+            job.finished_at = Some(timestamp());
+            job.error = Some(error);
+            job.clone()
+        };
+        self.persist_job(&job);
+        Some(job)
+    }
+
+    fn persist_job(&self, job: &AnalysisJob) {
+        let target = self.job_revision_targets.read().get(&job.id).cloned();
+        if let Err(error) = self.store.save_job(
+            job,
+            target.as_ref().map(|target| target.workspace_id.as_str()),
+            target.as_ref().map(|target| target.revision_id.as_str()),
+        ) {
+            warn!(job_id = %job.id, %error, "failed to persist cloud analysis job");
         }
-        job.status = AnalysisJobStatus::Failed;
-        job.message = Some("Cloud analysis failed".into());
-        job.progress = None;
-        job.finished_at = Some(timestamp());
-        job.error = Some(error);
-        Some(job.clone())
     }
 
     fn usage_summary(&self) -> UsageSummaryResponse {
@@ -315,13 +377,17 @@ impl CloudApiState {
     }
 
     fn cancel_job(&self, id: &str) -> Option<AnalysisJob> {
-        let mut jobs = self.jobs.write();
-        let job = jobs.get_mut(id)?;
-        if !is_terminal(job.status) {
-            job.status = AnalysisJobStatus::Cancelled;
-            job.message = Some("Cancelled".into());
-        }
-        Some(job.clone())
+        let job = {
+            let mut jobs = self.jobs.write();
+            let job = jobs.get_mut(id)?;
+            if !is_terminal(job.status) {
+                job.status = AnalysisJobStatus::Cancelled;
+                job.message = Some("Cancelled".into());
+            }
+            job.clone()
+        };
+        self.persist_job(&job);
+        Some(job)
     }
 
     fn create_workspace(&self, request: CreateWorkspaceRequest) -> CloudWorkspace {
@@ -338,6 +404,9 @@ impl CloudApiState {
             updated_at: Some(now),
         };
         self.workspaces.write().insert(id, workspace.clone());
+        if let Err(error) = self.store.save_workspace(&workspace) {
+            warn!(workspace_id = %workspace.id, %error, "failed to persist cloud workspace");
+        }
         workspace
     }
 
@@ -405,6 +474,9 @@ impl CloudApiState {
         self.blobs
             .write()
             .insert(content_hash.to_string(), blob.clone());
+        if let Err(error) = self.store.save_blob(&blob) {
+            warn!(content_hash = %blob.content_hash, %error, "failed to persist cloud blob metadata");
+        }
         Ok((StatusCode::CREATED, blob))
     }
 
@@ -452,8 +524,16 @@ impl CloudApiState {
         workspace.files_count = files_count;
         workspace.total_bytes = total_bytes;
         workspace.updated_at = Some(timestamp());
+        let workspace = workspace.clone();
+        drop(workspaces);
+        if let Err(error) = self.store.save_revision(&revision) {
+            warn!(revision_id = %revision.id, %error, "failed to persist cloud revision");
+        }
+        if let Err(error) = self.store.save_workspace(&workspace) {
+            warn!(workspace_id = %workspace.id, %error, "failed to persist cloud workspace");
+        }
         Ok(CreateWorkspaceRevisionResponse {
-            workspace: workspace.clone(),
+            workspace,
             revision,
         })
     }
@@ -526,7 +606,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("failed to create {}", args.blobs_dir.display()))?;
     std::fs::create_dir_all(&args.workspaces_dir)
         .with_context(|| format!("failed to create {}", args.workspaces_dir.display()))?;
-    let state = CloudApiState::new(
+    let store = CloudMetadataStore::open(args.db_path.clone())?;
+    store.init_schema()?;
+    let persisted = store.load_all()?;
+    let state = CloudApiState::from_persisted(
         args.blobs_dir.clone(),
         args.workspaces_dir.clone(),
         CloudAnalysisConfig {
@@ -534,7 +617,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
             analysis_timeout_seconds: args.analysis_timeout_seconds,
             lsp_file_timeout_seconds: args.lsp_file_timeout_seconds,
         },
-    );
+        store,
+        persisted,
+    )?;
     let app = Router::new()
         .route("/api/health", get(health))
         .route(
@@ -671,6 +756,28 @@ fn is_terminal(status: AnalysisJobStatus) -> bool {
         status,
         AnalysisJobStatus::Completed | AnalysisJobStatus::Failed | AnalysisJobStatus::Cancelled
     )
+}
+
+fn is_running_status(status: AnalysisJobStatus) -> bool {
+    matches!(
+        status,
+        AnalysisJobStatus::Preparing
+            | AnalysisJobStatus::Indexing
+            | AnalysisJobStatus::RunningAnalyzers
+            | AnalysisJobStatus::BuildingGraph
+    )
+}
+
+fn recover_running_jobs(jobs: &mut HashMap<String, AnalysisJob>) {
+    for job in jobs.values_mut() {
+        if is_running_status(job.status) {
+            job.status = AnalysisJobStatus::Failed;
+            job.message = Some("Cloud analysis failed".into());
+            job.progress = None;
+            job.finished_at = Some(timestamp());
+            job.error = Some("cloud-api restarted while job was running".into());
+        }
+    }
 }
 
 async fn create_workspace(
@@ -971,11 +1078,20 @@ async fn run_parser_cloud_analysis_inner(
         snapshot: snapshot.clone(),
         created_at: timestamp(),
     };
-    state.analysis_usage.write().insert(job_id.clone(), usage);
+    state
+        .analysis_usage
+        .write()
+        .insert(job_id.clone(), usage.clone());
     state
         .analysis_results
         .write()
-        .insert(job_id.clone(), result);
+        .insert(job_id.clone(), result.clone());
+    if let Err(error) = state.store.save_usage(&usage) {
+        warn!(job_id = %job_id, %error, "failed to persist cloud analysis usage");
+    }
+    if let Err(error) = state.store.save_analysis_result(&result) {
+        warn!(job_id = %job_id, %error, "failed to persist cloud analysis result");
+    }
     state.set_job_analyzer_statuses(&job_id, snapshot.status.analyzers.clone());
     state.complete_job(&job_id, &snapshot, credits_used);
     Ok(snapshot)
@@ -1186,11 +1302,7 @@ mod tests {
     };
 
     fn test_state() -> CloudApiState {
-        test_state_with_config(CloudAnalysisConfig {
-            rust_analyzer: PathBuf::from("rust-analyzer"),
-            analysis_timeout_seconds: 120,
-            lsp_file_timeout_seconds: 3,
-        })
+        test_state_with_config(test_analysis_config())
     }
 
     fn test_state_with_config(analysis_config: CloudAnalysisConfig) -> CloudApiState {
@@ -1199,7 +1311,9 @@ mod tests {
         let workspaces_dir = root.join("workspaces");
         std::fs::create_dir_all(&blobs_dir).unwrap();
         std::fs::create_dir_all(&workspaces_dir).unwrap();
-        CloudApiState::new(blobs_dir, workspaces_dir, analysis_config)
+        let store = CloudMetadataStore::open(root.join("cloud-api.sqlite")).unwrap();
+        store.init_schema().unwrap();
+        CloudApiState::new(blobs_dir, workspaces_dir, analysis_config, store).unwrap()
     }
 
     fn local_request() -> CreateAnalysisJobRequest {
@@ -1272,6 +1386,14 @@ mod tests {
             credits_estimated: None,
             credits_used: None,
             error: None,
+        }
+    }
+
+    fn test_analysis_config() -> CloudAnalysisConfig {
+        CloudAnalysisConfig {
+            rust_analyzer: PathBuf::from("rust-analyzer"),
+            analysis_timeout_seconds: 120,
+            lsp_file_timeout_seconds: 3,
         }
     }
 
@@ -1362,6 +1484,42 @@ mod tests {
 
         assert!(state.get_job("missing").is_none());
         assert!(state.cancel_job("missing").is_none());
+    }
+
+    #[test]
+    fn running_jobs_are_marked_failed_on_state_hydration() {
+        let root = std::env::temp_dir().join(format!(
+            "rust-watcher-cloud-api-recovery-{}",
+            Uuid::new_v4()
+        ));
+        let blobs_dir = root.join("blobs");
+        let workspaces_dir = root.join("workspaces");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        std::fs::create_dir_all(&workspaces_dir).unwrap();
+        let store = CloudMetadataStore::open(root.join("cloud-api.sqlite")).unwrap();
+        store.init_schema().unwrap();
+        let running_job = terminal_job(AnalysisJobStatus::RunningAnalyzers);
+        let job_id = running_job.id.clone();
+        store
+            .save_job(&running_job, Some("workspace_1"), Some("revision_1"))
+            .unwrap();
+        let persisted = store.load_all().unwrap();
+
+        let state = CloudApiState::from_persisted(
+            blobs_dir,
+            workspaces_dir,
+            test_analysis_config(),
+            store,
+            persisted,
+        )
+        .unwrap();
+        let job = state.get_job(&job_id).unwrap();
+
+        assert_eq!(job.status, AnalysisJobStatus::Failed);
+        assert!(job
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("restarted")));
     }
 
     #[test]
