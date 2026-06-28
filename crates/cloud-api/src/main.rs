@@ -14,6 +14,8 @@ use graph_core::{
     WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
 };
 use parking_lot::RwLock;
+use project_indexer::ProjectIndex;
+use ra_client::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -50,6 +53,12 @@ struct ServeArgs {
     blobs_dir: PathBuf,
     #[arg(long, default_value = ".rust-watcher-cloud/workspaces")]
     workspaces_dir: PathBuf,
+    #[arg(long, default_value = "rust-analyzer")]
+    rust_analyzer: PathBuf,
+    #[arg(long, default_value_t = 120)]
+    analysis_timeout_seconds: u64,
+    #[arg(long, default_value_t = 3)]
+    lsp_file_timeout_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -63,6 +72,14 @@ struct CloudApiState {
     analysis_usage: Arc<RwLock<HashMap<String, CloudAnalysisUsage>>>,
     blobs_dir: Arc<PathBuf>,
     workspaces_dir: Arc<PathBuf>,
+    analysis_config: Arc<CloudAnalysisConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct CloudAnalysisConfig {
+    rust_analyzer: PathBuf,
+    analysis_timeout_seconds: u64,
+    lsp_file_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +114,11 @@ enum ApiError {
 }
 
 impl CloudApiState {
-    fn new(blobs_dir: PathBuf, workspaces_dir: PathBuf) -> Self {
+    fn new(
+        blobs_dir: PathBuf,
+        workspaces_dir: PathBuf,
+        analysis_config: CloudAnalysisConfig,
+    ) -> Self {
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             job_revision_targets: Arc::new(RwLock::new(HashMap::new())),
@@ -108,6 +129,7 @@ impl CloudApiState {
             analysis_usage: Arc::new(RwLock::new(HashMap::new())),
             blobs_dir: Arc::new(blobs_dir),
             workspaces_dir: Arc::new(workspaces_dir),
+            analysis_config: Arc::new(analysis_config),
         }
     }
 
@@ -206,6 +228,17 @@ impl CloudApiState {
         Some(job.clone())
     }
 
+    fn set_job_analyzer_statuses(
+        &self,
+        id: &str,
+        analyzer_statuses: Vec<AnalyzerServiceStatus>,
+    ) -> Option<AnalysisJob> {
+        let mut jobs = self.jobs.write();
+        let job = jobs.get_mut(id)?;
+        job.analyzer_statuses = analyzer_statuses;
+        Some(job.clone())
+    }
+
     fn complete_job(
         &self,
         id: &str,
@@ -219,19 +252,30 @@ impl CloudApiState {
         job.progress = Some(100);
         job.finished_at = Some(timestamp());
         job.error = None;
-        job.analyzer_statuses = parser_analyzer_statuses(snapshot);
+        if job.analyzer_statuses.is_empty() {
+            job.analyzer_statuses = parser_analyzer_statuses(snapshot);
+        }
         job.credits_used = Some(credits_used);
         Some(job.clone())
     }
 
     fn fail_job(&self, id: &str, error: impl Into<String>) -> Option<AnalysisJob> {
+        let error = error.into();
         let mut jobs = self.jobs.write();
         let job = jobs.get_mut(id)?;
+        if requests_rust_analyzer(job) {
+            job.analyzer_statuses = vec![rust_analyzer_status(
+                AnalyzerStatus::Error,
+                Some(error.clone()),
+                0,
+                None,
+            )];
+        }
         job.status = AnalysisJobStatus::Failed;
         job.message = Some("Cloud analysis failed".into());
         job.progress = None;
         job.finished_at = Some(timestamp());
-        job.error = Some(error.into());
+        job.error = Some(error);
         Some(job.clone())
     }
 
@@ -496,7 +540,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("failed to create {}", args.blobs_dir.display()))?;
     std::fs::create_dir_all(&args.workspaces_dir)
         .with_context(|| format!("failed to create {}", args.workspaces_dir.display()))?;
-    let state = CloudApiState::new(args.blobs_dir.clone(), args.workspaces_dir.clone());
+    let state = CloudApiState::new(
+        args.blobs_dir.clone(),
+        args.workspaces_dir.clone(),
+        CloudAnalysisConfig {
+            rust_analyzer: args.rust_analyzer.clone(),
+            analysis_timeout_seconds: args.analysis_timeout_seconds,
+            lsp_file_timeout_seconds: args.lsp_file_timeout_seconds,
+        },
+    );
     let app = Router::new()
         .route("/api/health", get(health))
         .route(
@@ -800,8 +852,23 @@ fn materialized_child_path(root: &Path, relative_path: &str) -> Result<PathBuf> 
 }
 
 async fn run_parser_cloud_analysis(state: CloudApiState, job_id: String) {
-    if let Err(error) = run_parser_cloud_analysis_inner(state.clone(), job_id.clone()).await {
-        state.fail_job(&job_id, error.to_string());
+    let timeout_seconds = state.analysis_config.analysis_timeout_seconds;
+    let result = timeout(
+        Duration::from_secs(timeout_seconds),
+        run_parser_cloud_analysis_inner(state.clone(), job_id.clone()),
+    )
+    .await;
+    match result {
+        Ok(Ok(_snapshot)) => {}
+        Ok(Err(error)) => {
+            state.fail_job(&job_id, error.to_string());
+        }
+        Err(_) => {
+            state.fail_job(
+                &job_id,
+                format!("cloud analysis timed out after {timeout_seconds}s"),
+            );
+        }
     }
 }
 
@@ -842,7 +909,26 @@ async fn run_parser_cloud_analysis_inner(
         Some(35),
     );
     let graph_build_start = Instant::now();
-    let mut snapshot = build_parser_snapshot(&project_root);
+    let (mut snapshot, project_index) = build_initial_snapshot(&project_root);
+    let rust_analyzer_requested = requested_analyzers.contains(&AnalyzerEngine::RustAnalyzer);
+    if rust_analyzer_requested {
+        state.set_job_analyzer_statuses(
+            &job_id,
+            cloud_analyzer_statuses(
+                &snapshot,
+                Some(rust_analyzer_status(
+                    AnalyzerStatus::Starting,
+                    Some("Starting cloud rust-analyzer".into()),
+                    0,
+                    None,
+                )),
+            ),
+        );
+        let Some(project_index) = project_index.as_ref() else {
+            anyhow::bail!("rust-analyzer requires a Cargo project for cloud semantic analysis");
+        };
+        enrich_with_cloud_rust_analyzer(&state, &job_id, &mut snapshot, project_index).await?;
+    }
     let graph_build_ms = elapsed_ms(graph_build_start.elapsed());
 
     state.update_job_status(
@@ -853,8 +939,24 @@ async fn run_parser_cloud_analysis_inner(
     );
     snapshot.status.app_state = AppState::Normal;
     snapshot.status.analyzer_status = AnalyzerStatus::Ready;
-    snapshot.status.analyzers = parser_analyzer_statuses(&snapshot);
-    snapshot.status.message = Some("Cloud parser analysis completed".into());
+    snapshot.status.analyzers = if rust_analyzer_requested {
+        cloud_analyzer_statuses(
+            &snapshot,
+            Some(rust_analyzer_status(
+                AnalyzerStatus::Ready,
+                Some("Cloud rust-analyzer completed".into()),
+                rust_file_count(project_index.as_ref()),
+                Some(credits_estimated),
+            )),
+        )
+    } else {
+        parser_analyzer_statuses(&snapshot)
+    };
+    snapshot.status.message = Some(if rust_analyzer_requested {
+        "Cloud rust-analyzer analysis completed".into()
+    } else {
+        "Cloud parser analysis completed".into()
+    });
     snapshot.status.progress = Some(100);
     snapshot.status.last_updated = Some(timestamp());
 
@@ -888,11 +990,12 @@ async fn run_parser_cloud_analysis_inner(
         .analysis_results
         .write()
         .insert(job_id.clone(), result);
+    state.set_job_analyzer_statuses(&job_id, snapshot.status.analyzers.clone());
     state.complete_job(&job_id, &snapshot, credits_used);
     Ok(snapshot)
 }
 
-fn build_parser_snapshot(project_root: &Path) -> GraphSnapshot {
+fn build_initial_snapshot(project_root: &Path) -> (GraphSnapshot, Option<ProjectIndex>) {
     let status = AppStatus {
         app_state: AppState::Indexing,
         analyzer_status: AnalyzerStatus::Indexing,
@@ -906,14 +1009,132 @@ fn build_parser_snapshot(project_root: &Path) -> GraphSnapshot {
     };
     if project_root.join("Cargo.toml").is_file() {
         if let Ok(index) = project_indexer::index_project(project_root) {
-            return graph_builder::build_fallback_graph(&index, status);
+            let snapshot = graph_builder::build_fallback_graph(&index, status);
+            return (snapshot, Some(index));
         }
     }
-    graph_builder::build_language_graph(project_root, status)
+    (
+        graph_builder::build_language_graph(project_root, status),
+        None,
+    )
+}
+
+async fn enrich_with_cloud_rust_analyzer(
+    state: &CloudApiState,
+    job_id: &str,
+    snapshot: &mut GraphSnapshot,
+    index: &ProjectIndex,
+) -> Result<()> {
+    let runtime = LspRuntime::new(LspRuntimeConfig {
+        analyzer_id: "rust-analyzer",
+        process_name: "rust-analyzer",
+        default_language_id: "rust",
+        binary: state.analysis_config.rust_analyzer.clone(),
+        args: Vec::new(),
+        mode: LspRuntimeMode::Required,
+        fallback_message: "rust-analyzer unavailable in cloud worker.",
+        resolver: cloud_binary_resolver,
+        root: index.root.clone(),
+    });
+    let rust_files = index
+        .files
+        .iter()
+        .filter(|file| file.absolute_path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect::<Vec<_>>();
+    state.set_job_analyzer_statuses(
+        job_id,
+        cloud_analyzer_statuses(
+            snapshot,
+            Some(rust_analyzer_status(
+                AnalyzerStatus::Indexing,
+                Some(format!("Indexing {} Rust files", rust_files.len())),
+                0,
+                None,
+            )),
+        ),
+    );
+
+    let mut enriched_files = 0u32;
+    let mut warnings = Vec::new();
+    for file in rust_files {
+        let symbols = match timeout(
+            Duration::from_secs(state.analysis_config.lsp_file_timeout_seconds),
+            runtime.document_symbols(&file.absolute_path, Some("rust")),
+        )
+        .await
+        {
+            Ok(Ok(symbols)) => symbols,
+            Ok(Err(error)) if runtime.status() == ra_client::LspRuntimeStatus::Error => {
+                anyhow::bail!("rust-analyzer unavailable in cloud worker: {error}");
+            }
+            Ok(Err(error)) => {
+                warnings.push(format!("{}: {error}", file.relative_path));
+                continue;
+            }
+            Err(_) => {
+                warnings.push(format!("{}: rust-analyzer timed out", file.relative_path));
+                continue;
+            }
+        };
+        graph_builder::enrich_file_symbols(snapshot, file, &symbols);
+        enriched_files += 1;
+    }
+
+    let message = if warnings.is_empty() {
+        "Cloud rust-analyzer completed".to_string()
+    } else {
+        format!(
+            "Cloud rust-analyzer completed with {} file warnings",
+            warnings.len()
+        )
+    };
+    state.set_job_analyzer_statuses(
+        job_id,
+        cloud_analyzer_statuses(
+            snapshot,
+            Some(rust_analyzer_status(
+                AnalyzerStatus::Ready,
+                Some(message),
+                enriched_files,
+                None,
+            )),
+        ),
+    );
+    Ok(())
+}
+
+fn cloud_binary_resolver(configured: &Path, _root: &Path) -> PathBuf {
+    configured.to_path_buf()
+}
+
+fn requests_rust_analyzer(job: &AnalysisJob) -> bool {
+    job.requested_analyzers
+        .contains(&AnalyzerEngine::RustAnalyzer)
+}
+
+fn rust_file_count(index: Option<&ProjectIndex>) -> u32 {
+    index
+        .map(|index| {
+            index
+                .files
+                .iter()
+                .filter(|file| {
+                    file.absolute_path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+                })
+                .count() as u32
+        })
+        .unwrap_or_default()
 }
 
 fn parser_analyzer_statuses(snapshot: &GraphSnapshot) -> Vec<AnalyzerServiceStatus> {
-    vec![AnalyzerServiceStatus {
+    cloud_analyzer_statuses(snapshot, None)
+}
+
+fn cloud_analyzer_statuses(
+    snapshot: &GraphSnapshot,
+    rust_analyzer: Option<AnalyzerServiceStatus>,
+) -> Vec<AnalyzerServiceStatus> {
+    let mut statuses = vec![AnalyzerServiceStatus {
         id: "cloud-parser".into(),
         kind: AnalyzerKind::Other,
         engine: AnalyzerEngine::Parser,
@@ -927,7 +1148,34 @@ fn parser_analyzer_statuses(snapshot: &GraphSnapshot) -> Vec<AnalyzerServiceStat
         provider: AnalyzerProvider::Cloud,
         billable: false,
         credits_used: None,
-    }]
+    }];
+    if let Some(rust_analyzer) = rust_analyzer {
+        statuses.push(rust_analyzer);
+    }
+    statuses
+}
+
+fn rust_analyzer_status(
+    status: AnalyzerStatus,
+    message: Option<String>,
+    files_indexed: u32,
+    credits_used: Option<u32>,
+) -> AnalyzerServiceStatus {
+    AnalyzerServiceStatus {
+        id: "rust-analyzer".into(),
+        kind: AnalyzerKind::Rust,
+        engine: AnalyzerEngine::RustAnalyzer,
+        label: "rust-analyzer".into(),
+        status,
+        mode: Some("cloud".into()),
+        message,
+        capabilities: vec![AnalyzerCapability::Symbols],
+        files_indexed,
+        last_updated: Some(timestamp()),
+        provider: AnalyzerProvider::Cloud,
+        billable: true,
+        credits_used,
+    }
 }
 
 fn elapsed_ms(duration: Duration) -> u64 {
@@ -952,12 +1200,20 @@ mod tests {
     };
 
     fn test_state() -> CloudApiState {
+        test_state_with_config(CloudAnalysisConfig {
+            rust_analyzer: PathBuf::from("rust-analyzer"),
+            analysis_timeout_seconds: 120,
+            lsp_file_timeout_seconds: 3,
+        })
+    }
+
+    fn test_state_with_config(analysis_config: CloudAnalysisConfig) -> CloudApiState {
         let root = std::env::temp_dir().join(format!("rust-watcher-cloud-api-{}", Uuid::new_v4()));
         let blobs_dir = root.join("blobs");
         let workspaces_dir = root.join("workspaces");
         std::fs::create_dir_all(&blobs_dir).unwrap();
         std::fs::create_dir_all(&workspaces_dir).unwrap();
-        CloudApiState::new(blobs_dir, workspaces_dir)
+        CloudApiState::new(blobs_dir, workspaces_dir, analysis_config)
     }
 
     fn local_request() -> CreateAnalysisJobRequest {
@@ -1031,6 +1287,34 @@ mod tests {
             credits_used: None,
             error: None,
         }
+    }
+
+    fn cargo_toml() -> &'static [u8] {
+        b"[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+    }
+
+    fn create_rust_revision(state: &CloudApiState) -> (CloudWorkspace, WorkspaceRevision) {
+        let workspace = state.create_workspace(workspace_request());
+        let cargo = file_entry_at("Cargo.toml", cargo_toml());
+        let main_content = b"fn main() {}";
+        let main = file_entry_at("src/main.rs", main_content);
+        state
+            .upload_blob(&workspace.id, &cargo.content_hash, cargo_toml())
+            .unwrap();
+        state
+            .upload_blob(&workspace.id, &main.content_hash, main_content)
+            .unwrap();
+        let revision = state
+            .create_revision(
+                &workspace.id,
+                CreateWorkspaceRevisionRequest {
+                    base_revision: None,
+                    files: vec![cargo, main],
+                },
+            )
+            .unwrap()
+            .revision;
+        (workspace, revision)
     }
 
     #[test]
@@ -1383,6 +1667,45 @@ mod tests {
         assert_eq!(error, ApiError::NotFound("revision not found".into()));
     }
 
+    #[test]
+    fn request_detection_identifies_rust_analyzer_jobs() {
+        let mut job = terminal_job(AnalysisJobStatus::Queued);
+        job.requested_analyzers = Vec::new();
+        assert!(!requests_rust_analyzer(&job));
+
+        job.requested_analyzers = vec![AnalyzerEngine::RustAnalyzer];
+        assert!(requests_rust_analyzer(&job));
+    }
+
+    #[test]
+    fn rust_analyzer_job_estimates_more_credits_than_parser_only() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+
+        let parser_job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id.clone()),
+                revision_id: Some(revision.id.clone()),
+                project_name: None,
+            })
+            .unwrap();
+        let rust_analyzer_job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+
+        assert!(
+            rust_analyzer_job.credits_estimated.unwrap() > parser_job.credits_estimated.unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn parser_cloud_job_completes_and_stores_snapshot() {
         let state = test_state();
@@ -1436,6 +1759,43 @@ mod tests {
         assert_eq!(usage.output_files, result.snapshot.files.len() as u32);
         assert_eq!(usage.credits_used, usage.credits_estimated);
         assert_eq!(updated.credits_used, Some(usage.credits_used));
+    }
+
+    #[tokio::test]
+    async fn unavailable_rust_analyzer_fails_requested_job() {
+        let state = test_state_with_config(CloudAnalysisConfig {
+            rust_analyzer: PathBuf::from("/path/that/does/not/exist/rust-analyzer"),
+            analysis_timeout_seconds: 120,
+            lsp_file_timeout_seconds: 1,
+        });
+        let (workspace, revision) = create_rust_revision(&state);
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+
+        run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+        let updated = state.get_job(&job.id).unwrap();
+        assert_eq!(updated.status, AnalysisJobStatus::Failed);
+        assert!(updated
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("rust-analyzer")));
+        let status = updated
+            .analyzer_statuses
+            .iter()
+            .find(|status| status.engine == AnalyzerEngine::RustAnalyzer)
+            .expect("rust-analyzer status");
+        assert_eq!(status.provider, AnalyzerProvider::Cloud);
+        assert!(status.billable);
+        assert_eq!(status.engine, AnalyzerEngine::RustAnalyzer);
+        assert_eq!(status.status, AnalyzerStatus::Error);
     }
 
     #[tokio::test]

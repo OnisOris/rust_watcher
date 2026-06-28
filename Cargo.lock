@@ -305,6 +305,7 @@ dependencies = [
  "graph-core",
  "parking_lot",
  "project-indexer",
+ "ra-client",
  "serde",
  "serde_json",
  "sha2",

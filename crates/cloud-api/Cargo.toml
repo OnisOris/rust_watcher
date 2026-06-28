@@ -12,6 +12,7 @@ graph-core = { path = "../graph-core" }
 graph-builder = { path = "../graph-builder" }
 parking_lot.workspace = true
 project-indexer = { path = "../project-indexer" }
+ra-client = { path = "../ra-client" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
