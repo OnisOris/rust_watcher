@@ -18,12 +18,13 @@ use project_indexer::ProjectIndex;
 use ra_client::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -64,6 +65,10 @@ struct ServeArgs {
     analysis_timeout_seconds: u64,
     #[arg(long, default_value_t = 3)]
     lsp_file_timeout_seconds: u64,
+    #[arg(long, default_value_t = 2)]
+    max_concurrent_jobs: usize,
+    #[arg(long, default_value_t = 100)]
+    max_queued_jobs: usize,
 }
 
 #[derive(Clone)]
@@ -78,6 +83,7 @@ struct CloudApiState {
     blobs_dir: Arc<PathBuf>,
     workspaces_dir: Arc<PathBuf>,
     analysis_config: Arc<CloudAnalysisConfig>,
+    scheduler: JobScheduler,
     store: Arc<CloudMetadataStore>,
 }
 
@@ -86,6 +92,105 @@ struct CloudAnalysisConfig {
     rust_analyzer: PathBuf,
     analysis_timeout_seconds: u64,
     lsp_file_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JobSchedulerConfig {
+    max_concurrent_jobs: usize,
+    max_queued_jobs: usize,
+}
+
+impl JobSchedulerConfig {
+    fn new(max_concurrent_jobs: usize, max_queued_jobs: usize) -> Result<Self> {
+        if max_concurrent_jobs == 0 {
+            anyhow::bail!("max-concurrent-jobs must be at least 1");
+        }
+        if max_queued_jobs == 0 {
+            anyhow::bail!("max-queued-jobs must be at least 1");
+        }
+        Ok(Self {
+            max_concurrent_jobs,
+            max_queued_jobs,
+        })
+    }
+}
+
+impl Default for JobSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_jobs: 2,
+            max_queued_jobs: 100,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct JobScheduler {
+    queue: Arc<RwLock<VecDeque<String>>>,
+    running: Arc<RwLock<HashSet<String>>>,
+    notify: Arc<Notify>,
+    config: JobSchedulerConfig,
+}
+
+impl JobScheduler {
+    fn new(config: JobSchedulerConfig) -> Self {
+        Self {
+            queue: Arc::new(RwLock::new(VecDeque::new())),
+            running: Arc::new(RwLock::new(HashSet::new())),
+            notify: Arc::new(Notify::new()),
+            config,
+        }
+    }
+
+    fn enqueue(&self, job_id: String) -> Result<(), ApiError> {
+        {
+            let running = self.running.read();
+            if running.contains(&job_id) {
+                return Ok(());
+            }
+        }
+        let mut queue = self.queue.write();
+        if queue.iter().any(|queued_id| queued_id == &job_id) {
+            return Ok(());
+        }
+        if queue.len() >= self.config.max_queued_jobs {
+            return Err(ApiError::TooManyRequests("analysis queue is full".into()));
+        }
+        queue.push_back(job_id);
+        drop(queue);
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    fn pop_next(&self) -> Option<String> {
+        self.queue.write().pop_front()
+    }
+
+    fn mark_running(&self, job_id: String) {
+        self.running.write().insert(job_id);
+    }
+
+    fn finish_running(&self, job_id: &str) {
+        self.running.write().remove(job_id);
+    }
+
+    fn is_running(&self, job_id: &str) -> bool {
+        self.running.read().contains(job_id)
+    }
+
+    fn status(&self) -> AnalysisQueueStatusResponse {
+        let queued_job_ids = self.queue.read().iter().cloned().collect::<Vec<_>>();
+        let mut running_job_ids = self.running.read().iter().cloned().collect::<Vec<_>>();
+        running_job_ids.sort();
+        AnalysisQueueStatusResponse {
+            queued_jobs: queued_job_ids.len(),
+            running_jobs: running_job_ids.len(),
+            max_concurrent_jobs: self.config.max_concurrent_jobs,
+            max_queued_jobs: self.config.max_queued_jobs,
+            queued_job_ids,
+            running_job_ids,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -117,29 +222,17 @@ struct StoredBlob {
 enum ApiError {
     NotFound(String),
     BadRequest(String),
+    Conflict(String),
+    TooManyRequests(String),
 }
 
 impl CloudApiState {
-    fn new(
-        blobs_dir: PathBuf,
-        workspaces_dir: PathBuf,
-        analysis_config: CloudAnalysisConfig,
-        store: CloudMetadataStore,
-    ) -> Result<Self> {
-        Self::from_persisted(
-            blobs_dir,
-            workspaces_dir,
-            analysis_config,
-            store,
-            PersistedCloudState::default(),
-        )
-    }
-
     fn from_persisted(
         blobs_dir: PathBuf,
         workspaces_dir: PathBuf,
         analysis_config: CloudAnalysisConfig,
         store: CloudMetadataStore,
+        scheduler_config: JobSchedulerConfig,
         persisted: PersistedCloudState,
     ) -> Result<Self> {
         let mut jobs = persisted.jobs;
@@ -152,7 +245,7 @@ impl CloudApiState {
                 target.map(|target| target.revision_id.as_str()),
             )?;
         }
-        Ok(Self {
+        let state = Self {
             jobs: Arc::new(RwLock::new(jobs)),
             job_revision_targets: Arc::new(RwLock::new(persisted.job_revision_targets)),
             workspaces: Arc::new(RwLock::new(persisted.workspaces)),
@@ -163,8 +256,11 @@ impl CloudApiState {
             blobs_dir: Arc::new(blobs_dir),
             workspaces_dir: Arc::new(workspaces_dir),
             analysis_config: Arc::new(analysis_config),
+            scheduler: JobScheduler::new(scheduler_config),
             store: Arc::new(store),
-        })
+        };
+        state.requeue_persisted_jobs();
+        Ok(state)
     }
 
     fn create_job(&self, request: CreateAnalysisJobRequest) -> Result<AnalysisJob, ApiError> {
@@ -237,12 +333,79 @@ impl CloudApiState {
         Ok(job)
     }
 
+    fn create_job_for_request(
+        &self,
+        request: CreateAnalysisJobRequest,
+    ) -> Result<AnalysisJob, ApiError> {
+        let should_queue = request.workspace_id.is_some() && request.revision_id.is_some();
+        if !should_queue {
+            return self.create_job(request);
+        }
+        let mut queue = self.scheduler.queue.write();
+        if queue.len() >= self.scheduler.config.max_queued_jobs {
+            return Err(ApiError::TooManyRequests("analysis queue is full".into()));
+        }
+        let job = self.create_job(request)?;
+        queue.push_back(job.id.clone());
+        drop(queue);
+        self.scheduler.notify.notify_one();
+        Ok(job)
+    }
+
     fn get_job(&self, id: &str) -> Option<AnalysisJob> {
         self.jobs.read().get(id).cloned()
     }
 
     fn get_job_revision_target(&self, id: &str) -> Option<JobRevisionTarget> {
         self.job_revision_targets.read().get(id).cloned()
+    }
+
+    fn has_valid_revision_target(&self, id: &str) -> bool {
+        self.get_job_revision_target(id)
+            .and_then(|target| self.get_revision(&target.workspace_id, &target.revision_id))
+            .is_some()
+    }
+
+    fn enqueue_analysis_job(&self, id: &str) -> Result<(), ApiError> {
+        self.scheduler.enqueue(id.to_string())
+    }
+
+    fn queue_status(&self) -> AnalysisQueueStatusResponse {
+        self.scheduler.status()
+    }
+
+    fn requeue_persisted_jobs(&self) {
+        let queued_job_ids = self
+            .jobs
+            .read()
+            .values()
+            .filter(|job| job.status == AnalysisJobStatus::Queued)
+            .filter(|job| self.has_valid_revision_target(&job.id))
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
+        for job_id in queued_job_ids {
+            if let Err(error) = self.enqueue_analysis_job(&job_id) {
+                warn!(%job_id, ?error, "failed to requeue persisted cloud analysis job");
+            }
+        }
+    }
+
+    fn should_run_dequeued_job(&self, id: &str) -> bool {
+        let Some(job) = self.get_job(id) else {
+            return false;
+        };
+        if job.status != AnalysisJobStatus::Queued {
+            return false;
+        }
+        if self.get_job_revision_target(id).is_none() {
+            self.fail_job(id, "job is not linked to a workspace revision");
+            return false;
+        }
+        if !self.has_valid_revision_target(id) {
+            self.fail_job(id, "workspace revision target not found");
+            return false;
+        }
+        true
     }
 
     fn update_job_status(
@@ -376,18 +539,26 @@ impl CloudApiState {
         jobs
     }
 
-    fn cancel_job(&self, id: &str) -> Option<AnalysisJob> {
+    fn cancel_job(&self, id: &str) -> Result<Option<AnalysisJob>, ApiError> {
+        if self.scheduler.is_running(id) {
+            return Err(ApiError::Conflict(
+                "running job cancellation is not supported yet".into(),
+            ));
+        }
         let job = {
             let mut jobs = self.jobs.write();
-            let job = jobs.get_mut(id)?;
+            let Some(job) = jobs.get_mut(id) else {
+                return Ok(None);
+            };
             if !is_terminal(job.status) {
                 job.status = AnalysisJobStatus::Cancelled;
                 job.message = Some("Cancelled".into());
+                job.finished_at = Some(timestamp());
             }
             job.clone()
         };
         self.persist_job(&job);
-        Some(job)
+        Ok(Some(job))
     }
 
     fn create_workspace(&self, request: CreateWorkspaceRequest) -> CloudWorkspace {
@@ -567,6 +738,17 @@ struct ListAnalysisJobsResponse {
     jobs: Vec<AnalysisJob>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisQueueStatusResponse {
+    queued_jobs: usize,
+    running_jobs: usize,
+    max_concurrent_jobs: usize,
+    max_queued_jobs: usize,
+    queued_job_ids: Vec<String>,
+    running_job_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageSummaryResponse {
@@ -602,6 +784,7 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
+    let scheduler_config = JobSchedulerConfig::new(args.max_concurrent_jobs, args.max_queued_jobs)?;
     std::fs::create_dir_all(&args.blobs_dir)
         .with_context(|| format!("failed to create {}", args.blobs_dir.display()))?;
     std::fs::create_dir_all(&args.workspaces_dir)
@@ -618,8 +801,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
             lsp_file_timeout_seconds: args.lsp_file_timeout_seconds,
         },
         store,
+        scheduler_config,
         persisted,
     )?;
+    start_analysis_workers(state.clone());
     let app = Router::new()
         .route("/api/health", get(health))
         .route(
@@ -642,6 +827,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/analysis/jobs/{id}/snapshot", get(get_job_snapshot))
         .route("/api/analysis/jobs/{id}/usage", get(get_job_usage))
         .route("/api/analysis/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/analysis/queue", get(get_analysis_queue))
         .route("/api/usage/summary", get(usage_summary))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -670,13 +856,8 @@ async fn create_job(
     State(state): State<CloudApiState>,
     Json(request): Json<CreateAnalysisJobRequest>,
 ) -> impl IntoResponse {
-    match state.create_job(request) {
-        Ok(job) => {
-            if state.get_job_revision_target(&job.id).is_some() {
-                tokio::spawn(run_parser_cloud_analysis(state.clone(), job.id.clone()));
-            }
-            (StatusCode::CREATED, Json(job)).into_response()
-        }
+    match state.create_job_for_request(request) {
+        Ok(job) => (StatusCode::CREATED, Json(job)).into_response(),
         Err(error) => error.into_response(),
     }
 }
@@ -741,13 +922,20 @@ async fn usage_summary(State(state): State<CloudApiState>) -> Json<UsageSummaryR
     Json(state.usage_summary())
 }
 
+async fn get_analysis_queue(
+    State(state): State<CloudApiState>,
+) -> Json<AnalysisQueueStatusResponse> {
+    Json(state.queue_status())
+}
+
 async fn cancel_job(
     State(state): State<CloudApiState>,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     match state.cancel_job(&id) {
-        Some(job) => Json(job).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        Ok(Some(job)) => Json(job).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -851,6 +1039,10 @@ impl IntoResponse for ApiError {
         match self {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message).into_response(),
+            Self::TooManyRequests(message) => {
+                (StatusCode::TOO_MANY_REQUESTS, message).into_response()
+            }
         }
     }
 }
@@ -944,11 +1136,44 @@ fn materialized_child_path(root: &Path, relative_path: &str) -> Result<PathBuf> 
     Ok(target)
 }
 
+fn start_analysis_workers(state: CloudApiState) {
+    for worker_index in 0..state.scheduler.config.max_concurrent_jobs {
+        let worker_state = state.clone();
+        tokio::spawn(async move {
+            analysis_worker_loop(worker_state, worker_index).await;
+        });
+    }
+}
+
+async fn analysis_worker_loop(state: CloudApiState, worker_index: usize) {
+    loop {
+        let notified = state.scheduler.notify.notified();
+        if run_one_queued_job(state.clone()).await {
+            continue;
+        }
+        tracing::debug!(worker_index, "cloud analysis worker waiting for queued job");
+        notified.await;
+    }
+}
+
+async fn run_one_queued_job(state: CloudApiState) -> bool {
+    let Some(job_id) = state.scheduler.pop_next() else {
+        return false;
+    };
+    if !state.should_run_dequeued_job(&job_id) {
+        return true;
+    }
+    state.scheduler.mark_running(job_id.clone());
+    run_parser_cloud_analysis(state.clone(), job_id.clone()).await;
+    state.scheduler.finish_running(&job_id);
+    true
+}
+
 async fn run_parser_cloud_analysis(state: CloudApiState, job_id: String) {
     let timeout_seconds = state.analysis_config.analysis_timeout_seconds;
     let result = timeout(
         Duration::from_secs(timeout_seconds),
-        run_parser_cloud_analysis_inner(state.clone(), job_id.clone()),
+        execute_cloud_analysis_job(state.clone(), job_id.clone()),
     )
     .await;
     match result {
@@ -965,10 +1190,7 @@ async fn run_parser_cloud_analysis(state: CloudApiState, job_id: String) {
     }
 }
 
-async fn run_parser_cloud_analysis_inner(
-    state: CloudApiState,
-    job_id: String,
-) -> Result<GraphSnapshot> {
+async fn execute_cloud_analysis_job(state: CloudApiState, job_id: String) -> Result<GraphSnapshot> {
     let total_start = Instant::now();
     let target = state
         .get_job_revision_target(&job_id)
@@ -1005,6 +1227,12 @@ async fn run_parser_cloud_analysis_inner(
     let (mut snapshot, project_index) = build_initial_snapshot(&project_root);
     let rust_analyzer_requested = requested_analyzers.contains(&AnalyzerEngine::RustAnalyzer);
     if rust_analyzer_requested {
+        state.update_job_status(
+            &job_id,
+            AnalysisJobStatus::RunningAnalyzers,
+            "Running cloud analyzers",
+            Some(60),
+        );
         state.set_job_analyzer_statuses(
             &job_id,
             cloud_analyzer_statuses(
@@ -1306,6 +1534,17 @@ mod tests {
     }
 
     fn test_state_with_config(analysis_config: CloudAnalysisConfig) -> CloudApiState {
+        test_state_with_config_and_scheduler_config(analysis_config, JobSchedulerConfig::default())
+    }
+
+    fn test_state_with_scheduler_config(scheduler_config: JobSchedulerConfig) -> CloudApiState {
+        test_state_with_config_and_scheduler_config(test_analysis_config(), scheduler_config)
+    }
+
+    fn test_state_with_config_and_scheduler_config(
+        analysis_config: CloudAnalysisConfig,
+        scheduler_config: JobSchedulerConfig,
+    ) -> CloudApiState {
         let root = std::env::temp_dir().join(format!("rust-watcher-cloud-api-{}", Uuid::new_v4()));
         let blobs_dir = root.join("blobs");
         let workspaces_dir = root.join("workspaces");
@@ -1313,7 +1552,15 @@ mod tests {
         std::fs::create_dir_all(&workspaces_dir).unwrap();
         let store = CloudMetadataStore::open(root.join("cloud-api.sqlite")).unwrap();
         store.init_schema().unwrap();
-        CloudApiState::new(blobs_dir, workspaces_dir, analysis_config, store).unwrap()
+        CloudApiState::from_persisted(
+            blobs_dir,
+            workspaces_dir,
+            analysis_config,
+            store,
+            scheduler_config,
+            PersistedCloudState::default(),
+        )
+        .unwrap()
     }
 
     fn local_request() -> CreateAnalysisJobRequest {
@@ -1425,6 +1672,19 @@ mod tests {
         (workspace, revision)
     }
 
+    fn workspace_job_request(
+        workspace: &CloudWorkspace,
+        revision: &WorkspaceRevision,
+    ) -> CreateAnalysisJobRequest {
+        CreateAnalysisJobRequest {
+            source: None,
+            requested_analyzers: Vec::new(),
+            workspace_id: Some(workspace.id.clone()),
+            revision_id: Some(revision.id.clone()),
+            project_name: None,
+        }
+    }
+
     #[test]
     fn creating_job_stores_queued_job() {
         let state = test_state();
@@ -1452,7 +1712,7 @@ mod tests {
     fn cancelling_queued_job_marks_cancelled() {
         let state = test_state();
         let job = state.create_job(local_request()).unwrap();
-        let cancelled = state.cancel_job(&job.id).unwrap();
+        let cancelled = state.cancel_job(&job.id).unwrap().unwrap();
 
         assert_eq!(cancelled.status, AnalysisJobStatus::Cancelled);
         assert_eq!(cancelled.message.as_deref(), Some("Cancelled"));
@@ -1470,7 +1730,7 @@ mod tests {
             let id = job.id.clone();
             state.jobs.write().insert(id.clone(), job.clone());
 
-            let after_cancel = state.cancel_job(&id).unwrap();
+            let after_cancel = state.cancel_job(&id).unwrap().unwrap();
 
             assert_eq!(after_cancel.status, status);
             assert_eq!(after_cancel.message, job.message);
@@ -1483,7 +1743,7 @@ mod tests {
         let state = test_state();
 
         assert!(state.get_job("missing").is_none());
-        assert!(state.cancel_job("missing").is_none());
+        assert!(state.cancel_job("missing").unwrap().is_none());
     }
 
     #[test]
@@ -1510,6 +1770,7 @@ mod tests {
             workspaces_dir,
             test_analysis_config(),
             store,
+            JobSchedulerConfig::default(),
             persisted,
         )
         .unwrap();
@@ -1791,6 +2052,231 @@ mod tests {
         assert_eq!(job.project_name.as_deref(), Some("demo"));
         assert!(job.credits_estimated.is_some());
         assert_eq!(job.credits_used, None);
+    }
+
+    #[tokio::test]
+    async fn queue_accepts_workspace_revision_job() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+        let job = state
+            .create_job(workspace_job_request(&workspace, &revision))
+            .unwrap();
+
+        state.enqueue_analysis_job(&job.id).unwrap();
+
+        let status = state.queue_status();
+        assert_eq!(status.queued_jobs, 1);
+        assert_eq!(status.running_jobs, 0);
+        assert_eq!(status.queued_job_ids, vec![job.id]);
+    }
+
+    #[tokio::test]
+    async fn queue_full_returns_too_many_requests() {
+        let state =
+            test_state_with_scheduler_config(JobSchedulerConfig::new(1, 1).expect("config"));
+        let (workspace, revision) = create_rust_revision(&state);
+        let first_response = create_job(
+            State(state.clone()),
+            Json(workspace_job_request(&workspace, &revision)),
+        )
+        .await
+        .into_response();
+        let second_response = create_job(
+            State(state.clone()),
+            Json(workspace_job_request(&workspace, &revision)),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(first_response.status(), StatusCode::CREATED);
+        assert_eq!(second_response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(state.list_jobs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_completes_parser_job() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+        let job = state
+            .create_job(workspace_job_request(&workspace, &revision))
+            .unwrap();
+        state.enqueue_analysis_job(&job.id).unwrap();
+
+        assert!(run_one_queued_job(state.clone()).await);
+
+        let updated = state.get_job(&job.id).unwrap();
+        assert_eq!(updated.status, AnalysisJobStatus::Completed);
+        assert_eq!(state.queue_status().queued_jobs, 0);
+        assert_eq!(state.queue_status().running_jobs, 0);
+        assert!(state.analysis_results.read().contains_key(&job.id));
+    }
+
+    #[tokio::test]
+    async fn worker_skips_cancelled_queued_job() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+        let job = state
+            .create_job(workspace_job_request(&workspace, &revision))
+            .unwrap();
+        state.enqueue_analysis_job(&job.id).unwrap();
+        state.cancel_job(&job.id).unwrap().unwrap();
+
+        assert!(run_one_queued_job(state.clone()).await);
+
+        let updated = state.get_job(&job.id).unwrap();
+        assert_eq!(updated.status, AnalysisJobStatus::Cancelled);
+        assert!(!state.analysis_results.read().contains_key(&job.id));
+    }
+
+    #[tokio::test]
+    async fn running_job_cancellation_returns_conflict() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+        let job = state
+            .create_job(workspace_job_request(&workspace, &revision))
+            .unwrap();
+        state.scheduler.mark_running(job.id.clone());
+
+        let response = cancel_job(State(state.clone()), AxumPath(job.id.clone()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state.get_job(&job.id).unwrap().status,
+            AnalysisJobStatus::Queued
+        );
+    }
+
+    #[test]
+    fn startup_requeues_valid_queued_jobs() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-cloud-api-requeue-{}", Uuid::new_v4()));
+        let blobs_dir = root.join("blobs");
+        let workspaces_dir = root.join("workspaces");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        std::fs::create_dir_all(&workspaces_dir).unwrap();
+        let store = CloudMetadataStore::open(root.join("cloud-api.sqlite")).unwrap();
+        store.init_schema().unwrap();
+        let workspace = CloudWorkspace {
+            id: "workspace_1".into(),
+            display_name: "demo".into(),
+            source: None,
+            current_revision: Some("revision_1".into()),
+            files_count: 1,
+            total_bytes: 12,
+            created_at: Some(timestamp()),
+            updated_at: Some(timestamp()),
+        };
+        let revision = WorkspaceRevision {
+            id: "revision_1".into(),
+            workspace_id: workspace.id.clone(),
+            files: vec![file_entry(b"fn main() {}")],
+            files_count: 1,
+            total_bytes: 12,
+            parent_revision: None,
+            created_at: Some(timestamp()),
+        };
+        let queued_job = terminal_job(AnalysisJobStatus::Queued);
+        store.save_workspace(&workspace).unwrap();
+        store.save_revision(&revision).unwrap();
+        store
+            .save_job(&queued_job, Some(&workspace.id), Some(&revision.id))
+            .unwrap();
+        let persisted = store.load_all().unwrap();
+
+        let state = CloudApiState::from_persisted(
+            blobs_dir,
+            workspaces_dir,
+            test_analysis_config(),
+            store,
+            JobSchedulerConfig::default(),
+            persisted,
+        )
+        .unwrap();
+
+        assert_eq!(state.queue_status().queued_job_ids, vec![queued_job.id]);
+    }
+
+    #[test]
+    fn startup_does_not_requeue_recovered_running_jobs() {
+        let root = std::env::temp_dir().join(format!(
+            "rust-watcher-cloud-api-running-recovery-{}",
+            Uuid::new_v4()
+        ));
+        let blobs_dir = root.join("blobs");
+        let workspaces_dir = root.join("workspaces");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        std::fs::create_dir_all(&workspaces_dir).unwrap();
+        let store = CloudMetadataStore::open(root.join("cloud-api.sqlite")).unwrap();
+        store.init_schema().unwrap();
+        let workspace = CloudWorkspace {
+            id: "workspace_1".into(),
+            display_name: "demo".into(),
+            source: None,
+            current_revision: Some("revision_1".into()),
+            files_count: 1,
+            total_bytes: 12,
+            created_at: Some(timestamp()),
+            updated_at: Some(timestamp()),
+        };
+        let revision = WorkspaceRevision {
+            id: "revision_1".into(),
+            workspace_id: workspace.id.clone(),
+            files: vec![file_entry(b"fn main() {}")],
+            files_count: 1,
+            total_bytes: 12,
+            parent_revision: None,
+            created_at: Some(timestamp()),
+        };
+        let running_job = terminal_job(AnalysisJobStatus::RunningAnalyzers);
+        let job_id = running_job.id.clone();
+        store.save_workspace(&workspace).unwrap();
+        store.save_revision(&revision).unwrap();
+        store
+            .save_job(&running_job, Some(&workspace.id), Some(&revision.id))
+            .unwrap();
+        let persisted = store.load_all().unwrap();
+
+        let state = CloudApiState::from_persisted(
+            blobs_dir,
+            workspaces_dir,
+            test_analysis_config(),
+            store,
+            JobSchedulerConfig::default(),
+            persisted,
+        )
+        .unwrap();
+
+        assert_eq!(state.queue_status().queued_jobs, 0);
+        assert_eq!(
+            state.get_job(&job_id).unwrap().status,
+            AnalysisJobStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_respects_single_concurrent_job_limit() {
+        let state =
+            test_state_with_scheduler_config(JobSchedulerConfig::new(1, 10).expect("config"));
+        let (workspace, revision) = create_rust_revision(&state);
+        let first = state
+            .create_job(workspace_job_request(&workspace, &revision))
+            .unwrap();
+        let second = state
+            .create_job(workspace_job_request(&workspace, &revision))
+            .unwrap();
+        state.enqueue_analysis_job(&first.id).unwrap();
+        state.enqueue_analysis_job(&second.id).unwrap();
+
+        let dequeued = state.scheduler.pop_next().unwrap();
+        state.scheduler.mark_running(dequeued.clone());
+        let status = state.queue_status();
+
+        assert_eq!(status.running_jobs, 1);
+        assert_eq!(status.queued_jobs, 1);
+        assert_eq!(status.running_job_ids, vec![dequeued]);
+        assert_eq!(status.queued_job_ids, vec![second.id]);
     }
 
     #[test]
