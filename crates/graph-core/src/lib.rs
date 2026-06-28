@@ -873,6 +873,71 @@ pub struct AnalyzerServiceStatus {
     pub credits_used: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnalysisJobStatus {
+    Queued,
+    Preparing,
+    Indexing,
+    RunningAnalyzers,
+    BuildingGraph,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnalysisJobSourceKind {
+    LocalPath,
+    UploadedArchive,
+    GitRepository,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisJobSource {
+    pub kind: AnalysisJobSourceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisJob {
+    pub id: String,
+    pub status: AnalysisJobStatus,
+    pub source: AnalysisJobSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    pub requested_analyzers: Vec<AnalyzerEngine>,
+    pub analyzer_statuses: Vec<AnalyzerServiceStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits_estimated: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits_used: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PythonAnalyzerStatus {
@@ -1118,5 +1183,94 @@ mod tests {
         assert_eq!(value["provider"], "local");
         assert_eq!(value["billable"], false);
         assert!(value.get("creditsUsed").is_none());
+    }
+
+    #[test]
+    fn analysis_job_status_serializes_as_camel_case() {
+        let value = serde_json::to_value(AnalysisJobStatus::RunningAnalyzers)
+            .expect("serialize job status");
+
+        assert_eq!(value, "runningAnalyzers");
+    }
+
+    #[test]
+    fn analysis_job_source_kind_serializes_as_camel_case() {
+        let value = serde_json::to_value(AnalysisJobSourceKind::UploadedArchive)
+            .expect("serialize source kind");
+
+        assert_eq!(value, "uploadedArchive");
+    }
+
+    #[test]
+    fn analysis_job_serializes_expected_shape() {
+        let job = AnalysisJob {
+            id: "job_1".into(),
+            status: AnalysisJobStatus::Queued,
+            source: AnalysisJobSource {
+                kind: AnalysisJobSourceKind::LocalPath,
+                display_name: None,
+                path: Some("/tmp/project".into()),
+                repository_url: None,
+                git_ref: None,
+                commit_sha: None,
+            },
+            project_name: Some("project".into()),
+            message: None,
+            progress: Some(0),
+            requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
+            analyzer_statuses: Vec::new(),
+            created_at: None,
+            started_at: None,
+            finished_at: None,
+            credits_estimated: None,
+            credits_used: None,
+            error: None,
+        };
+
+        let value = serde_json::to_value(job).expect("serialize analysis job");
+
+        assert_eq!(value["id"], "job_1");
+        assert_eq!(value["status"], "queued");
+        assert_eq!(value["source"]["kind"], "localPath");
+        assert_eq!(value["source"]["path"], "/tmp/project");
+        assert_eq!(value["projectName"], "project");
+        assert_eq!(value["requestedAnalyzers"][0], "RustAnalyzer");
+        assert!(value["analyzerStatuses"].as_array().unwrap().is_empty());
+        assert_eq!(value["progress"], 0);
+    }
+
+    #[test]
+    fn analysis_job_omits_absent_optional_fields() {
+        let job = AnalysisJob {
+            id: "job_1".into(),
+            status: AnalysisJobStatus::Queued,
+            source: AnalysisJobSource {
+                kind: AnalysisJobSourceKind::LocalPath,
+                display_name: None,
+                path: Some("/tmp/project".into()),
+                repository_url: None,
+                git_ref: None,
+                commit_sha: None,
+            },
+            project_name: None,
+            message: None,
+            progress: None,
+            requested_analyzers: Vec::new(),
+            analyzer_statuses: Vec::new(),
+            created_at: None,
+            started_at: None,
+            finished_at: None,
+            credits_estimated: None,
+            credits_used: None,
+            error: None,
+        };
+
+        let value = serde_json::to_value(job).expect("serialize analysis job");
+
+        assert!(value.get("creditsEstimated").is_none());
+        assert!(value.get("creditsUsed").is_none());
+        assert!(value.get("error").is_none());
+        assert!(value.get("finishedAt").is_none());
+        assert!(value["source"].get("repositoryUrl").is_none());
     }
 }
