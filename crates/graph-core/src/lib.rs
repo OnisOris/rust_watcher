@@ -940,6 +940,59 @@ pub struct AnalysisJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CloudAnalysisUsage {
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+    pub input_files: u32,
+    pub input_bytes: u64,
+    pub output_nodes: u32,
+    pub output_edges: u32,
+    pub output_files: u32,
+    pub requested_analyzers: Vec<AnalyzerEngine>,
+    pub materialization_ms: u64,
+    pub graph_build_ms: u64,
+    pub total_wall_ms: u64,
+    pub credits_estimated: u32,
+    pub credits_used: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+pub fn estimate_cloud_analysis_credits(
+    input_files: u32,
+    input_bytes: u64,
+    requested_analyzers: &[AnalyzerEngine],
+) -> u32 {
+    let base = 1u32;
+    let file_units = input_files.saturating_add(99) / 100;
+    let byte_units = ((input_bytes.saturating_add(10 * 1024 * 1024 - 1)) / (10 * 1024 * 1024))
+        .min(u32::MAX as u64) as u32;
+    let analyzer_units = if requested_analyzers.is_empty() {
+        1
+    } else {
+        requested_analyzers.iter().fold(0u32, |units, analyzer| {
+            units
+                + match analyzer {
+                    AnalyzerEngine::RustAnalyzer => 4,
+                    AnalyzerEngine::Ty
+                    | AnalyzerEngine::TypeScriptLanguageServer
+                    | AnalyzerEngine::QmlLanguageServer => 2,
+                    _ => 1,
+                }
+        })
+    };
+
+    base.saturating_add(file_units)
+        .saturating_add(byte_units)
+        .saturating_add(analyzer_units)
+        .max(1)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudWorkspace {
     pub id: String,
     pub display_name: String,
@@ -1340,6 +1393,94 @@ mod tests {
         assert!(value.get("error").is_none());
         assert!(value.get("finishedAt").is_none());
         assert!(value["source"].get("repositoryUrl").is_none());
+    }
+
+    #[test]
+    fn cloud_analysis_usage_serializes_as_camel_case() {
+        let usage = CloudAnalysisUsage {
+            job_id: "job_1".into(),
+            workspace_id: Some("workspace_1".into()),
+            revision_id: Some("revision_1".into()),
+            input_files: 3,
+            input_bytes: 42,
+            output_nodes: 5,
+            output_edges: 6,
+            output_files: 3,
+            requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
+            materialization_ms: 7,
+            graph_build_ms: 8,
+            total_wall_ms: 15,
+            credits_estimated: 6,
+            credits_used: 6,
+            created_at: Some("123".into()),
+        };
+
+        let value = serde_json::to_value(usage).expect("serialize cloud usage");
+
+        assert_eq!(value["jobId"], "job_1");
+        assert_eq!(value["workspaceId"], "workspace_1");
+        assert_eq!(value["revisionId"], "revision_1");
+        assert_eq!(value["inputFiles"], 3);
+        assert_eq!(value["inputBytes"], 42);
+        assert_eq!(value["outputNodes"], 5);
+        assert_eq!(value["outputEdges"], 6);
+        assert_eq!(value["outputFiles"], 3);
+        assert_eq!(value["requestedAnalyzers"][0], "RustAnalyzer");
+        assert_eq!(value["materializationMs"], 7);
+        assert_eq!(value["graphBuildMs"], 8);
+        assert_eq!(value["totalWallMs"], 15);
+        assert_eq!(value["creditsEstimated"], 6);
+        assert_eq!(value["creditsUsed"], 6);
+        assert_eq!(value["createdAt"], "123");
+    }
+
+    #[test]
+    fn cloud_analysis_usage_omits_absent_optional_fields() {
+        let usage = CloudAnalysisUsage {
+            job_id: "job_1".into(),
+            workspace_id: None,
+            revision_id: None,
+            input_files: 0,
+            input_bytes: 0,
+            output_nodes: 0,
+            output_edges: 0,
+            output_files: 0,
+            requested_analyzers: Vec::new(),
+            materialization_ms: 0,
+            graph_build_ms: 0,
+            total_wall_ms: 0,
+            credits_estimated: 1,
+            credits_used: 1,
+            created_at: None,
+        };
+
+        let value = serde_json::to_value(usage).expect("serialize cloud usage");
+
+        assert!(value.get("workspaceId").is_none());
+        assert!(value.get("revisionId").is_none());
+        assert!(value.get("createdAt").is_none());
+    }
+
+    #[test]
+    fn cloud_analysis_credit_estimator_returns_at_least_one() {
+        assert!(estimate_cloud_analysis_credits(0, 0, &[]) >= 1);
+    }
+
+    #[test]
+    fn cloud_analysis_credit_estimator_increases_for_larger_projects() {
+        let small = estimate_cloud_analysis_credits(1, 1, &[]);
+        let large = estimate_cloud_analysis_credits(250, 25 * 1024 * 1024, &[]);
+
+        assert!(large > small);
+    }
+
+    #[test]
+    fn cloud_analysis_credit_estimator_increases_for_rust_analyzer() {
+        let parser_only = estimate_cloud_analysis_credits(10, 1024, &[]);
+        let rust_analyzer =
+            estimate_cloud_analysis_credits(10, 1024, &[AnalyzerEngine::RustAnalyzer]);
+
+        assert!(rust_analyzer > parser_only);
     }
 
     #[test]

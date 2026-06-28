@@ -7,9 +7,10 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use graph_core::{
-    AnalysisJob, AnalysisJobSource, AnalysisJobStatus, AnalyzerCapability, AnalyzerEngine,
-    AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus,
-    CloudWorkspace, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse, GraphSnapshot,
+    estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobSource, AnalysisJobStatus,
+    AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
+    AnalyzerStatus, AppState, AppStatus, CloudAnalysisUsage, CloudWorkspace,
+    CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse, GraphSnapshot,
     WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
 };
 use parking_lot::RwLock;
@@ -19,6 +20,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -58,6 +60,7 @@ struct CloudApiState {
     revisions: Arc<RwLock<HashMap<String, WorkspaceRevision>>>,
     blobs: Arc<RwLock<HashMap<String, StoredBlob>>>,
     analysis_results: Arc<RwLock<HashMap<String, CloudAnalysisResult>>>,
+    analysis_usage: Arc<RwLock<HashMap<String, CloudAnalysisUsage>>>,
     blobs_dir: Arc<PathBuf>,
     workspaces_dir: Arc<PathBuf>,
 }
@@ -102,12 +105,14 @@ impl CloudApiState {
             revisions: Arc::new(RwLock::new(HashMap::new())),
             blobs: Arc::new(RwLock::new(HashMap::new())),
             analysis_results: Arc::new(RwLock::new(HashMap::new())),
+            analysis_usage: Arc::new(RwLock::new(HashMap::new())),
             blobs_dir: Arc::new(blobs_dir),
             workspaces_dir: Arc::new(workspaces_dir),
         }
     }
 
     fn create_job(&self, request: CreateAnalysisJobRequest) -> Result<AnalysisJob, ApiError> {
+        let mut credits_estimated = None;
         let target = match (&request.workspace_id, &request.revision_id) {
             (Some(workspace_id), Some(revision_id)) => Some(JobRevisionTarget {
                 workspace_id: workspace_id.clone(),
@@ -123,6 +128,11 @@ impl CloudApiState {
                 let _revision = self
                     .get_revision(workspace_id, revision_id)
                     .ok_or_else(|| ApiError::NotFound("revision not found".into()))?;
+                credits_estimated = Some(estimate_cloud_analysis_credits(
+                    _revision.files_count,
+                    _revision.total_bytes,
+                    &request.requested_analyzers,
+                ));
                 (
                     workspace.source.clone().unwrap_or(AnalysisJobSource {
                         kind: graph_core::AnalysisJobSourceKind::LocalPath,
@@ -157,7 +167,7 @@ impl CloudApiState {
             created_at: Some(timestamp()),
             started_at: None,
             finished_at: None,
-            credits_estimated: None,
+            credits_estimated,
             credits_used: None,
             error: None,
         };
@@ -196,7 +206,12 @@ impl CloudApiState {
         Some(job.clone())
     }
 
-    fn complete_job(&self, id: &str, snapshot: &GraphSnapshot) -> Option<AnalysisJob> {
+    fn complete_job(
+        &self,
+        id: &str,
+        snapshot: &GraphSnapshot,
+        credits_used: u32,
+    ) -> Option<AnalysisJob> {
         let mut jobs = self.jobs.write();
         let job = jobs.get_mut(id)?;
         job.status = AnalysisJobStatus::Completed;
@@ -205,6 +220,7 @@ impl CloudApiState {
         job.finished_at = Some(timestamp());
         job.error = None;
         job.analyzer_statuses = parser_analyzer_statuses(snapshot);
+        job.credits_used = Some(credits_used);
         Some(job.clone())
     }
 
@@ -217,6 +233,35 @@ impl CloudApiState {
         job.finished_at = Some(timestamp());
         job.error = Some(error.into());
         Some(job.clone())
+    }
+
+    fn usage_summary(&self) -> UsageSummaryResponse {
+        let usage_records = self.analysis_usage.read();
+        let jobs = self.jobs.read();
+        UsageSummaryResponse {
+            jobs_count: jobs.len() as u32,
+            completed_jobs: jobs
+                .values()
+                .filter(|job| job.status == AnalysisJobStatus::Completed)
+                .count() as u32,
+            failed_jobs: jobs
+                .values()
+                .filter(|job| job.status == AnalysisJobStatus::Failed)
+                .count() as u32,
+            total_input_files: usage_records
+                .values()
+                .map(|usage| u64::from(usage.input_files))
+                .sum(),
+            total_input_bytes: usage_records.values().map(|usage| usage.input_bytes).sum(),
+            total_wall_ms: usage_records
+                .values()
+                .map(|usage| usage.total_wall_ms)
+                .sum(),
+            total_credits_used: usage_records
+                .values()
+                .map(|usage| u64::from(usage.credits_used))
+                .sum(),
+        }
     }
 
     fn list_jobs(&self) -> Vec<AnalysisJob> {
@@ -412,6 +457,18 @@ struct ListAnalysisJobsResponse {
     jobs: Vec<AnalysisJob>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageSummaryResponse {
+    pub jobs_count: u32,
+    pub completed_jobs: u32,
+    pub failed_jobs: u32,
+    pub total_input_files: u64,
+    pub total_input_bytes: u64,
+    pub total_wall_ms: u64,
+    pub total_credits_used: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     ok: bool,
@@ -460,7 +517,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/analysis/jobs", get(list_jobs).post(create_job))
         .route("/api/analysis/jobs/{id}", get(get_job))
         .route("/api/analysis/jobs/{id}/snapshot", get(get_job_snapshot))
+        .route("/api/analysis/jobs/{id}/usage", get(get_job_usage))
         .route("/api/analysis/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/usage/summary", get(usage_summary))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -533,6 +592,30 @@ async fn get_job_snapshot(
         Some(_) => StatusCode::ACCEPTED.into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn get_job_usage(
+    State(state): State<CloudApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Some(usage) = state.analysis_usage.read().get(&id).cloned() {
+        return (StatusCode::OK, Json(usage)).into_response();
+    }
+    match state.get_job(&id) {
+        Some(job) if job.status == AnalysisJobStatus::Failed => (
+            StatusCode::CONFLICT,
+            job.error
+                .or(job.message)
+                .unwrap_or_else(|| "analysis failed".into()),
+        )
+            .into_response(),
+        Some(_) => StatusCode::ACCEPTED.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn usage_summary(State(state): State<CloudApiState>) -> Json<UsageSummaryResponse> {
+    Json(state.usage_summary())
 }
 
 async fn cancel_job(
@@ -726,16 +809,31 @@ async fn run_parser_cloud_analysis_inner(
     state: CloudApiState,
     job_id: String,
 ) -> Result<GraphSnapshot> {
+    let total_start = Instant::now();
     let target = state
         .get_job_revision_target(&job_id)
         .ok_or_else(|| anyhow::anyhow!("job is not linked to a workspace revision"))?;
+    let revision = state
+        .get_revision(&target.workspace_id, &target.revision_id)
+        .ok_or_else(|| anyhow::anyhow!("revision not found"))?;
+    let requested_analyzers = state
+        .get_job(&job_id)
+        .map(|job| job.requested_analyzers)
+        .unwrap_or_default();
+    let credits_estimated = estimate_cloud_analysis_credits(
+        revision.files_count,
+        revision.total_bytes,
+        &requested_analyzers,
+    );
     state.update_job_status(
         &job_id,
         AnalysisJobStatus::Preparing,
         "Preparing cloud analysis",
         Some(10),
     );
+    let materialization_start = Instant::now();
     let project_root = materialize_revision(&state, &target.workspace_id, &target.revision_id)?;
+    let materialization_ms = elapsed_ms(materialization_start.elapsed());
 
     state.update_job_status(
         &job_id,
@@ -743,7 +841,9 @@ async fn run_parser_cloud_analysis_inner(
         "Indexing workspace revision",
         Some(35),
     );
+    let graph_build_start = Instant::now();
     let mut snapshot = build_parser_snapshot(&project_root);
+    let graph_build_ms = elapsed_ms(graph_build_start.elapsed());
 
     state.update_job_status(
         &job_id,
@@ -758,6 +858,24 @@ async fn run_parser_cloud_analysis_inner(
     snapshot.status.progress = Some(100);
     snapshot.status.last_updated = Some(timestamp());
 
+    let credits_used = credits_estimated;
+    let usage = CloudAnalysisUsage {
+        job_id: job_id.clone(),
+        workspace_id: Some(target.workspace_id.clone()),
+        revision_id: Some(target.revision_id.clone()),
+        input_files: revision.files_count,
+        input_bytes: revision.total_bytes,
+        output_nodes: snapshot.nodes.len() as u32,
+        output_edges: snapshot.edges.len() as u32,
+        output_files: snapshot.files.len() as u32,
+        requested_analyzers,
+        materialization_ms,
+        graph_build_ms,
+        total_wall_ms: elapsed_ms(total_start.elapsed()),
+        credits_estimated,
+        credits_used,
+        created_at: Some(timestamp()),
+    };
     let result = CloudAnalysisResult {
         job_id: job_id.clone(),
         workspace_id: target.workspace_id,
@@ -765,11 +883,12 @@ async fn run_parser_cloud_analysis_inner(
         snapshot: snapshot.clone(),
         created_at: timestamp(),
     };
+    state.analysis_usage.write().insert(job_id.clone(), usage);
     state
         .analysis_results
         .write()
         .insert(job_id.clone(), result);
-    state.complete_job(&job_id, &snapshot);
+    state.complete_job(&job_id, &snapshot, credits_used);
     Ok(snapshot)
 }
 
@@ -809,6 +928,10 @@ fn parser_analyzer_statuses(snapshot: &GraphSnapshot) -> Vec<AnalyzerServiceStat
         billable: false,
         credits_used: None,
     }]
+}
+
+fn elapsed_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn timestamp() -> String {
@@ -1238,6 +1361,8 @@ mod tests {
         assert_eq!(job.message.as_deref(), Some("Queued for cloud analysis"));
         assert_eq!(job.progress, Some(0));
         assert_eq!(job.project_name.as_deref(), Some("demo"));
+        assert!(job.credits_estimated.is_some());
+        assert_eq!(job.credits_used, None);
     }
 
     #[test]
@@ -1294,11 +1419,176 @@ mod tests {
         assert_eq!(updated.progress, Some(100));
         assert!(updated.started_at.is_some());
         assert!(updated.finished_at.is_some());
+        assert_eq!(updated.credits_used, updated.credits_estimated);
         assert_eq!(updated.analyzer_statuses.len(), 1);
         let result = state.analysis_results.read().get(&job.id).cloned().unwrap();
         assert_eq!(result.workspace_id, workspace.id);
         assert_eq!(result.revision_id, revision.id);
         assert!(!result.snapshot.nodes.is_empty());
+        let usage = state.analysis_usage.read().get(&job.id).cloned().unwrap();
+        assert_eq!(usage.job_id, job.id);
+        assert_eq!(usage.workspace_id.as_deref(), Some(workspace.id.as_str()));
+        assert_eq!(usage.revision_id.as_deref(), Some(revision.id.as_str()));
+        assert_eq!(usage.input_files, revision.files_count);
+        assert_eq!(usage.input_bytes, revision.total_bytes);
+        assert_eq!(usage.output_nodes, result.snapshot.nodes.len() as u32);
+        assert_eq!(usage.output_edges, result.snapshot.edges.len() as u32);
+        assert_eq!(usage.output_files, result.snapshot.files.len() as u32);
+        assert_eq!(usage.credits_used, usage.credits_estimated);
+        assert_eq!(updated.credits_used, Some(usage.credits_used));
+    }
+
+    #[tokio::test]
+    async fn usage_endpoint_returns_accepted_before_usage_is_ready() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let content = b"fn main() {}";
+        let file = file_entry(content);
+        state
+            .upload_blob(&workspace.id, &file.content_hash, content)
+            .unwrap();
+        let revision = state
+            .create_revision(
+                &workspace.id,
+                CreateWorkspaceRevisionRequest {
+                    base_revision: None,
+                    files: vec![file],
+                },
+            )
+            .unwrap()
+            .revision;
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+
+        let response = get_job_usage(State(state), AxumPath(job.id))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn usage_endpoint_returns_usage_after_completion() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let content = b"fn main() {}";
+        let file = file_entry(content);
+        state
+            .upload_blob(&workspace.id, &file.content_hash, content)
+            .unwrap();
+        let revision = state
+            .create_revision(
+                &workspace.id,
+                CreateWorkspaceRevisionRequest {
+                    base_revision: None,
+                    files: vec![file],
+                },
+            )
+            .unwrap()
+            .revision;
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+        run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+        let response = get_job_usage(State(state), AxumPath(job.id))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn usage_endpoint_reports_missing_and_failed_jobs() {
+        let state = test_state();
+        let missing_response = get_job_usage(State(state.clone()), AxumPath("missing".into()))
+            .await
+            .into_response();
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
+        let workspace = state.create_workspace(workspace_request());
+        let revision = WorkspaceRevision {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: workspace.id.clone(),
+            files: vec![file_entry(b"fn main() {}")],
+            files_count: 1,
+            total_bytes: 12,
+            parent_revision: None,
+            created_at: Some(timestamp()),
+        };
+        state
+            .revisions
+            .write()
+            .insert(revision.id.clone(), revision.clone());
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+        run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+        let failed_response = get_job_usage(State(state), AxumPath(job.id))
+            .await
+            .into_response();
+
+        assert_eq!(failed_response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn usage_summary_includes_completed_job_usage() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let content = b"fn main() {}";
+        let file = file_entry(content);
+        state
+            .upload_blob(&workspace.id, &file.content_hash, content)
+            .unwrap();
+        let revision = state
+            .create_revision(
+                &workspace.id,
+                CreateWorkspaceRevisionRequest {
+                    base_revision: None,
+                    files: vec![file],
+                },
+            )
+            .unwrap()
+            .revision;
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+        run_parser_cloud_analysis(state.clone(), job.id).await;
+
+        let Json(summary) = usage_summary(State(state)).await;
+
+        assert_eq!(summary.jobs_count, 1);
+        assert_eq!(summary.completed_jobs, 1);
+        assert_eq!(summary.failed_jobs, 0);
+        assert_eq!(summary.total_input_files, 1);
+        assert_eq!(summary.total_input_bytes, content.len() as u64);
+        assert!(summary.total_credits_used >= 1);
     }
 
     #[tokio::test]
