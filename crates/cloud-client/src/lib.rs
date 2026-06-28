@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
 use graph_core::{
-    CloudWorkspace, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse, LanguageId,
-    WorkspaceFileEntry, WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
+    AnalysisJob, AnalysisJobStatus, AnalyzerEngine, CloudAnalysisUsage, CloudWorkspace,
+    CreateAnalysisJobRequest, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse,
+    GraphSnapshot, LanguageId, WorkspaceFileEntry, WorkspaceRevision, WorkspaceSyncPlanRequest,
+    WorkspaceSyncPlanResponse,
 };
 use reqwest::StatusCode;
 use serde::Serialize;
@@ -9,6 +11,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use url::Url;
 
 const CONFIG_FILES: &[&str] = &[
@@ -60,6 +64,38 @@ pub struct SyncProjectResult {
     pub skipped_blobs: usize,
     pub total_bytes: u64,
     pub uploaded_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WaitForAnalysisOptions {
+    pub poll_interval: Duration,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnalyzeProjectRequest {
+    pub project_root: PathBuf,
+    pub workspace_id: Option<String>,
+    pub display_name: Option<String>,
+    pub base_revision: Option<String>,
+    pub requested_analyzers: Vec<AnalyzerEngine>,
+    pub wait: WaitForAnalysisOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnalyzeProjectResult {
+    pub sync: SyncProjectResult,
+    pub job: AnalysisJob,
+    pub snapshot: GraphSnapshot,
+    pub usage: CloudAnalysisUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnalysisJobPollState {
+    Pending,
+    Completed,
+    Failed(String),
+    Cancelled,
 }
 
 impl CloudClient {
@@ -199,6 +235,90 @@ impl CloudClient {
         })
     }
 
+    pub async fn create_analysis_job(
+        &self,
+        request: CreateAnalysisJobRequest,
+    ) -> Result<AnalysisJob> {
+        self.post_json("api/analysis/jobs", &request).await
+    }
+
+    pub async fn get_analysis_job(&self, job_id: &str) -> Result<AnalysisJob> {
+        self.get_json(&format!("api/analysis/jobs/{job_id}")).await
+    }
+
+    pub async fn get_analysis_snapshot(&self, job_id: &str) -> Result<GraphSnapshot> {
+        self.get_json(&format!("api/analysis/jobs/{job_id}/snapshot"))
+            .await
+    }
+
+    pub async fn get_analysis_usage(&self, job_id: &str) -> Result<CloudAnalysisUsage> {
+        self.get_json(&format!("api/analysis/jobs/{job_id}/usage"))
+            .await
+    }
+
+    pub async fn wait_for_analysis_job(
+        &self,
+        job_id: &str,
+        options: WaitForAnalysisOptions,
+    ) -> Result<AnalysisJob> {
+        let started = Instant::now();
+        loop {
+            let job = self.get_analysis_job(job_id).await?;
+            match analysis_job_poll_state(&job) {
+                AnalysisJobPollState::Completed => return Ok(job),
+                AnalysisJobPollState::Failed(message) => {
+                    bail!("cloud analysis job failed: {message}")
+                }
+                AnalysisJobPollState::Cancelled => bail!("cloud analysis job was cancelled"),
+                AnalysisJobPollState::Pending => {}
+            }
+            if started.elapsed() >= options.timeout {
+                bail!("timed out waiting for cloud analysis job {job_id}");
+            }
+            let remaining = options
+                .timeout
+                .checked_sub(started.elapsed())
+                .unwrap_or_default();
+            sleep(options.poll_interval.min(remaining)).await;
+        }
+    }
+
+    pub async fn analyze_project(
+        &self,
+        request: AnalyzeProjectRequest,
+    ) -> Result<AnalyzeProjectResult> {
+        let sync = self
+            .sync_project(SyncProjectRequest {
+                project_root: request.project_root,
+                workspace_id: request.workspace_id,
+                display_name: request.display_name.clone(),
+                base_revision: request.base_revision,
+            })
+            .await?;
+        let job = self
+            .create_analysis_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: request.requested_analyzers,
+                project_name: Some(
+                    request
+                        .display_name
+                        .unwrap_or_else(|| sync.workspace.display_name.clone()),
+                ),
+                workspace_id: Some(sync.workspace.id.clone()),
+                revision_id: Some(sync.revision.id.clone()),
+            })
+            .await?;
+        let job = self.wait_for_analysis_job(&job.id, request.wait).await?;
+        let snapshot = self.get_analysis_snapshot(&job.id).await?;
+        let usage = self.get_analysis_usage(&job.id).await?;
+        Ok(AnalyzeProjectResult {
+            sync,
+            job,
+            snapshot,
+            usage,
+        })
+    }
+
     async fn get_json<T>(&self, path: &str) -> Result<T>
     where
         T: serde::de::DeserializeOwned,
@@ -328,6 +448,53 @@ pub fn language_for_path(path: &Path) -> Option<LanguageId> {
     }
 }
 
+pub fn parse_analyzers(names: &[String]) -> Result<Vec<AnalyzerEngine>> {
+    let mut analyzers = Vec::new();
+    for name in names {
+        match name.as_str() {
+            "parser" => {}
+            "rust-analyzer" => {
+                if !analyzers.contains(&AnalyzerEngine::RustAnalyzer) {
+                    analyzers.push(AnalyzerEngine::RustAnalyzer);
+                }
+            }
+            _ => bail!("unknown analyzer '{name}'. Supported analyzers: parser, rust-analyzer"),
+        }
+    }
+    Ok(analyzers)
+}
+
+pub fn analysis_job_poll_state(job: &AnalysisJob) -> AnalysisJobPollState {
+    match job.status {
+        AnalysisJobStatus::Completed => AnalysisJobPollState::Completed,
+        AnalysisJobStatus::Failed => AnalysisJobPollState::Failed(
+            job.error
+                .clone()
+                .or_else(|| job.message.clone())
+                .unwrap_or_else(|| "analysis failed".into()),
+        ),
+        AnalysisJobStatus::Cancelled => AnalysisJobPollState::Cancelled,
+        AnalysisJobStatus::Queued
+        | AnalysisJobStatus::Preparing
+        | AnalysisJobStatus::Indexing
+        | AnalysisJobStatus::RunningAnalyzers
+        | AnalysisJobStatus::BuildingGraph => AnalysisJobPollState::Pending,
+    }
+}
+
+pub fn write_pretty_json<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(value).context("failed to serialize JSON")?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))
+}
+
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
@@ -343,6 +510,7 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graph_core::{AnalysisJobSource, AnalysisJobSourceKind};
     use std::io::Write;
 
     fn test_root(name: &str) -> PathBuf {
@@ -360,6 +528,32 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut file = fs::File::create(path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
+    }
+
+    fn analysis_job(status: AnalysisJobStatus) -> AnalysisJob {
+        AnalysisJob {
+            id: "job_1".into(),
+            status,
+            source: AnalysisJobSource {
+                kind: AnalysisJobSourceKind::LocalPath,
+                display_name: Some("demo".into()),
+                path: None,
+                repository_url: None,
+                git_ref: None,
+                commit_sha: None,
+            },
+            project_name: Some("demo".into()),
+            message: None,
+            progress: None,
+            requested_analyzers: Vec::new(),
+            analyzer_statuses: Vec::new(),
+            created_at: None,
+            started_at: None,
+            finished_at: None,
+            credits_estimated: None,
+            credits_used: None,
+            error: None,
+        }
     }
 
     #[test]
@@ -452,5 +646,62 @@ mod tests {
                 skipped_blobs: 1,
             }
         );
+    }
+
+    #[test]
+    fn analyzer_argument_parsing_supports_parser_and_rust_analyzer() {
+        assert_eq!(parse_analyzers(&["parser".to_string()]).unwrap(), vec![]);
+        assert_eq!(
+            parse_analyzers(&["rust-analyzer".to_string()]).unwrap(),
+            vec![AnalyzerEngine::RustAnalyzer]
+        );
+        assert!(parse_analyzers(&["unknown".to_string()]).is_err());
+    }
+
+    #[test]
+    fn analysis_job_poll_state_classifies_terminal_statuses() {
+        assert_eq!(
+            analysis_job_poll_state(&analysis_job(AnalysisJobStatus::Completed)),
+            AnalysisJobPollState::Completed
+        );
+        assert!(matches!(
+            analysis_job_poll_state(&analysis_job(AnalysisJobStatus::Failed)),
+            AnalysisJobPollState::Failed(_)
+        ));
+        assert_eq!(
+            analysis_job_poll_state(&analysis_job(AnalysisJobStatus::Cancelled)),
+            AnalysisJobPollState::Cancelled
+        );
+        for status in [
+            AnalysisJobStatus::Queued,
+            AnalysisJobStatus::Preparing,
+            AnalysisJobStatus::Indexing,
+            AnalysisJobStatus::RunningAnalyzers,
+            AnalysisJobStatus::BuildingGraph,
+        ] {
+            assert_eq!(
+                analysis_job_poll_state(&analysis_job(status)),
+                AnalysisJobPollState::Pending
+            );
+        }
+    }
+
+    #[test]
+    fn write_pretty_json_writes_output_file() {
+        let root = test_root("json-output");
+        let path = root.join("nested").join("usage.json");
+        write_pretty_json(
+            &path,
+            &serde_json::json!({
+                "jobId": "job_1",
+                "creditsUsed": 3
+            }),
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"jobId\": \"job_1\""));
+        assert!(text.contains("\"creditsUsed\": 3"));
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -940,6 +940,21 @@ pub struct AnalysisJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateAnalysisJobRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AnalysisJobSource>,
+    #[serde(default)]
+    pub requested_analyzers: Vec<AnalyzerEngine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudAnalysisUsage {
     pub job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1393,6 +1408,25 @@ mod tests {
         assert!(value.get("error").is_none());
         assert!(value.get("finishedAt").is_none());
         assert!(value["source"].get("repositoryUrl").is_none());
+    }
+
+    #[test]
+    fn create_analysis_job_request_serializes_as_camel_case() {
+        let request = CreateAnalysisJobRequest {
+            source: None,
+            requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
+            project_name: Some("demo".into()),
+            workspace_id: Some("workspace_1".into()),
+            revision_id: Some("revision_1".into()),
+        };
+
+        let value = serde_json::to_value(request).expect("serialize create analysis job request");
+
+        assert!(value.get("source").is_none());
+        assert_eq!(value["requestedAnalyzers"][0], "RustAnalyzer");
+        assert_eq!(value["projectName"], "demo");
+        assert_eq!(value["workspaceId"], "workspace_1");
+        assert_eq!(value["revisionId"], "revision_1");
     }
 
     #[test]

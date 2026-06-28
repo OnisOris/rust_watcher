@@ -10,8 +10,8 @@ use graph_core::{
     estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobSource, AnalysisJobStatus,
     AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
     AnalyzerStatus, AppState, AppStatus, CloudAnalysisUsage, CloudWorkspace,
-    CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse, GraphSnapshot,
-    WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
+    CreateAnalysisJobRequest, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse,
+    GraphSnapshot, WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
 };
 use parking_lot::RwLock;
 use project_indexer::ProjectIndex;
@@ -465,20 +465,6 @@ impl CloudApiState {
             .filter(|revision| revision.workspace_id == workspace_id)
             .cloned()
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateAnalysisJobRequest {
-    #[serde(default)]
-    source: Option<AnalysisJobSource>,
-    #[serde(default)]
-    requested_analyzers: Vec<AnalyzerEngine>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    revision_id: Option<String>,
-    project_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
