@@ -940,6 +940,74 @@ pub struct AnalysisJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CloudWorkspace {
+    pub id: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AnalysisJobSource>,
+    pub current_revision: Option<String>,
+    pub files_count: u32,
+    pub total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileEntry {
+    pub path: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<LanguageId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRevision {
+    pub id: String,
+    pub workspace_id: String,
+    pub files: Vec<WorkspaceFileEntry>,
+    pub files_count: u32,
+    pub total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSyncPlanRequest {
+    pub base_revision: Option<String>,
+    pub files: Vec<WorkspaceFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSyncPlanResponse {
+    pub missing_hashes: Vec<String>,
+    pub known_hashes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceRevisionRequest {
+    pub base_revision: Option<String>,
+    pub files: Vec<WorkspaceFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceRevisionResponse {
+    pub workspace: CloudWorkspace,
+    pub revision: WorkspaceRevision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PythonAnalyzerStatus {
     pub mode: String,
     pub status: String,
@@ -1272,5 +1340,73 @@ mod tests {
         assert!(value.get("error").is_none());
         assert!(value.get("finishedAt").is_none());
         assert!(value["source"].get("repositoryUrl").is_none());
+    }
+
+    #[test]
+    fn workspace_file_entry_serializes_as_camel_case() {
+        let entry = WorkspaceFileEntry {
+            path: "src/main.rs".into(),
+            content_hash: "sha256:abc".into(),
+            size_bytes: 12,
+            language: Some(LanguageId::Rust),
+        };
+
+        let value = serde_json::to_value(entry).expect("serialize workspace file entry");
+
+        assert_eq!(value["path"], "src/main.rs");
+        assert_eq!(value["contentHash"], "sha256:abc");
+        assert_eq!(value["sizeBytes"], 12);
+        assert_eq!(value["language"], "rust");
+    }
+
+    #[test]
+    fn workspace_revision_serializes_as_camel_case() {
+        let revision = WorkspaceRevision {
+            id: "rev_1".into(),
+            workspace_id: "workspace_1".into(),
+            files: vec![WorkspaceFileEntry {
+                path: "src/main.rs".into(),
+                content_hash: "sha256:abc".into(),
+                size_bytes: 12,
+                language: Some(LanguageId::Rust),
+            }],
+            files_count: 1,
+            total_bytes: 12,
+            parent_revision: Some("rev_0".into()),
+            created_at: None,
+        };
+
+        let value = serde_json::to_value(revision).expect("serialize workspace revision");
+
+        assert_eq!(value["workspaceId"], "workspace_1");
+        assert_eq!(value["filesCount"], 1);
+        assert_eq!(value["totalBytes"], 12);
+        assert_eq!(value["parentRevision"], "rev_0");
+        assert!(value.get("createdAt").is_none());
+    }
+
+    #[test]
+    fn workspace_sync_plan_request_and_response_serialize_as_camel_case() {
+        let request = WorkspaceSyncPlanRequest {
+            base_revision: Some("rev_1".into()),
+            files: vec![WorkspaceFileEntry {
+                path: "src/lib.rs".into(),
+                content_hash: "sha256:def".into(),
+                size_bytes: 7,
+                language: None,
+            }],
+        };
+        let response = WorkspaceSyncPlanResponse {
+            missing_hashes: vec!["sha256:def".into()],
+            known_hashes: vec!["sha256:abc".into()],
+        };
+
+        let request_value = serde_json::to_value(request).expect("serialize sync plan request");
+        let response_value = serde_json::to_value(response).expect("serialize sync plan response");
+
+        assert_eq!(request_value["baseRevision"], "rev_1");
+        assert_eq!(request_value["files"][0]["contentHash"], "sha256:def");
+        assert_eq!(response_value["missingHashes"][0], "sha256:def");
+        assert_eq!(response_value["knownHashes"][0], "sha256:abc");
     }
 }
