@@ -7,8 +7,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use graph_core::{
-    AnalysisJob, AnalysisJobSource, AnalysisJobStatus, AnalyzerEngine, AnalyzerServiceStatus,
-    CloudWorkspace, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse,
+    AnalysisJob, AnalysisJobSource, AnalysisJobStatus, AnalyzerCapability, AnalyzerEngine,
+    AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus, AnalyzerStatus, AppState, AppStatus,
+    CloudWorkspace, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse, GraphSnapshot,
     WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
 };
 use parking_lot::RwLock;
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -45,15 +46,36 @@ struct ServeArgs {
     port: u16,
     #[arg(long, default_value = ".rust-watcher-cloud/blobs")]
     blobs_dir: PathBuf,
+    #[arg(long, default_value = ".rust-watcher-cloud/workspaces")]
+    workspaces_dir: PathBuf,
 }
 
 #[derive(Clone)]
 struct CloudApiState {
     jobs: Arc<RwLock<HashMap<String, AnalysisJob>>>,
+    job_revision_targets: Arc<RwLock<HashMap<String, JobRevisionTarget>>>,
     workspaces: Arc<RwLock<HashMap<String, CloudWorkspace>>>,
     revisions: Arc<RwLock<HashMap<String, WorkspaceRevision>>>,
     blobs: Arc<RwLock<HashMap<String, StoredBlob>>>,
+    analysis_results: Arc<RwLock<HashMap<String, CloudAnalysisResult>>>,
     blobs_dir: Arc<PathBuf>,
+    workspaces_dir: Arc<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct JobRevisionTarget {
+    workspace_id: String,
+    revision_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudAnalysisResult {
+    pub job_id: String,
+    pub workspace_id: String,
+    pub revision_id: String,
+    pub snapshot: GraphSnapshot,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -72,17 +94,27 @@ enum ApiError {
 }
 
 impl CloudApiState {
-    fn new(blobs_dir: PathBuf) -> Self {
+    fn new(blobs_dir: PathBuf, workspaces_dir: PathBuf) -> Self {
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
+            job_revision_targets: Arc::new(RwLock::new(HashMap::new())),
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             revisions: Arc::new(RwLock::new(HashMap::new())),
             blobs: Arc::new(RwLock::new(HashMap::new())),
+            analysis_results: Arc::new(RwLock::new(HashMap::new())),
             blobs_dir: Arc::new(blobs_dir),
+            workspaces_dir: Arc::new(workspaces_dir),
         }
     }
 
     fn create_job(&self, request: CreateAnalysisJobRequest) -> Result<AnalysisJob, ApiError> {
+        let target = match (&request.workspace_id, &request.revision_id) {
+            (Some(workspace_id), Some(revision_id)) => Some(JobRevisionTarget {
+                workspace_id: workspace_id.clone(),
+                revision_id: revision_id.clone(),
+            }),
+            _ => None,
+        };
         let (source, project_name, message) = match (&request.workspace_id, &request.revision_id) {
             (Some(workspace_id), Some(revision_id)) => {
                 let workspace = self
@@ -122,7 +154,7 @@ impl CloudApiState {
             progress: Some(0),
             requested_analyzers: request.requested_analyzers,
             analyzer_statuses: Vec::<AnalyzerServiceStatus>::new(),
-            created_at: None,
+            created_at: Some(timestamp()),
             started_at: None,
             finished_at: None,
             credits_estimated: None,
@@ -130,11 +162,61 @@ impl CloudApiState {
             error: None,
         };
         self.jobs.write().insert(id, job.clone());
+        if let Some(target) = target {
+            self.job_revision_targets
+                .write()
+                .insert(job.id.clone(), target);
+        }
         Ok(job)
     }
 
     fn get_job(&self, id: &str) -> Option<AnalysisJob> {
         self.jobs.read().get(id).cloned()
+    }
+
+    fn get_job_revision_target(&self, id: &str) -> Option<JobRevisionTarget> {
+        self.job_revision_targets.read().get(id).cloned()
+    }
+
+    fn update_job_status(
+        &self,
+        id: &str,
+        status: AnalysisJobStatus,
+        message: &str,
+        progress: Option<u8>,
+    ) -> Option<AnalysisJob> {
+        let mut jobs = self.jobs.write();
+        let job = jobs.get_mut(id)?;
+        job.status = status;
+        job.message = Some(message.into());
+        job.progress = progress;
+        if job.started_at.is_none() {
+            job.started_at = Some(timestamp());
+        }
+        Some(job.clone())
+    }
+
+    fn complete_job(&self, id: &str, snapshot: &GraphSnapshot) -> Option<AnalysisJob> {
+        let mut jobs = self.jobs.write();
+        let job = jobs.get_mut(id)?;
+        job.status = AnalysisJobStatus::Completed;
+        job.message = Some("Cloud analysis completed".into());
+        job.progress = Some(100);
+        job.finished_at = Some(timestamp());
+        job.error = None;
+        job.analyzer_statuses = parser_analyzer_statuses(snapshot);
+        Some(job.clone())
+    }
+
+    fn fail_job(&self, id: &str, error: impl Into<String>) -> Option<AnalysisJob> {
+        let mut jobs = self.jobs.write();
+        let job = jobs.get_mut(id)?;
+        job.status = AnalysisJobStatus::Failed;
+        job.message = Some("Cloud analysis failed".into());
+        job.progress = None;
+        job.finished_at = Some(timestamp());
+        job.error = Some(error.into());
+        Some(job.clone())
     }
 
     fn list_jobs(&self) -> Vec<AnalysisJob> {
@@ -355,7 +437,9 @@ async fn main() -> Result<()> {
 async fn serve(args: ServeArgs) -> Result<()> {
     std::fs::create_dir_all(&args.blobs_dir)
         .with_context(|| format!("failed to create {}", args.blobs_dir.display()))?;
-    let state = CloudApiState::new(args.blobs_dir.clone());
+    std::fs::create_dir_all(&args.workspaces_dir)
+        .with_context(|| format!("failed to create {}", args.workspaces_dir.display()))?;
+    let state = CloudApiState::new(args.blobs_dir.clone(), args.workspaces_dir.clone());
     let app = Router::new()
         .route("/api/health", get(health))
         .route(
@@ -375,6 +459,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         )
         .route("/api/analysis/jobs", get(list_jobs).post(create_job))
         .route("/api/analysis/jobs/{id}", get(get_job))
+        .route("/api/analysis/jobs/{id}/snapshot", get(get_job_snapshot))
         .route("/api/analysis/jobs/{id}/cancel", post(cancel_job))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -404,7 +489,12 @@ async fn create_job(
     Json(request): Json<CreateAnalysisJobRequest>,
 ) -> impl IntoResponse {
     match state.create_job(request) {
-        Ok(job) => (StatusCode::CREATED, Json(job)).into_response(),
+        Ok(job) => {
+            if state.get_job_revision_target(&job.id).is_some() {
+                tokio::spawn(run_parser_cloud_analysis(state.clone(), job.id.clone()));
+            }
+            (StatusCode::CREATED, Json(job)).into_response()
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -423,6 +513,26 @@ async fn list_jobs(State(state): State<CloudApiState>) -> Json<ListAnalysisJobsR
     Json(ListAnalysisJobsResponse {
         jobs: state.list_jobs(),
     })
+}
+
+async fn get_job_snapshot(
+    State(state): State<CloudApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Some(result) = state.analysis_results.read().get(&id).cloned() {
+        return (StatusCode::OK, Json(result.snapshot)).into_response();
+    }
+    match state.get_job(&id) {
+        Some(job) if job.status == AnalysisJobStatus::Failed => (
+            StatusCode::CONFLICT,
+            job.error
+                .or(job.message)
+                .unwrap_or_else(|| "analysis failed".into()),
+        )
+            .into_response(),
+        Some(_) => StatusCode::ACCEPTED.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn cancel_job(
@@ -541,6 +651,166 @@ fn storage_name_for_hash(content_hash: &str) -> String {
     content_hash.replace(':', "_")
 }
 
+fn materialize_revision(
+    state: &CloudApiState,
+    workspace_id: &str,
+    revision_id: &str,
+) -> Result<PathBuf> {
+    let revision = state
+        .get_revision(workspace_id, revision_id)
+        .ok_or_else(|| anyhow::anyhow!("revision not found"))?;
+    if revision.workspace_id != workspace_id {
+        anyhow::bail!("revision does not belong to workspace");
+    }
+
+    let workspace_root = state.workspaces_dir.join(workspace_id);
+    let target_root = workspace_root.join(revision_id);
+    if target_root.exists() {
+        std::fs::remove_dir_all(&target_root)
+            .with_context(|| format!("failed to clean {}", target_root.display()))?;
+    }
+    std::fs::create_dir_all(&target_root)
+        .with_context(|| format!("failed to create {}", target_root.display()))?;
+
+    for file in &revision.files {
+        let target_path = materialized_child_path(&target_root, &file.path)
+            .with_context(|| format!("invalid workspace path {}", file.path))?;
+        let blob = state
+            .blobs
+            .read()
+            .get(&file.content_hash)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing blob {}", file.content_hash))?;
+        let bytes = std::fs::read(&blob.storage_path)
+            .with_context(|| format!("failed to read blob {}", file.content_hash))?;
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&target_path, bytes)
+            .with_context(|| format!("failed to write {}", target_path.display()))?;
+    }
+
+    Ok(target_root)
+}
+
+fn materialized_child_path(root: &Path, relative_path: &str) -> Result<PathBuf> {
+    let path = Path::new(relative_path);
+    let mut child = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => child.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("path escapes workspace")
+            }
+        }
+    }
+    if child.as_os_str().is_empty() {
+        anyhow::bail!("empty workspace path");
+    }
+    let target = root.join(child);
+    if !target.starts_with(root) {
+        anyhow::bail!("path escapes workspace");
+    }
+    Ok(target)
+}
+
+async fn run_parser_cloud_analysis(state: CloudApiState, job_id: String) {
+    if let Err(error) = run_parser_cloud_analysis_inner(state.clone(), job_id.clone()).await {
+        state.fail_job(&job_id, error.to_string());
+    }
+}
+
+async fn run_parser_cloud_analysis_inner(
+    state: CloudApiState,
+    job_id: String,
+) -> Result<GraphSnapshot> {
+    let target = state
+        .get_job_revision_target(&job_id)
+        .ok_or_else(|| anyhow::anyhow!("job is not linked to a workspace revision"))?;
+    state.update_job_status(
+        &job_id,
+        AnalysisJobStatus::Preparing,
+        "Preparing cloud analysis",
+        Some(10),
+    );
+    let project_root = materialize_revision(&state, &target.workspace_id, &target.revision_id)?;
+
+    state.update_job_status(
+        &job_id,
+        AnalysisJobStatus::Indexing,
+        "Indexing workspace revision",
+        Some(35),
+    );
+    let mut snapshot = build_parser_snapshot(&project_root);
+
+    state.update_job_status(
+        &job_id,
+        AnalysisJobStatus::BuildingGraph,
+        "Building graph snapshot",
+        Some(80),
+    );
+    snapshot.status.app_state = AppState::Normal;
+    snapshot.status.analyzer_status = AnalyzerStatus::Ready;
+    snapshot.status.analyzers = parser_analyzer_statuses(&snapshot);
+    snapshot.status.message = Some("Cloud parser analysis completed".into());
+    snapshot.status.progress = Some(100);
+    snapshot.status.last_updated = Some(timestamp());
+
+    let result = CloudAnalysisResult {
+        job_id: job_id.clone(),
+        workspace_id: target.workspace_id,
+        revision_id: target.revision_id,
+        snapshot: snapshot.clone(),
+        created_at: timestamp(),
+    };
+    state
+        .analysis_results
+        .write()
+        .insert(job_id.clone(), result);
+    state.complete_job(&job_id, &snapshot);
+    Ok(snapshot)
+}
+
+fn build_parser_snapshot(project_root: &Path) -> GraphSnapshot {
+    let status = AppStatus {
+        app_state: AppState::Indexing,
+        analyzer_status: AnalyzerStatus::Indexing,
+        analyzers: Vec::new(),
+        python_analyzer: None,
+        project_name: None,
+        project_path: Some(project_root.display().to_string()),
+        last_updated: Some(timestamp()),
+        message: Some("Building parser graph".into()),
+        progress: Some(35),
+    };
+    if project_root.join("Cargo.toml").is_file() {
+        if let Ok(index) = project_indexer::index_project(project_root) {
+            return graph_builder::build_fallback_graph(&index, status);
+        }
+    }
+    graph_builder::build_language_graph(project_root, status)
+}
+
+fn parser_analyzer_statuses(snapshot: &GraphSnapshot) -> Vec<AnalyzerServiceStatus> {
+    vec![AnalyzerServiceStatus {
+        id: "cloud-parser".into(),
+        kind: AnalyzerKind::Other,
+        engine: AnalyzerEngine::Parser,
+        label: "Cloud parser graph".into(),
+        status: AnalyzerStatus::Ready,
+        mode: Some("parser".into()),
+        message: Some("Parser-only cloud analysis".into()),
+        capabilities: vec![AnalyzerCapability::Symbols],
+        files_indexed: snapshot.files.len() as u32,
+        last_updated: Some(timestamp()),
+        provider: AnalyzerProvider::Cloud,
+        billable: false,
+        credits_used: None,
+    }]
+}
+
 fn timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -560,8 +830,11 @@ mod tests {
 
     fn test_state() -> CloudApiState {
         let root = std::env::temp_dir().join(format!("rust-watcher-cloud-api-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        CloudApiState::new(root)
+        let blobs_dir = root.join("blobs");
+        let workspaces_dir = root.join("workspaces");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        std::fs::create_dir_all(&workspaces_dir).unwrap();
+        CloudApiState::new(blobs_dir, workspaces_dir)
     }
 
     fn local_request() -> CreateAnalysisJobRequest {
@@ -589,11 +862,18 @@ mod tests {
     }
 
     fn file_entry(content: &[u8]) -> WorkspaceFileEntry {
+        file_entry_at("src/main.rs", content)
+    }
+
+    fn file_entry_at(path: &str, content: &[u8]) -> WorkspaceFileEntry {
         WorkspaceFileEntry {
-            path: "src/main.rs".into(),
+            path: path.into(),
             content_hash: sha256_content_hash(content),
             size_bytes: content.len() as u64,
-            language: Some(LanguageId::Rust),
+            language: path
+                .ends_with(".rs")
+                .then_some(LanguageId::Rust)
+                .or_else(|| path.ends_with(".tsx").then_some(LanguageId::TypeScript)),
         }
     }
 
@@ -813,6 +1093,93 @@ mod tests {
     }
 
     #[test]
+    fn materialized_child_path_accepts_safe_relative_paths() {
+        let root = PathBuf::from("/tmp/workspace");
+
+        assert_eq!(
+            materialized_child_path(&root, "src/main.rs").unwrap(),
+            root.join("src/main.rs")
+        );
+        assert_eq!(
+            materialized_child_path(&root, "Cargo.toml").unwrap(),
+            root.join("Cargo.toml")
+        );
+        assert_eq!(
+            materialized_child_path(&root, "frontend/App.tsx").unwrap(),
+            root.join("frontend/App.tsx")
+        );
+    }
+
+    #[test]
+    fn materialized_child_path_rejects_escaping_paths() {
+        let root = PathBuf::from("/tmp/workspace");
+
+        assert!(materialized_child_path(&root, "/etc/passwd").is_err());
+        assert!(materialized_child_path(&root, "../secret.rs").is_err());
+        assert!(materialized_child_path(&root, "src/../../secret.rs").is_err());
+    }
+
+    #[test]
+    fn materialize_revision_writes_files() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let main_content = b"fn main() {}";
+        let app_content = b"export function App() {}";
+        let main = file_entry_at("src/main.rs", main_content);
+        let app = file_entry_at("frontend/App.tsx", app_content);
+        state
+            .upload_blob(&workspace.id, &main.content_hash, main_content)
+            .unwrap();
+        state
+            .upload_blob(&workspace.id, &app.content_hash, app_content)
+            .unwrap();
+        let revision = state
+            .create_revision(
+                &workspace.id,
+                CreateWorkspaceRevisionRequest {
+                    base_revision: None,
+                    files: vec![main, app],
+                },
+            )
+            .unwrap()
+            .revision;
+
+        let root = materialize_revision(&state, &workspace.id, &revision.id).unwrap();
+
+        assert_eq!(
+            std::fs::read(root.join("src/main.rs")).unwrap(),
+            main_content
+        );
+        assert_eq!(
+            std::fs::read(root.join("frontend/App.tsx")).unwrap(),
+            app_content
+        );
+    }
+
+    #[test]
+    fn materialize_revision_fails_for_missing_blob() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let revision = WorkspaceRevision {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: workspace.id.clone(),
+            files: vec![file_entry(b"fn main() {}")],
+            files_count: 1,
+            total_bytes: 12,
+            parent_revision: None,
+            created_at: Some(timestamp()),
+        };
+        state
+            .revisions
+            .write()
+            .insert(revision.id.clone(), revision.clone());
+
+        let error = materialize_revision(&state, &workspace.id, &revision.id).unwrap_err();
+
+        assert!(error.to_string().contains("missing blob"));
+    }
+
+    #[test]
     fn workspace_current_revision_updates_after_revision_creation() {
         let state = test_state();
         let workspace = state.create_workspace(workspace_request());
@@ -889,5 +1256,84 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, ApiError::NotFound("revision not found".into()));
+    }
+
+    #[tokio::test]
+    async fn parser_cloud_job_completes_and_stores_snapshot() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let content = b"fn main() {}";
+        let file = file_entry(content);
+        state
+            .upload_blob(&workspace.id, &file.content_hash, content)
+            .unwrap();
+        let revision = state
+            .create_revision(
+                &workspace.id,
+                CreateWorkspaceRevisionRequest {
+                    base_revision: None,
+                    files: vec![file],
+                },
+            )
+            .unwrap()
+            .revision;
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id.clone()),
+                revision_id: Some(revision.id.clone()),
+                project_name: None,
+            })
+            .unwrap();
+
+        run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+        let updated = state.get_job(&job.id).unwrap();
+        assert_eq!(updated.status, AnalysisJobStatus::Completed);
+        assert_eq!(updated.progress, Some(100));
+        assert!(updated.started_at.is_some());
+        assert!(updated.finished_at.is_some());
+        assert_eq!(updated.analyzer_statuses.len(), 1);
+        let result = state.analysis_results.read().get(&job.id).cloned().unwrap();
+        assert_eq!(result.workspace_id, workspace.id);
+        assert_eq!(result.revision_id, revision.id);
+        assert!(!result.snapshot.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_parser_cloud_job_records_error() {
+        let state = test_state();
+        let workspace = state.create_workspace(workspace_request());
+        let revision = WorkspaceRevision {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: workspace.id.clone(),
+            files: vec![file_entry(b"fn main() {}")],
+            files_count: 1,
+            total_bytes: 12,
+            parent_revision: None,
+            created_at: Some(timestamp()),
+        };
+        state
+            .revisions
+            .write()
+            .insert(revision.id.clone(), revision.clone());
+        let job = state
+            .create_job(CreateAnalysisJobRequest {
+                source: None,
+                requested_analyzers: Vec::new(),
+                workspace_id: Some(workspace.id),
+                revision_id: Some(revision.id),
+                project_name: None,
+            })
+            .unwrap();
+
+        run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+        let updated = state.get_job(&job.id).unwrap();
+        assert_eq!(updated.status, AnalysisJobStatus::Failed);
+        assert_eq!(updated.message.as_deref(), Some("Cloud analysis failed"));
+        assert!(updated.error.is_some());
+        assert!(updated.progress.is_none());
     }
 }

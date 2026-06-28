@@ -9,7 +9,9 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 graph-core = { path = "../graph-core" }
+graph-builder = { path = "../graph-builder" }
 parking_lot.workspace = true
+project-indexer = { path = "../project-indexer" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
