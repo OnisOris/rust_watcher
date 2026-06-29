@@ -1,17 +1,21 @@
 use anyhow::{Context, Result};
 use axum::body::Bytes;
-use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{Multipart, Path as AxumPath, Query, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
 use graph_core::{
     estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobSource, AnalysisJobStatus,
     AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
     AnalyzerStatus, AppState, AppStatus, CloudAnalysisUsage, CloudWorkspace,
     CreateAnalysisJobRequest, CreateWorkspaceRevisionRequest, CreateWorkspaceRevisionResponse,
-    GraphSnapshot, WorkspaceRevision, WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
+    GraphMode, GraphSnapshot, LanguageId, WorkspaceFileEntry, WorkspaceRevision,
+    WorkspaceSyncPlanRequest, WorkspaceSyncPlanResponse,
 };
 use parking_lot::RwLock;
 use project_indexer::ProjectIndex;
@@ -19,14 +23,17 @@ use ra_client::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{Cursor, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::process::Command;
+use tokio::sync::{broadcast, Notify};
 use tokio::time::timeout;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -59,6 +66,8 @@ struct ServeArgs {
     workspaces_dir: PathBuf,
     #[arg(long, default_value = ".rust-watcher-cloud/cloud-api.sqlite")]
     db_path: PathBuf,
+    #[arg(long, default_value = "frontend/dist")]
+    frontend_dist: PathBuf,
     #[arg(long, default_value = "rust-analyzer")]
     rust_analyzer: PathBuf,
     #[arg(long, default_value_t = 120)]
@@ -69,6 +78,22 @@ struct ServeArgs {
     max_concurrent_jobs: usize,
     #[arg(long, default_value_t = 100)]
     max_queued_jobs: usize,
+    #[arg(long, env = "RUST_WATCHER_DEV_TOKEN", default_value = "dev-token")]
+    dev_token: String,
+    #[arg(long, env = "RUST_WATCHER_ADMIN_USERNAME", default_value = "admin")]
+    admin_username: String,
+    #[arg(
+        long,
+        env = "RUST_WATCHER_ADMIN_PASSWORD",
+        default_value = "dev-password"
+    )]
+    admin_password: String,
+    #[arg(long, env = "RUST_WATCHER_MAX_UPLOAD_MB", default_value_t = 200)]
+    max_upload_mb: u64,
+    #[arg(long, env = "RUST_WATCHER_MAX_FILES", default_value_t = 20_000)]
+    max_files: usize,
+    #[arg(long, default_value_t = 20)]
+    max_file_mb: u64,
 }
 
 #[derive(Clone)]
@@ -83,6 +108,13 @@ struct CloudApiState {
     blobs_dir: Arc<PathBuf>,
     workspaces_dir: Arc<PathBuf>,
     analysis_config: Arc<CloudAnalysisConfig>,
+    limits: Arc<CloudLimits>,
+    dev_token: Arc<String>,
+    admin_username: Arc<String>,
+    admin_password: Arc<String>,
+    auth_sessions: Arc<RwLock<HashSet<String>>>,
+    agent_sessions: Arc<RwLock<HashMap<String, AgentSession>>>,
+    ws_tx: broadcast::Sender<CloudEvent>,
     scheduler: JobScheduler,
     store: Arc<CloudMetadataStore>,
 }
@@ -92,6 +124,38 @@ struct CloudAnalysisConfig {
     rust_analyzer: PathBuf,
     analysis_timeout_seconds: u64,
     lsp_file_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CloudLimits {
+    max_upload_bytes: u64,
+    max_unpacked_bytes: u64,
+    max_file_count: usize,
+    max_file_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct AgentSession {
+    workspace_id: String,
+    project_name: String,
+    files: HashMap<String, WorkspaceFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -221,6 +285,7 @@ struct StoredBlob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ApiError {
     NotFound(String),
+    Unauthorized(String),
     BadRequest(String),
     Conflict(String),
     TooManyRequests(String),
@@ -231,6 +296,10 @@ impl CloudApiState {
         blobs_dir: PathBuf,
         workspaces_dir: PathBuf,
         analysis_config: CloudAnalysisConfig,
+        limits: CloudLimits,
+        dev_token: String,
+        admin_username: String,
+        admin_password: String,
         store: CloudMetadataStore,
         scheduler_config: JobSchedulerConfig,
         persisted: PersistedCloudState,
@@ -256,6 +325,13 @@ impl CloudApiState {
             blobs_dir: Arc::new(blobs_dir),
             workspaces_dir: Arc::new(workspaces_dir),
             analysis_config: Arc::new(analysis_config),
+            limits: Arc::new(limits),
+            dev_token: Arc::new(dev_token),
+            admin_username: Arc::new(admin_username),
+            admin_password: Arc::new(admin_password),
+            auth_sessions: Arc::new(RwLock::new(HashSet::new())),
+            agent_sessions: Arc::new(RwLock::new(HashMap::new())),
+            ws_tx: broadcast::channel(128).0,
             scheduler: JobScheduler::new(scheduler_config),
             store: Arc::new(store),
         };
@@ -339,7 +415,9 @@ impl CloudApiState {
     ) -> Result<AnalysisJob, ApiError> {
         let should_queue = request.workspace_id.is_some() && request.revision_id.is_some();
         if !should_queue {
-            return self.create_job(request);
+            let job = self.create_job(request)?;
+            self.emit_job_event(&job, "jobStatus", job.message.clone());
+            return Ok(job);
         }
         let mut queue = self.scheduler.queue.write();
         if queue.len() >= self.scheduler.config.max_queued_jobs {
@@ -348,6 +426,7 @@ impl CloudApiState {
         let job = self.create_job(request)?;
         queue.push_back(job.id.clone());
         drop(queue);
+        self.emit_job_event(&job, "jobStatus", job.message.clone());
         self.scheduler.notify.notify_one();
         Ok(job)
     }
@@ -427,6 +506,7 @@ impl CloudApiState {
             job.clone()
         };
         self.persist_job(&job);
+        self.emit_job_event(&job, "jobStatus", Some(message.to_string()));
         Some(job)
     }
 
@@ -442,6 +522,7 @@ impl CloudApiState {
             job.clone()
         };
         self.persist_job(&job);
+        self.emit_job_event(&job, "snapshotReady", job.message.clone());
         Some(job)
     }
 
@@ -466,7 +547,22 @@ impl CloudApiState {
             job.clone()
         };
         self.persist_job(&job);
+        self.emit_job_event(&job, "error", job.error.clone());
         Some(job)
+    }
+
+    fn emit_job_event(&self, job: &AnalysisJob, event_type: &str, message: Option<String>) {
+        let workspace_id = self
+            .get_job_revision_target(&job.id)
+            .map(|target| target.workspace_id);
+        let _ = self.ws_tx.send(CloudEvent {
+            event_type: event_type.into(),
+            job_id: Some(job.id.clone()),
+            workspace_id,
+            status: Some(cloud_status_name(job.status).into()),
+            progress: job.progress.map(|progress| f32::from(progress) / 100.0),
+            message,
+        });
     }
 
     fn fail_job(&self, id: &str, error: impl Into<String>) -> Option<AnalysisJob> {
@@ -768,6 +864,151 @@ struct HealthResponse {
     version: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudHealthResponse {
+    ok: bool,
+    version: &'static str,
+    mode: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudLoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudLoginResponse {
+    session_token: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudMeResponse {
+    authenticated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubImportRequest {
+    url: String,
+    #[serde(rename = "ref")]
+    git_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudStartResponse {
+    workspace_id: String,
+    job_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudJobResponse {
+    job_id: String,
+    workspace_id: Option<String>,
+    status: AnalysisJobStatus,
+    message: Option<String>,
+    progress: Option<f32>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    credits_estimated: Option<u32>,
+    credits_used: Option<u32>,
+    analyzers: Vec<CloudJobAnalyzerResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudJobAnalyzerResponse {
+    kind: String,
+    status: AnalyzerStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudWorkspaceStatusResponse {
+    workspace_id: String,
+    name: String,
+    source: CloudWorkspaceSourceResponse,
+    status: String,
+    file_count: u32,
+    last_job_id: Option<String>,
+    last_updated: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudWorkspaceSourceResponse {
+    #[serde(rename = "type")]
+    source_type: String,
+    url: Option<String>,
+    #[serde(rename = "ref")]
+    git_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudUsageResponse {
+    credits_remaining: u32,
+    credits_used: u32,
+    jobs: Vec<CloudUsageJobResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudUsageJobResponse {
+    job_id: String,
+    workspace_id: Option<String>,
+    credits: u32,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSessionRequest {
+    project_name: String,
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSessionResponse {
+    session_id: String,
+    workspace_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentFilesRequest {
+    files: Vec<AgentFileRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentFileRequest {
+    path: String,
+    language: Option<LanguageId>,
+    content_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotQuery {
+    mode: Option<GraphMode>,
+}
+
+#[derive(Debug)]
+struct CollectedWorkspaceFile {
+    entry: WorkspaceFileEntry,
+    bytes: Vec<u8>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -800,12 +1041,53 @@ async fn serve(args: ServeArgs) -> Result<()> {
             analysis_timeout_seconds: args.analysis_timeout_seconds,
             lsp_file_timeout_seconds: args.lsp_file_timeout_seconds,
         },
+        CloudLimits {
+            max_upload_bytes: args.max_upload_mb.saturating_mul(1024 * 1024),
+            max_unpacked_bytes: args
+                .max_upload_mb
+                .saturating_mul(1024 * 1024)
+                .saturating_mul(2),
+            max_file_count: args.max_files,
+            max_file_bytes: args.max_file_mb.saturating_mul(1024 * 1024),
+        },
+        args.dev_token.clone(),
+        args.admin_username.clone(),
+        args.admin_password.clone(),
         store,
         scheduler_config,
         persisted,
     )?;
     start_analysis_workers(state.clone());
     let app = Router::new()
+        .route("/api/cloud/health", get(cloud_health))
+        .route("/api/cloud/auth/login", post(cloud_login))
+        .route("/api/cloud/auth/me", get(cloud_me))
+        .route("/api/cloud/import/github", post(cloud_import_github))
+        .route("/api/cloud/upload", post(cloud_upload_zip))
+        .route("/api/cloud/jobs/{id}", get(cloud_get_job))
+        .route(
+            "/api/cloud/workspaces/{id}/status",
+            get(cloud_workspace_status),
+        )
+        .route(
+            "/api/cloud/workspaces/{id}/snapshot",
+            get(cloud_workspace_snapshot),
+        )
+        .route("/api/cloud/usage", get(cloud_usage))
+        .route("/api/cloud/ws", get(cloud_ws_handler))
+        .route("/api/cloud/agent/sessions", post(agent_create_session))
+        .route(
+            "/api/cloud/agent/sessions/{id}/files",
+            post(agent_upload_files),
+        )
+        .route(
+            "/api/cloud/agent/sessions/{id}/changes",
+            post(agent_upload_files),
+        )
+        .route(
+            "/api/cloud/agent/sessions/{id}/analyze",
+            post(agent_analyze_session),
+        )
         .route("/api/health", get(health))
         .route(
             "/api/workspaces",
@@ -829,6 +1111,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/analysis/jobs/{id}/cancel", post(cancel_job))
         .route("/api/analysis/queue", get(get_analysis_queue))
         .route("/api/usage/summary", get(usage_summary))
+        .fallback_service(
+            ServeDir::new(&args.frontend_dist)
+                .not_found_service(ServeFile::new(args.frontend_dist.join("index.html"))),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -850,6 +1136,180 @@ async fn health() -> Json<HealthResponse> {
         service: "cloud-api",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+async fn cloud_health() -> Json<CloudHealthResponse> {
+    Json(CloudHealthResponse {
+        ok: true,
+        version: env!("CARGO_PKG_VERSION"),
+        mode: "cloud",
+    })
+}
+
+async fn cloud_login(
+    State(state): State<CloudApiState>,
+    Json(request): Json<CloudLoginRequest>,
+) -> impl IntoResponse {
+    if request.username != *state.admin_username || request.password != *state.admin_password {
+        return (StatusCode::UNAUTHORIZED, "invalid username or password").into_response();
+    }
+    let session_token = Uuid::new_v4().to_string();
+    state.auth_sessions.write().insert(session_token.clone());
+    Json(CloudLoginResponse { session_token }).into_response()
+}
+
+async fn cloud_me(State(state): State<CloudApiState>, headers: HeaderMap) -> impl IntoResponse {
+    match require_cloud_auth(&state, &headers) {
+        Ok(()) => Json(CloudMeResponse {
+            authenticated: true,
+        })
+        .into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn cloud_import_github(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    Json(request): Json<GithubImportRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    match import_github_workspace(&state, request).await {
+        Ok(response) => (StatusCode::ACCEPTED, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn cloud_upload_zip(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    match upload_zip_workspace(&state, &mut multipart).await {
+        Ok(response) => (StatusCode::ACCEPTED, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn cloud_get_job(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    match state.get_job(&id) {
+        Some(job) => Json(cloud_job_response(&state, job)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn cloud_workspace_status(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    match state.get_workspace(&id) {
+        Some(workspace) => Json(cloud_workspace_status_response(&state, workspace)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn cloud_workspace_snapshot(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<SnapshotQuery>,
+) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    let Some(snapshot) = latest_workspace_snapshot(&state, &id) else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let snapshot = query
+        .mode
+        .map(|mode| graph_builder::filter_snapshot(&snapshot, mode))
+        .unwrap_or(snapshot);
+    Json(snapshot).into_response()
+}
+
+async fn cloud_usage(State(state): State<CloudApiState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    Json(cloud_usage_response(&state)).into_response()
+}
+
+async fn cloud_ws_handler(
+    State(state): State<CloudApiState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| cloud_websocket(socket, state))
+}
+
+async fn agent_create_session(
+    State(state): State<CloudApiState>,
+    Json(request): Json<AgentSessionRequest>,
+) -> impl IntoResponse {
+    if request.token != *state.dev_token {
+        return (StatusCode::UNAUTHORIZED, "invalid agent token").into_response();
+    }
+    let workspace = state.create_workspace(CreateWorkspaceRequest {
+        display_name: request.project_name.clone(),
+        source: Some(AnalysisJobSource {
+            kind: graph_core::AnalysisJobSourceKind::LocalPath,
+            display_name: Some(request.project_name.clone()),
+            path: None,
+            repository_url: None,
+            git_ref: None,
+            commit_sha: None,
+        }),
+    });
+    let session_id = Uuid::new_v4().to_string();
+    state.agent_sessions.write().insert(
+        session_id.clone(),
+        AgentSession {
+            workspace_id: workspace.id.clone(),
+            project_name: request.project_name,
+            files: HashMap::new(),
+        },
+    );
+    Json(AgentSessionResponse {
+        session_id,
+        workspace_id: workspace.id,
+    })
+    .into_response()
+}
+
+async fn agent_upload_files(
+    State(state): State<CloudApiState>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<AgentFilesRequest>,
+) -> impl IntoResponse {
+    match store_agent_files(&state, &id, request) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn agent_analyze_session(
+    State(state): State<CloudApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    match analyze_agent_session(&state, &id) {
+        Ok(response) => (StatusCode::ACCEPTED, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn create_job(
@@ -956,6 +1416,34 @@ fn is_running_status(status: AnalysisJobStatus) -> bool {
     )
 }
 
+fn cloud_status_name(status: AnalysisJobStatus) -> &'static str {
+    match status {
+        AnalysisJobStatus::Queued => "queued",
+        AnalysisJobStatus::Preparing => "importing",
+        AnalysisJobStatus::Indexing => "indexing",
+        AnalysisJobStatus::RunningAnalyzers => "analyzing",
+        AnalysisJobStatus::BuildingGraph => "analyzing",
+        AnalysisJobStatus::Completed => "completed",
+        AnalysisJobStatus::Failed => "failed",
+        AnalysisJobStatus::Cancelled => "cancelled",
+    }
+}
+
+fn require_cloud_auth(state: &CloudApiState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::Unauthorized("missing bearer token".into()))?;
+    if state.auth_sessions.read().contains(token) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized("invalid or expired session".into()))
+    }
+}
+
 fn recover_running_jobs(jobs: &mut HashMap<String, AnalysisJob>) {
     for job in jobs.values_mut() {
         if is_running_status(job.status) {
@@ -1034,10 +1522,717 @@ async fn get_revision(
     }
 }
 
+async fn import_github_workspace(
+    state: &CloudApiState,
+    request: GithubImportRequest,
+) -> Result<CloudStartResponse, ApiError> {
+    let github = parse_github_url(&request.url)?;
+    let git_ref = request
+        .git_ref
+        .or(github.git_ref)
+        .filter(|value| !value.trim().is_empty());
+    if let Some(git_ref) = &git_ref {
+        validate_git_ref(git_ref)?;
+    }
+    let import_root = state.workspaces_dir.join("_imports");
+    std::fs::create_dir_all(&import_root)
+        .map_err(|error| ApiError::BadRequest(format!("failed to prepare import root: {error}")))?;
+    let checkout_dir = import_root.join(Uuid::new_v4().to_string());
+    let mut command = Command::new("git");
+    command
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg("--no-tags");
+    if let Some(git_ref) = &git_ref {
+        command.arg("--branch").arg(git_ref);
+    }
+    command.arg(&github.clone_url).arg(&checkout_dir);
+    let output = command
+        .output()
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("failed to start git: {error}")))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let _ = std::fs::remove_dir_all(&checkout_dir);
+        return Err(ApiError::BadRequest(if message.is_empty() {
+            "git clone failed".into()
+        } else {
+            format!("git clone failed: {message}")
+        }));
+    }
+    import_project_directory(
+        state,
+        &checkout_dir,
+        github.repo.as_str(),
+        Some(AnalysisJobSource {
+            kind: graph_core::AnalysisJobSourceKind::GitRepository,
+            display_name: Some(github.repo.clone()),
+            path: None,
+            repository_url: Some(github.web_url),
+            git_ref,
+            commit_sha: None,
+        }),
+    )
+}
+
+async fn upload_zip_workspace(
+    state: &CloudApiState,
+    multipart: &mut Multipart,
+) -> Result<CloudStartResponse, ApiError> {
+    let mut archive = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("invalid multipart upload: {error}")))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        if name != "file" && archive.is_some() {
+            continue;
+        }
+        let file_name = field.file_name().map(str::to_string);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|error| ApiError::BadRequest(format!("failed to read upload: {error}")))?;
+        if bytes.len() as u64 > state.limits.max_upload_bytes {
+            return Err(ApiError::BadRequest(
+                "archive exceeds max upload size".into(),
+            ));
+        }
+        archive = Some((file_name, bytes));
+    }
+    let Some((file_name, bytes)) = archive else {
+        return Err(ApiError::BadRequest(
+            "multipart field 'file' is required".into(),
+        ));
+    };
+    if let Some(file_name) = &file_name {
+        if !file_name.to_ascii_lowercase().ends_with(".zip") {
+            return Err(ApiError::BadRequest(
+                "only .zip uploads are supported".into(),
+            ));
+        }
+    }
+    let import_root = state.workspaces_dir.join("_uploads");
+    std::fs::create_dir_all(&import_root)
+        .map_err(|error| ApiError::BadRequest(format!("failed to prepare upload root: {error}")))?;
+    let unpack_dir = import_root.join(Uuid::new_v4().to_string());
+    unpack_zip_bytes(state, &bytes, &unpack_dir)?;
+    let display_name = file_name
+        .as_deref()
+        .map(zip_display_name)
+        .unwrap_or_else(|| "uploaded-project".into());
+    import_project_directory(
+        state,
+        &unpack_dir,
+        &display_name,
+        Some(AnalysisJobSource {
+            kind: graph_core::AnalysisJobSourceKind::UploadedArchive,
+            display_name: Some(display_name.clone()),
+            path: None,
+            repository_url: None,
+            git_ref: None,
+            commit_sha: None,
+        }),
+    )
+}
+
+fn import_project_directory(
+    state: &CloudApiState,
+    root: &Path,
+    display_name: &str,
+    source: Option<AnalysisJobSource>,
+) -> Result<CloudStartResponse, ApiError> {
+    let workspace = state.create_workspace(CreateWorkspaceRequest {
+        display_name: display_name.to_string(),
+        source,
+    });
+    let files = collect_workspace_files(root, &state.limits)?;
+    let requested_analyzers = requested_analyzers_for_collected_files(&files);
+    store_workspace_files(state, &workspace.id, &files)?;
+    let revision_files = files.into_iter().map(|file| file.entry).collect::<Vec<_>>();
+    let revision_response = state.create_revision(
+        &workspace.id,
+        CreateWorkspaceRevisionRequest {
+            base_revision: None,
+            files: revision_files,
+        },
+    )?;
+    let job = state.create_job_for_request(CreateAnalysisJobRequest {
+        source: None,
+        requested_analyzers,
+        project_name: Some(workspace.display_name),
+        workspace_id: Some(revision_response.workspace.id.clone()),
+        revision_id: Some(revision_response.revision.id),
+    })?;
+    Ok(CloudStartResponse {
+        workspace_id: revision_response.workspace.id,
+        job_id: job.id,
+        status: "queued".into(),
+        session_token: None,
+    })
+}
+
+fn store_workspace_files(
+    state: &CloudApiState,
+    workspace_id: &str,
+    files: &[CollectedWorkspaceFile],
+) -> Result<(), ApiError> {
+    for file in files {
+        state.upload_blob(workspace_id, &file.entry.content_hash, &file.bytes)?;
+    }
+    Ok(())
+}
+
+fn collect_workspace_files(
+    root: &Path,
+    limits: &CloudLimits,
+) -> Result<Vec<CollectedWorkspaceFile>, ApiError> {
+    let root = root.canonicalize().map_err(|error| {
+        ApiError::BadRequest(format!("failed to canonicalize project: {error}"))
+    })?;
+    let mut files = Vec::new();
+    collect_workspace_files_inner(&root, &root, limits, &mut files)?;
+    files.sort_by(|left, right| left.entry.path.cmp(&right.entry.path));
+    if files.len() > limits.max_file_count {
+        return Err(ApiError::BadRequest("project has too many files".into()));
+    }
+    Ok(files)
+}
+
+fn collect_workspace_files_inner(
+    root: &Path,
+    current: &Path,
+    limits: &CloudLimits,
+    files: &mut Vec<CollectedWorkspaceFile>,
+) -> Result<(), ApiError> {
+    let entries = std::fs::read_dir(current)
+        .map_err(|error| ApiError::BadRequest(format!("failed to read directory: {error}")))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        if should_ignore_cloud_path(relative) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        if metadata.is_dir() {
+            collect_workspace_files_inner(root, &path, limits, files)?;
+            continue;
+        }
+        if !metadata.is_file() || !is_sync_file_path(&path) {
+            continue;
+        }
+        if metadata.len() > limits.max_file_bytes {
+            return Err(ApiError::BadRequest(format!(
+                "file exceeds max size: {}",
+                relative.display()
+            )));
+        }
+        if files.len() >= limits.max_file_count {
+            return Err(ApiError::BadRequest("project has too many files".into()));
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|error| ApiError::BadRequest(format!("failed to read file: {error}")))?;
+        let relative_path = project_indexer::relative_to(root, &path);
+        files.push(CollectedWorkspaceFile {
+            entry: WorkspaceFileEntry {
+                path: relative_path,
+                content_hash: sha256_content_hash(&bytes),
+                size_bytes: bytes.len() as u64,
+                language: language_for_path(&path),
+            },
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+fn store_agent_files(
+    state: &CloudApiState,
+    session_id: &str,
+    request: AgentFilesRequest,
+) -> Result<(), ApiError> {
+    let workspace_id = state
+        .agent_sessions
+        .read()
+        .get(session_id)
+        .map(|session| session.workspace_id.clone())
+        .ok_or_else(|| ApiError::NotFound("agent session not found".into()))?;
+    for file in request.files {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(file.content_base64)
+            .map_err(|error| {
+                ApiError::BadRequest(format!("invalid base64 file payload: {error}"))
+            })?;
+        if bytes.len() as u64 > state.limits.max_file_bytes {
+            return Err(ApiError::BadRequest(format!(
+                "file exceeds max size: {}",
+                file.path
+            )));
+        }
+        let path = validate_relative_path(&file.path)?;
+        let content_hash = sha256_content_hash(&bytes);
+        state.upload_blob(&workspace_id, &content_hash, &bytes)?;
+        let entry = WorkspaceFileEntry {
+            path: path.clone(),
+            content_hash,
+            size_bytes: bytes.len() as u64,
+            language: file
+                .language
+                .or_else(|| language_for_path(Path::new(&path))),
+        };
+        let mut sessions = state.agent_sessions.write();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| ApiError::NotFound("agent session not found".into()))?;
+        session.files.insert(path, entry);
+    }
+    Ok(())
+}
+
+fn analyze_agent_session(
+    state: &CloudApiState,
+    session_id: &str,
+) -> Result<CloudStartResponse, ApiError> {
+    let session = state
+        .agent_sessions
+        .read()
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound("agent session not found".into()))?;
+    let mut files = session.files.values().cloned().collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    if files.is_empty() {
+        return Err(ApiError::BadRequest(
+            "agent session has no uploaded files".into(),
+        ));
+    }
+    let requested_analyzers = requested_analyzers_for_workspace_files(&files);
+    let revision_response = state.create_revision(
+        &session.workspace_id,
+        CreateWorkspaceRevisionRequest {
+            base_revision: None,
+            files,
+        },
+    )?;
+    let job = state.create_job_for_request(CreateAnalysisJobRequest {
+        source: None,
+        requested_analyzers,
+        project_name: Some(session.project_name),
+        workspace_id: Some(revision_response.workspace.id.clone()),
+        revision_id: Some(revision_response.revision.id),
+    })?;
+    let session_token = Uuid::new_v4().to_string();
+    state.auth_sessions.write().insert(session_token.clone());
+    Ok(CloudStartResponse {
+        workspace_id: revision_response.workspace.id,
+        job_id: job.id,
+        status: "queued".into(),
+        session_token: Some(session_token),
+    })
+}
+
+fn cloud_job_response(state: &CloudApiState, job: AnalysisJob) -> CloudJobResponse {
+    let workspace_id = state
+        .get_job_revision_target(&job.id)
+        .map(|target| target.workspace_id);
+    let updated_at = job.finished_at.clone().or_else(|| job.started_at.clone());
+    CloudJobResponse {
+        job_id: job.id,
+        workspace_id,
+        status: job.status,
+        message: job.error.clone().or(job.message),
+        progress: job.progress.map(|progress| f32::from(progress) / 100.0),
+        created_at: job.created_at,
+        updated_at,
+        credits_estimated: job.credits_estimated,
+        credits_used: job.credits_used,
+        analyzers: job
+            .analyzer_statuses
+            .into_iter()
+            .map(|status| CloudJobAnalyzerResponse {
+                kind: status.id,
+                status: status.status,
+            })
+            .collect(),
+    }
+}
+
+fn cloud_workspace_status_response(
+    state: &CloudApiState,
+    workspace: CloudWorkspace,
+) -> CloudWorkspaceStatusResponse {
+    let last_job = state
+        .jobs
+        .read()
+        .values()
+        .filter(|job| {
+            state
+                .get_job_revision_target(&job.id)
+                .is_some_and(|target| target.workspace_id == workspace.id)
+        })
+        .max_by(|left, right| left.created_at.cmp(&right.created_at))
+        .cloned();
+    let status = last_job
+        .as_ref()
+        .map(|job| match job.status {
+            AnalysisJobStatus::Completed => "ready",
+            AnalysisJobStatus::Failed => "failed",
+            AnalysisJobStatus::Cancelled => "cancelled",
+            _ => "analyzing",
+        })
+        .unwrap_or("created")
+        .to_string();
+    let source = workspace.source.clone();
+    CloudWorkspaceStatusResponse {
+        workspace_id: workspace.id,
+        name: workspace.display_name,
+        source: CloudWorkspaceSourceResponse {
+            source_type: source
+                .as_ref()
+                .map(|source| match source.kind {
+                    graph_core::AnalysisJobSourceKind::GitRepository => "github",
+                    graph_core::AnalysisJobSourceKind::UploadedArchive => "zip",
+                    graph_core::AnalysisJobSourceKind::LocalPath => "agent",
+                })
+                .unwrap_or("unknown")
+                .into(),
+            url: source
+                .as_ref()
+                .and_then(|source| source.repository_url.clone()),
+            git_ref: source.and_then(|source| source.git_ref),
+        },
+        status,
+        file_count: workspace.files_count,
+        last_job_id: last_job.map(|job| job.id),
+        last_updated: workspace.updated_at,
+    }
+}
+
+fn latest_workspace_snapshot(state: &CloudApiState, workspace_id: &str) -> Option<GraphSnapshot> {
+    let revisions = state.revisions.read();
+    let results = state.analysis_results.read();
+    results
+        .values()
+        .filter(|result| result.workspace_id == workspace_id)
+        .max_by_key(|result| {
+            revisions
+                .get(&result.revision_id)
+                .and_then(|revision| revision.created_at.clone())
+                .unwrap_or_else(|| result.created_at.clone())
+        })
+        .map(|result| result.snapshot.clone())
+}
+
+fn cloud_usage_response(state: &CloudApiState) -> CloudUsageResponse {
+    let jobs = state.jobs.read();
+    let mut usage = state
+        .analysis_usage
+        .read()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    usage.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    let credits_used = usage
+        .iter()
+        .map(|usage| usage.credits_used)
+        .fold(0u32, u32::saturating_add);
+    CloudUsageResponse {
+        credits_remaining: 1000u32.saturating_sub(credits_used),
+        credits_used,
+        jobs: usage
+            .into_iter()
+            .map(|usage| {
+                let job = jobs.get(&usage.job_id);
+                CloudUsageJobResponse {
+                    job_id: usage.job_id,
+                    workspace_id: usage.workspace_id,
+                    credits: usage.credits_used,
+                    reason: format!(
+                        "{} files, {} nodes, {} edges{}",
+                        usage.input_files,
+                        usage.output_nodes,
+                        usage.output_edges,
+                        job.and_then(|job| job.project_name.as_ref())
+                            .map(|name| format!(" · {name}"))
+                            .unwrap_or_default()
+                    ),
+                }
+            })
+            .collect(),
+    }
+}
+
+async fn cloud_websocket(socket: WebSocket, state: CloudApiState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.ws_tx.subscribe();
+    let forward = tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            if let Ok(text) = serde_json::to_string(&event) {
+                if sender.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    while let Some(Ok(message)) = receiver.next().await {
+        if matches!(message, Message::Close(_)) {
+            break;
+        }
+    }
+    forward.abort();
+}
+
+#[derive(Debug)]
+struct ParsedGithubUrl {
+    repo: String,
+    web_url: String,
+    clone_url: String,
+    git_ref: Option<String>,
+}
+
+fn parse_github_url(input: &str) -> Result<ParsedGithubUrl, ApiError> {
+    let url =
+        url::Url::parse(input).map_err(|_| ApiError::BadRequest("invalid GitHub URL".into()))?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        return Err(ApiError::BadRequest(
+            "unsupported repository host; only public github.com repositories are supported".into(),
+        ));
+    }
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    if segments.len() < 2 {
+        return Err(ApiError::BadRequest(
+            "GitHub URL must include owner and repo".into(),
+        ));
+    }
+    let owner = clean_github_component(segments[0], "owner")?;
+    let repo = clean_github_component(segments[1].trim_end_matches(".git"), "repo")?;
+    let git_ref = if segments.get(2) == Some(&"tree") && segments.len() >= 4 {
+        let joined = segments[3..].join("/");
+        validate_git_ref(&joined)?;
+        Some(joined)
+    } else {
+        None
+    };
+    Ok(ParsedGithubUrl {
+        repo: repo.clone(),
+        web_url: format!("https://github.com/{owner}/{repo}"),
+        clone_url: format!("https://github.com/{owner}/{repo}.git"),
+        git_ref,
+    })
+}
+
+fn clean_github_component(value: &str, label: &str) -> Result<String, ApiError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || !value
+            .chars()
+            .all(|char| char.is_ascii_alphanumeric() || matches!(char, '-' | '_' | '.'))
+    {
+        return Err(ApiError::BadRequest(format!("invalid GitHub {label}")));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_git_ref(value: &str) -> Result<(), ApiError> {
+    if value.is_empty()
+        || value.len() > 200
+        || value.contains("..")
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains('\\')
+        || value.chars().any(|char| {
+            char.is_control() || matches!(char, ' ' | '~' | '^' | ':' | '?' | '*' | '[')
+        })
+    {
+        return Err(ApiError::BadRequest("invalid git ref".into()));
+    }
+    Ok(())
+}
+
+fn unpack_zip_bytes(
+    state: &CloudApiState,
+    bytes: &[u8],
+    target_root: &Path,
+) -> Result<(), ApiError> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|error| ApiError::BadRequest(format!("invalid zip archive: {error}")))?;
+    if archive.len() > state.limits.max_file_count {
+        return Err(ApiError::BadRequest("archive has too many entries".into()));
+    }
+    std::fs::create_dir_all(target_root).map_err(|error| {
+        ApiError::BadRequest(format!("failed to create upload workspace: {error}"))
+    })?;
+    let mut unpacked_bytes = 0u64;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| ApiError::BadRequest(format!("failed to read zip entry: {error}")))?;
+        if file.is_dir() {
+            continue;
+        }
+        if file.enclosed_name().is_none() {
+            return Err(ApiError::BadRequest("zip entry escapes workspace".into()));
+        }
+        let entry_name = file.name().to_string();
+        let output = materialized_child_path(target_root, &entry_name)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let size = file.size();
+        if size > state.limits.max_file_bytes {
+            return Err(ApiError::BadRequest(format!(
+                "zip entry exceeds max size: {entry_name}"
+            )));
+        }
+        unpacked_bytes = unpacked_bytes.saturating_add(size);
+        if unpacked_bytes > state.limits.max_unpacked_bytes {
+            return Err(ApiError::BadRequest(
+                "archive exceeds max unpacked size".into(),
+            ));
+        }
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ApiError::BadRequest(format!("failed to create zip output directory: {error}"))
+            })?;
+        }
+        let mut bytes = Vec::with_capacity(size.min(state.limits.max_file_bytes) as usize);
+        file.read_to_end(&mut bytes).map_err(|error| {
+            ApiError::BadRequest(format!("failed to extract zip entry: {error}"))
+        })?;
+        std::fs::write(&output, bytes)
+            .map_err(|error| ApiError::BadRequest(format!("failed to write zip entry: {error}")))?;
+    }
+    Ok(())
+}
+
+fn zip_display_name(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("uploaded-project")
+        .chars()
+        .filter(|char| char.is_ascii_alphanumeric() || matches!(char, '-' | '_' | '.'))
+        .collect::<String>()
+}
+
+fn validate_relative_path(path: &str) -> Result<String, ApiError> {
+    let candidate = Path::new(path);
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ApiError::BadRequest("path escapes workspace".into()))
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(ApiError::BadRequest("empty path".into()));
+    }
+    Ok(normalized.to_string_lossy().replace('\\', "/"))
+}
+
+fn should_ignore_cloud_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    if text.contains("/.git/")
+        || text.contains("/target/")
+        || text.contains("/node_modules/")
+        || text.contains("/.venv/")
+        || text.contains("/dist/")
+        || text.contains("/build/")
+        || text.contains("/.cache/")
+        || text.contains("/.idea/")
+        || text.contains("/.vscode/")
+    {
+        return true;
+    }
+    path.components().any(|component| match component {
+        Component::Normal(name) => matches!(
+            name.to_str(),
+            Some(
+                ".git"
+                    | "target"
+                    | "node_modules"
+                    | ".venv"
+                    | "dist"
+                    | "build"
+                    | ".cache"
+                    | ".idea"
+                    | ".vscode"
+            )
+        ),
+        _ => false,
+    })
+}
+
+fn is_sync_file_path(path: &Path) -> bool {
+    language_for_path(path).is_some()
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                matches!(
+                    name,
+                    "Cargo.toml"
+                        | "Cargo.lock"
+                        | "rust-toolchain"
+                        | "rust-toolchain.toml"
+                        | "package.json"
+                        | "pnpm-lock.yaml"
+                        | "package-lock.json"
+                        | "yarn.lock"
+                        | "tsconfig.json"
+                        | "pyproject.toml"
+                        | "uv.lock"
+                        | "requirements.txt"
+                )
+            })
+}
+
+fn language_for_path(path: &Path) -> Option<LanguageId> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("rs") => Some(LanguageId::Rust),
+        Some("py") => Some(LanguageId::Python),
+        Some("ts" | "tsx") => Some(LanguageId::TypeScript),
+        Some("js" | "jsx") => Some(LanguageId::JavaScript),
+        Some("qml") => Some(LanguageId::Qml),
+        _ => None,
+    }
+}
+
+fn requested_analyzers_for_collected_files(
+    files: &[CollectedWorkspaceFile],
+) -> Vec<AnalyzerEngine> {
+    let entries = files
+        .iter()
+        .map(|file| file.entry.clone())
+        .collect::<Vec<_>>();
+    requested_analyzers_for_workspace_files(&entries)
+}
+
+fn requested_analyzers_for_workspace_files(files: &[WorkspaceFileEntry]) -> Vec<AnalyzerEngine> {
+    if files.iter().any(|file| file.path == "Cargo.toml") {
+        vec![AnalyzerEngine::RustAnalyzer]
+    } else {
+        Vec::new()
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         match self {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
+            Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message).into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
             Self::Conflict(message) => (StatusCode::CONFLICT, message).into_response(),
             Self::TooManyRequests(message) => {
@@ -1226,6 +2421,7 @@ async fn execute_cloud_analysis_job(state: CloudApiState, job_id: String) -> Res
     let graph_build_start = Instant::now();
     let (mut snapshot, project_index) = build_initial_snapshot(&project_root);
     let rust_analyzer_requested = requested_analyzers.contains(&AnalyzerEngine::RustAnalyzer);
+    let mut rust_analyzer_final_status = None;
     if rust_analyzer_requested {
         state.update_job_status(
             &job_id,
@@ -1245,10 +2441,39 @@ async fn execute_cloud_analysis_job(state: CloudApiState, job_id: String) -> Res
                 )),
             ),
         );
-        let Some(project_index) = project_index.as_ref() else {
-            anyhow::bail!("rust-analyzer requires a Cargo project for cloud semantic analysis");
-        };
-        enrich_with_cloud_rust_analyzer(&state, &job_id, &mut snapshot, project_index).await?;
+        if let Some(project_index) = project_index.as_ref() {
+            match enrich_with_cloud_rust_analyzer(&state, &job_id, &mut snapshot, project_index)
+                .await
+            {
+                Ok(()) => {
+                    rust_analyzer_final_status = Some(rust_analyzer_status(
+                        AnalyzerStatus::Ready,
+                        Some("Cloud rust-analyzer completed".into()),
+                        rust_file_count(Some(project_index)),
+                        Some(credits_estimated),
+                    ));
+                }
+                Err(error) => {
+                    warn!(job_id = %job_id, %error, "cloud rust-analyzer failed; keeping parser graph");
+                    rust_analyzer_final_status = Some(rust_analyzer_status(
+                        AnalyzerStatus::Error,
+                        Some(format!("rust-analyzer failed: {error}")),
+                        0,
+                        None,
+                    ));
+                }
+            }
+        } else {
+            rust_analyzer_final_status = Some(rust_analyzer_status(
+                AnalyzerStatus::Fallback,
+                Some(
+                    "rust-analyzer skipped: uploaded files are not a standalone Cargo project"
+                        .into(),
+                ),
+                0,
+                None,
+            ));
+        }
     }
     let graph_build_ms = elapsed_ms(graph_build_start.elapsed());
 
@@ -1261,27 +2486,34 @@ async fn execute_cloud_analysis_job(state: CloudApiState, job_id: String) -> Res
     snapshot.status.app_state = AppState::Normal;
     snapshot.status.analyzer_status = AnalyzerStatus::Ready;
     snapshot.status.analyzers = if rust_analyzer_requested {
-        cloud_analyzer_statuses(
-            &snapshot,
-            Some(rust_analyzer_status(
-                AnalyzerStatus::Ready,
-                Some("Cloud rust-analyzer completed".into()),
-                rust_file_count(project_index.as_ref()),
-                Some(credits_estimated),
-            )),
-        )
+        cloud_analyzer_statuses(&snapshot, rust_analyzer_final_status.clone())
     } else {
         parser_analyzer_statuses(&snapshot)
     };
     snapshot.status.message = Some(if rust_analyzer_requested {
-        "Cloud rust-analyzer analysis completed".into()
+        match rust_analyzer_final_status
+            .as_ref()
+            .map(|status| status.status)
+            .unwrap_or(AnalyzerStatus::Fallback)
+        {
+            AnalyzerStatus::Ready => "Cloud rust-analyzer analysis completed".into(),
+            _ => "Cloud parser analysis completed; rust-analyzer used fallback".into(),
+        }
     } else {
         "Cloud parser analysis completed".into()
     });
     snapshot.status.progress = Some(100);
     snapshot.status.last_updated = Some(timestamp());
 
-    let credits_used = credits_estimated;
+    let credits_used = if rust_analyzer_requested
+        && rust_analyzer_final_status
+            .as_ref()
+            .is_some_and(|status| status.status == AnalyzerStatus::Ready)
+    {
+        credits_estimated
+    } else {
+        estimate_cloud_analysis_credits(revision.files_count, revision.total_bytes, &[])
+    };
     let usage = CloudAnalysisUsage {
         job_id: job_id.clone(),
         workspace_id: Some(target.workspace_id.clone()),
@@ -1556,11 +2788,24 @@ mod tests {
             blobs_dir,
             workspaces_dir,
             analysis_config,
+            test_cloud_limits(),
+            "dev-token".into(),
+            "admin".into(),
+            "dev-password".into(),
             store,
             scheduler_config,
             PersistedCloudState::default(),
         )
         .unwrap()
+    }
+
+    fn test_cloud_limits() -> CloudLimits {
+        CloudLimits {
+            max_upload_bytes: 200 * 1024 * 1024,
+            max_unpacked_bytes: 400 * 1024 * 1024,
+            max_file_count: 20_000,
+            max_file_bytes: 20 * 1024 * 1024,
+        }
     }
 
     fn local_request() -> CreateAnalysisJobRequest {
@@ -1769,6 +3014,10 @@ mod tests {
             blobs_dir,
             workspaces_dir,
             test_analysis_config(),
+            test_cloud_limits(),
+            "dev-token".into(),
+            "admin".into(),
+            "dev-password".into(),
             store,
             JobSchedulerConfig::default(),
             persisted,
@@ -2189,6 +3438,10 @@ mod tests {
             blobs_dir,
             workspaces_dir,
             test_analysis_config(),
+            test_cloud_limits(),
+            "dev-token".into(),
+            "admin".into(),
+            "dev-password".into(),
             store,
             JobSchedulerConfig::default(),
             persisted,
@@ -2242,6 +3495,10 @@ mod tests {
             blobs_dir,
             workspaces_dir,
             test_analysis_config(),
+            test_cloud_limits(),
+            "dev-token".into(),
+            "admin".into(),
+            "dev-password".into(),
             store,
             JobSchedulerConfig::default(),
             persisted,

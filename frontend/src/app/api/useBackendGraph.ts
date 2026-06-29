@@ -157,7 +157,8 @@ function normalizeSnapshot(snapshot: GraphSnapshot): GraphSnapshot {
   return changed ? { ...snapshot, edges, status } : { ...snapshot, status }
 }
 
-export function useBackendGraph(mode: GraphMode) {
+export function useBackendGraph(mode: GraphMode, options: { enabled?: boolean } = {}) {
+  const enabled = options.enabled ?? true
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
   const [analyzers, setAnalyzers] = useState<AppStatus['analyzers']>([])
@@ -285,6 +286,7 @@ export function useBackendGraph(mode: GraphMode) {
   }, [applyDevFallback, applyStatus])
 
   const refreshSnapshot = useCallback(async (nextMode: GraphMode = mode) => {
+    if (!enabled) return
     const requestSeq = ++snapshotRequestSeq.current
     try {
       const response = await fetch(`/api/graph/snapshot?mode=${encodeURIComponent(nextMode)}`)
@@ -298,7 +300,7 @@ export function useBackendGraph(mode: GraphMode) {
       setMessage(actionableNetworkError('Loading graph snapshot', error))
       applyDevFallback()
     }
-  }, [applyDevFallback, applySnapshot, refreshDiagnostics, mode])
+  }, [applyDevFallback, applySnapshot, refreshDiagnostics, mode, enabled])
 
   useEffect(() => {
     refreshSnapshotRef.current = async () => {
@@ -307,6 +309,7 @@ export function useBackendGraph(mode: GraphMode) {
   }, [mode, refreshSnapshot])
 
   useEffect(() => {
+    if (!enabled) return
     let cancelled = false
 
     async function boot() {
@@ -328,13 +331,15 @@ export function useBackendGraph(mode: GraphMode) {
 
     boot()
     return () => { cancelled = true }
-  }, [applyDevFallback, applyStatus, refreshSnapshot])
+  }, [applyDevFallback, applyStatus, refreshSnapshot, enabled])
 
   useEffect(() => {
+    if (!enabled) return
     if (backendAvailable) void refreshSnapshot(mode)
-  }, [backendAvailable, mode, refreshSnapshot])
+  }, [backendAvailable, mode, refreshSnapshot, enabled])
 
   useEffect(() => {
+    if (!enabled) return
     if (!backendAvailable) return
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${protocol}//${window.location.host}/ws`)
@@ -362,9 +367,10 @@ export function useBackendGraph(mode: GraphMode) {
       if (DEV_FALLBACK) applyDevFallbackRef.current()
     }
     return () => socket.close()
-  }, [backendAvailable])
+  }, [backendAvailable, enabled])
 
   const openProject = useCallback(async (path?: string) => {
+    if (!enabled) return
     try {
       setAppState('indexing')
       setDiagnosticsByFile(new Map())
@@ -381,7 +387,7 @@ export function useBackendGraph(mode: GraphMode) {
       setMessage(actionableNetworkError('Opening project', error))
       applyDevFallback()
     }
-  }, [applyDevFallback, mode, refreshSnapshot])
+  }, [applyDevFallback, mode, refreshSnapshot, enabled])
 
   const requestFocusBubble = useCallback(async (nodeId: string, depth: 1 | 2 | 3 | 'full' = 'full') => {
     const response = await fetch('/api/focus', {
@@ -412,6 +418,7 @@ export function useBackendGraph(mode: GraphMode) {
   }, [])
 
   const saveNodeLayout = useCallback(async (node: GraphNode) => {
+    if (!enabled) return
     if (!backendAvailable) return
     try {
       const response = await fetch('/api/layout/node', {
@@ -432,7 +439,7 @@ export function useBackendGraph(mode: GraphMode) {
     } catch (error) {
       setMessage(actionableNetworkError('Saving layout', error))
     }
-  }, [backendAvailable])
+  }, [backendAvailable, enabled])
 
   const search = useCallback(async (query: string): Promise<SearchResult[]> => {
     if (!backendAvailable) return localSearch(nodes, query)

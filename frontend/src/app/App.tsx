@@ -8,7 +8,11 @@ import { FilterBar } from './components/FilterBar'
 import { SearchCommandPalette } from './components/SearchCommandPalette'
 import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
+import { CloudPortal } from './components/CloudPortal'
+import { CloudLogin } from './components/CloudLogin'
 import { useBackendGraph } from './api/useBackendGraph'
+import { useCloudWorkspaceGraph } from './api/useCloudWorkspaceGraph'
+import { CLOUD_SESSION_STORAGE_KEY } from './api/cloudAuth'
 import {
   applyCollapsedGroups,
   applyDepthFilter,
@@ -41,6 +45,7 @@ const DEFAULT_FILTERS: GraphFilters = {
 }
 
 const DEFAULT_COLLAPSED_GROUPS = new Set(['module:detached-rust-files'])
+const CLOUD_MODE = import.meta.env.VITE_RUST_WATCHER_MODE === 'cloud'
 
 type GraphLens = 'all' | 'architecture' | 'api' | 'route'
 
@@ -65,7 +70,15 @@ function initialTheme(): ThemeMode {
   return stored === 'dark' ? 'dark' : 'light'
 }
 
+function initialCloudSession() {
+  return localStorage.getItem(CLOUD_SESSION_STORAGE_KEY)
+}
+
 export default function App() {
+  const urlParams = new URLSearchParams(window.location.search)
+  const cloudMode = CLOUD_MODE || urlParams.get('mode') === 'cloud'
+  const [cloudWorkspaceId, setCloudWorkspaceId] = useState<string | null>(urlParams.get('workspace'))
+  const [cloudSessionToken, setCloudSessionToken] = useState<string | null>(initialCloudSession)
   const [mode, setMode] = useState<GraphMode>('Macro')
   const [theme, setTheme] = useState<ThemeMode>(initialTheme)
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS)
@@ -81,6 +94,9 @@ export default function App() {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(DEFAULT_COLLAPSED_GROUPS)
   const [userSavedViews, setUserSavedViews] = useState<SavedView[]>([])
   const [traceHighlights, setTraceHighlights] = useState<TraceHighlights | null>(null)
+  const localGraph = useBackendGraph(mode, { enabled: !cloudMode })
+  const cloudGraph = useCloudWorkspaceGraph(cloudWorkspaceId, mode, { enabled: cloudMode && !!cloudWorkspaceId && !!cloudSessionToken, sessionToken: cloudSessionToken })
+  const graph = cloudMode ? cloudGraph : localGraph
   const {
     appState,
     analyzerStatus,
@@ -101,7 +117,7 @@ export default function App() {
     openInEditor,
     saveNodeLayout,
     search,
-  } = useBackendGraph(mode)
+  } = graph
   const savedLayoutRef = useRef<Map<string, string>>(new Map())
 
   const graphNodes = useMemo(
@@ -291,6 +307,27 @@ export default function App() {
   const handleSelectNode = useCallback((id: string | null) => {
     setSelectedNodeId(id)
   }, [setSelectedNodeId])
+
+  const handleCloudWorkspaceReady = useCallback((workspaceId: string) => {
+    const next = new URL(window.location.href)
+    next.searchParams.set('mode', 'cloud')
+    next.searchParams.set('workspace', workspaceId)
+    window.history.replaceState(null, '', next)
+    setCloudWorkspaceId(workspaceId)
+  }, [])
+
+  const handleCloudLogin = useCallback((sessionToken: string) => {
+    localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, sessionToken)
+    setCloudSessionToken(sessionToken)
+  }, [])
+
+  if (cloudMode && !cloudSessionToken) {
+    return <CloudLogin onLogin={handleCloudLogin} />
+  }
+
+  if (cloudMode && !cloudWorkspaceId) {
+    return <CloudPortal sessionToken={cloudSessionToken} onWorkspaceReady={handleCloudWorkspaceReady} />
+  }
 
   // ── Empty state ──────────────────────────────────────────────────────────
   if (appState === 'empty') {
