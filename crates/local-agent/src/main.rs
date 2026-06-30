@@ -145,6 +145,8 @@ async fn connect(args: ConnectArgs) -> Result<()> {
         "Analysis queued: job={} workspace={} status={}",
         analysis.job_id, analysis.workspace_id, analysis.status
     );
+    let workspace_url = workspace_url(&args.server, &analysis.workspace_id);
+    println!("Workspace URL: {workspace_url}");
 
     let started = Instant::now();
     loop {
@@ -170,6 +172,7 @@ async fn connect(args: ConnectArgs) -> Result<()> {
                     "Completed. Credits used: {}",
                     job.credits_used.unwrap_or_default()
                 );
+                println!("Open workspace: {workspace_url}");
                 return Ok(());
             }
             AnalysisJobStatus::Failed | AnalysisJobStatus::Cancelled => {
@@ -182,6 +185,17 @@ async fn connect(args: ConnectArgs) -> Result<()> {
         }
         sleep(Duration::from_secs(2)).await;
     }
+}
+
+fn workspace_url(server: &Url, workspace_id: &str) -> String {
+    let mut url = server.clone();
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.query_pairs_mut()
+        .append_pair("mode", "cloud")
+        .append_pair("workspace", workspace_id);
+    url.to_string()
 }
 
 async fn get_json<T>(

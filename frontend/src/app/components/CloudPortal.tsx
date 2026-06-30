@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { FileArchive, GitBranch, PlugZap, UploadCloud } from 'lucide-react'
+import { FileArchive, FolderOpen, GitBranch, PlugZap, UploadCloud } from 'lucide-react'
 import { cloudFetch } from '../api/cloudAuth'
 
 interface CloudPortalProps {
@@ -31,6 +31,16 @@ interface CloudUsage {
   jobs: Array<{ jobId: string; workspaceId?: string; credits: number; reason: string }>
 }
 
+interface CloudWorkspace {
+  workspaceId: string
+  name: string
+  source: { type: string; url?: string; ref?: string }
+  status: string
+  fileCount: number
+  lastJobId?: string
+  lastUpdated?: string
+}
+
 const steps = [
   'Importing repository',
   'Indexing files',
@@ -46,6 +56,7 @@ export function CloudPortal({ sessionToken, onWorkspaceReady }: CloudPortalProps
   const [gitRef, setGitRef] = useState('')
   const [job, setJob] = useState<CloudJob | null>(null)
   const [usage, setUsage] = useState<CloudUsage | null>(null)
+  const [workspaces, setWorkspaces] = useState<CloudWorkspace[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -54,9 +65,18 @@ export function CloudPortal({ sessionToken, onWorkspaceReady }: CloudPortalProps
     if (response.ok) setUsage(await response.json())
   }, [sessionToken])
 
+  const loadWorkspaces = useCallback(async () => {
+    const response = await cloudFetch('/api/cloud/workspaces', {}, sessionToken)
+    if (response.ok) {
+      const payload = await response.json() as { workspaces: CloudWorkspace[] }
+      setWorkspaces(payload.workspaces)
+    }
+  }, [sessionToken])
+
   useEffect(() => {
     void loadUsage()
-  }, [loadUsage])
+    void loadWorkspaces()
+  }, [loadUsage, loadWorkspaces])
 
   useEffect(() => {
     if (!job || job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') return
@@ -67,11 +87,12 @@ export function CloudPortal({ sessionToken, onWorkspaceReady }: CloudPortalProps
       setJob(next)
       if (next.status === 'completed' && next.workspaceId) {
         await loadUsage()
+        await loadWorkspaces()
         onWorkspaceReady(next.workspaceId)
       }
     }, 1800)
     return () => window.clearInterval(id)
-  }, [job, loadUsage, onWorkspaceReady, sessionToken])
+  }, [job, loadUsage, loadWorkspaces, onWorkspaceReady, sessionToken])
 
   const progress = Math.round((job?.progress ?? 0) * 100)
   const currentStep = useMemo(() => {
@@ -98,6 +119,7 @@ export function CloudPortal({ sessionToken, onWorkspaceReady }: CloudPortalProps
       }, sessionToken)
       if (!response.ok) throw new Error(await response.text())
       const payload = await response.json() as CloudStartResponse
+      await loadWorkspaces()
       setJob(normalizeCloudJob({ jobId: payload.jobId, workspaceId: payload.workspaceId, status: payload.status, progress: 0.05, message: 'Queued for cloud analysis' }))
     } catch (error) {
       setJob(null)
@@ -118,6 +140,7 @@ export function CloudPortal({ sessionToken, onWorkspaceReady }: CloudPortalProps
       const response = await cloudFetch('/api/cloud/upload', { method: 'POST', body: form }, sessionToken)
       if (!response.ok) throw new Error(await response.text())
       const payload = await response.json() as CloudStartResponse
+      await loadWorkspaces()
       setJob(normalizeCloudJob({ jobId: payload.jobId, workspaceId: payload.workspaceId, status: payload.status, progress: 0.05, message: 'Queued for cloud analysis' }))
     } catch (error) {
       setJob(null)
@@ -148,6 +171,33 @@ export function CloudPortal({ sessionToken, onWorkspaceReady }: CloudPortalProps
           <div style={{ marginBottom: 16, padding: 12, borderRadius: 8, background: '#FEE2E2', color: '#991B1B', border: '1px solid #FCA5A5', fontSize: 13 }}>
             {error}
           </div>
+        )}
+
+        {workspaces.length > 0 && (
+          <section style={{ marginBottom: 18, background: 'var(--cc-panel)', border: '1px solid var(--cc-border)', borderRadius: 8, padding: 16 }}>
+            <div className="flex items-center gap-2" style={{ marginBottom: 12 }}>
+              <FolderOpen size={18} />
+              <h2 style={{ fontSize: 15, fontWeight: 740, margin: 0 }}>Workspaces</h2>
+            </div>
+            <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
+              {workspaces.map(workspace => (
+                <div key={workspace.workspaceId} style={{ border: '1px solid var(--cc-border)', borderRadius: 8, padding: 12, background: 'var(--cc-surface)' }}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 740, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{workspace.name}</div>
+                      <div style={{ marginTop: 4, fontSize: 11, color: statusColor(workspace.status) }}>
+                        {workspace.status} · {workspace.fileCount} files · {sourceLabel(workspace.source)}
+                      </div>
+                      {workspace.lastUpdated && (
+                        <div style={{ marginTop: 4, fontSize: 11, color: 'var(--cc-text-faint)' }}>{formatTimestamp(workspace.lastUpdated)}</div>
+                      )}
+                    </div>
+                    <button onClick={() => onWorkspaceReady(workspace.workspaceId)} style={smallButtonStyle}>Open</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
 
         <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
@@ -312,9 +362,26 @@ function statusLabel(status: CloudJobStatus) {
   }
 }
 
-function statusColor(status: CloudJobStatus) {
+function sourceLabel(source: CloudWorkspace['source']) {
+  if (source.type === 'github') return 'GitHub'
+  if (source.type === 'zip') return 'ZIP'
+  if (source.type === 'agent') return 'Local agent'
+  return 'Cloud'
+}
+
+function formatTimestamp(value: string) {
+  const numeric = Number(value)
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric < 10_000_000_000 ? numeric * 1000 : numeric)
+    : new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function statusColor(status: string) {
   if (status === 'failed') return '#B91C1C'
-  if (status === 'completed') return '#047857'
+  if (status === 'completed' || status === 'ready') return '#047857'
+  if (status === 'analyzing') return '#0369A1'
   return 'var(--cc-text-muted)'
 }
 
@@ -343,5 +410,17 @@ const primaryButtonStyle: CSSProperties = {
   color: '#fff',
   fontSize: 13,
   fontWeight: 720,
+  cursor: 'pointer',
+}
+
+const smallButtonStyle: CSSProperties = {
+  minHeight: 30,
+  padding: '0 10px',
+  border: '1px solid var(--cc-border-strong)',
+  borderRadius: 8,
+  background: 'var(--cc-panel)',
+  color: 'var(--cc-text)',
+  fontSize: 12,
+  fontWeight: 700,
   cursor: 'pointer',
 }

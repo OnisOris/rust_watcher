@@ -945,6 +945,12 @@ struct CloudWorkspaceStatusResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CloudWorkspaceListResponse {
+    workspaces: Vec<CloudWorkspaceStatusResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CloudWorkspaceSourceResponse {
     #[serde(rename = "type")]
     source_type: String,
@@ -1065,6 +1071,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/api/cloud/import/github", post(cloud_import_github))
         .route("/api/cloud/upload", post(cloud_upload_zip))
         .route("/api/cloud/jobs/{id}", get(cloud_get_job))
+        .route("/api/cloud/workspaces", get(cloud_list_workspaces))
         .route(
             "/api/cloud/workspaces/{id}/status",
             get(cloud_workspace_status),
@@ -1208,6 +1215,29 @@ async fn cloud_get_job(
         Some(job) => Json(cloud_job_response(&state, job)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn cloud_list_workspaces(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_cloud_auth(&state, &headers) {
+        return error.into_response();
+    }
+    let mut workspaces = state
+        .workspaces
+        .read()
+        .values()
+        .cloned()
+        .map(|workspace| cloud_workspace_status_response(&state, workspace))
+        .collect::<Vec<_>>();
+    workspaces.sort_by(|left, right| {
+        right
+            .last_updated
+            .cmp(&left.last_updated)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Json(CloudWorkspaceListResponse { workspaces }).into_response()
 }
 
 async fn cloud_workspace_status(
