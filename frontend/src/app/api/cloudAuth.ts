@@ -1,4 +1,5 @@
 export const CLOUD_SESSION_STORAGE_KEY = 'rust-watcher-cloud-session'
+export const CLOUD_USERNAME_STORAGE_KEY = 'rust-watcher-cloud-username'
 
 export function cloudAuthHeaders(sessionToken: string | null): HeadersInit {
   return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}

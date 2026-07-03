@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { LockKeyhole } from 'lucide-react'
 
 interface CloudLoginProps {
-  onLogin: (sessionToken: string) => void
+  onLogin: (sessionToken: string, username: string) => void
 }
 
 export function CloudLogin({ onLogin }: CloudLoginProps) {
@@ -23,7 +23,7 @@ export function CloudLogin({ onLogin }: CloudLoginProps) {
       })
       if (!response.ok) throw new Error(await response.text())
       const payload = await response.json() as { sessionToken: string }
-      onLogin(payload.sessionToken)
+      onLogin(payload.sessionToken, username.trim())
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Login failed.')
     } finally {

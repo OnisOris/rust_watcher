@@ -11,9 +11,10 @@ import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { CloudPortal } from './components/CloudPortal'
 import { CloudLogin } from './components/CloudLogin'
 import { CloudUpdateNotice } from './components/CloudUpdateNotice'
+import { CloudShellNav, type CloudShellTab } from './components/CloudShellNav'
 import { useBackendGraph } from './api/useBackendGraph'
 import { useCloudWorkspaceGraph } from './api/useCloudWorkspaceGraph'
-import { CLOUD_SESSION_STORAGE_KEY } from './api/cloudAuth'
+import { CLOUD_SESSION_STORAGE_KEY, CLOUD_USERNAME_STORAGE_KEY } from './api/cloudAuth'
 import {
   applyCollapsedGroups,
   applyDepthFilter,
@@ -75,11 +76,28 @@ function initialCloudSession() {
   return localStorage.getItem(CLOUD_SESSION_STORAGE_KEY)
 }
 
+function initialCloudUsername() {
+  return localStorage.getItem(CLOUD_USERNAME_STORAGE_KEY)
+}
+
+function initialCloudTab(): CloudShellTab {
+  const params = new URLSearchParams(window.location.search)
+  const tab = params.get('tab')
+  if (isCloudShellTab(tab)) return tab
+  return params.get('workspace') ? 'graph' : 'workspaces'
+}
+
+function isCloudShellTab(value: string | null): value is CloudShellTab {
+  return value === 'workspaces' || value === 'new' || value === 'graph' || value === 'account' || value === 'ide'
+}
+
 export default function App() {
   const urlParams = new URLSearchParams(window.location.search)
   const cloudMode = CLOUD_MODE || urlParams.get('mode') === 'cloud'
   const [cloudWorkspaceId, setCloudWorkspaceId] = useState<string | null>(urlParams.get('workspace'))
   const [cloudSessionToken, setCloudSessionToken] = useState<string | null>(initialCloudSession)
+  const [cloudUsername, setCloudUsername] = useState<string | null>(initialCloudUsername)
+  const [cloudPortalTab, setCloudPortalTab] = useState<CloudShellTab>(initialCloudTab)
   const [mode, setMode] = useState<GraphMode>('Macro')
   const [theme, setTheme] = useState<ThemeMode>(initialTheme)
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS)
@@ -313,33 +331,66 @@ export default function App() {
     const next = new URL(window.location.href)
     next.searchParams.set('mode', 'cloud')
     next.searchParams.set('workspace', workspaceId)
+    next.searchParams.set('tab', 'graph')
     window.history.replaceState(null, '', next)
+    setCloudPortalTab('graph')
     setCloudWorkspaceId(workspaceId)
   }, [])
 
-  const handleCloudHome = useCallback(() => {
+  const handleCloudTabChange = useCallback((tab: CloudShellTab) => {
+    if (tab === 'graph' && !cloudWorkspaceId) return
     const next = new URL(window.location.href)
     next.searchParams.set('mode', 'cloud')
+    next.searchParams.set('tab', tab)
+    if (tab === 'graph' && cloudWorkspaceId) {
+      next.searchParams.set('workspace', cloudWorkspaceId)
+    } else {
+      next.searchParams.delete('workspace')
+      setSelectedNodeId(null)
+    }
+    window.history.replaceState(null, '', next)
+    setCloudPortalTab(tab)
+  }, [cloudWorkspaceId, setSelectedNodeId])
+
+  const handleCloudLogin = useCallback((sessionToken: string, username: string) => {
+    localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, sessionToken)
+    localStorage.setItem(CLOUD_USERNAME_STORAGE_KEY, username)
+    setCloudSessionToken(sessionToken)
+    setCloudUsername(username)
+  }, [])
+
+  const handleCloudLogout = useCallback(() => {
+    localStorage.removeItem(CLOUD_SESSION_STORAGE_KEY)
+    localStorage.removeItem(CLOUD_USERNAME_STORAGE_KEY)
+    const next = new URL(window.location.href)
+    next.searchParams.set('mode', 'cloud')
+    next.searchParams.set('tab', 'workspaces')
     next.searchParams.delete('workspace')
     window.history.replaceState(null, '', next)
     setSelectedNodeId(null)
     setCloudWorkspaceId(null)
+    setCloudPortalTab('workspaces')
+    setCloudSessionToken(null)
+    setCloudUsername(null)
   }, [setSelectedNodeId])
-
-  const handleCloudLogin = useCallback((sessionToken: string) => {
-    localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, sessionToken)
-    setCloudSessionToken(sessionToken)
-  }, [])
 
   if (cloudMode && !cloudSessionToken) {
     return <CloudLogin onLogin={handleCloudLogin} />
   }
 
-  if (cloudMode && !cloudWorkspaceId) {
+  if (cloudMode && (!cloudWorkspaceId || cloudPortalTab !== 'graph')) {
     return (
       <>
         <CloudUpdateNotice sessionToken={cloudSessionToken} />
-        <CloudPortal sessionToken={cloudSessionToken} onWorkspaceReady={handleCloudWorkspaceReady} />
+        <CloudPortal
+          sessionToken={cloudSessionToken}
+          username={cloudUsername}
+          activeTab={cloudPortalTab === 'graph' ? 'workspaces' : cloudPortalTab}
+          graphEnabled={Boolean(cloudWorkspaceId)}
+          onTabChange={handleCloudTabChange}
+          onWorkspaceReady={handleCloudWorkspaceReady}
+          onLogout={handleCloudLogout}
+        />
       </>
     )
   }
@@ -369,6 +420,14 @@ export default function App() {
   return (
     <div className="w-full h-full flex flex-col overflow-hidden" style={{ background: 'var(--cc-bg)', fontFamily: 'Inter, sans-serif' }}>
       {cloudMode && cloudSessionToken && <CloudUpdateNotice sessionToken={cloudSessionToken} />}
+      {cloudMode && (
+        <CloudShellNav
+          activeTab="graph"
+          username={cloudUsername}
+          graphEnabled
+          onNavigate={handleCloudTabChange}
+        />
+      )}
       {/* toolbar */}
       <TopToolbar
         appState={appState}
@@ -385,7 +444,6 @@ export default function App() {
         onRecenter={() => setRecenterKey(key => key + 1)}
         onCollapse={() => setGraphLens(current => current === 'architecture' ? 'all' : 'architecture')}
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
-        onCloudHome={cloudMode ? handleCloudHome : undefined}
         onClarityToggle={() => setClarityOpen(open => !open)}
         clarityOpen={clarityOpen}
         clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
