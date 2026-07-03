@@ -10,6 +10,7 @@ import { EmptyState } from './components/EmptyState'
 import { DenseGraphSuggestion } from './components/DenseGraphSuggestion'
 import { CloudPortal } from './components/CloudPortal'
 import { CloudLogin } from './components/CloudLogin'
+import { CloudUpdateNotice } from './components/CloudUpdateNotice'
 import { useBackendGraph } from './api/useBackendGraph'
 import { useCloudWorkspaceGraph } from './api/useCloudWorkspaceGraph'
 import { CLOUD_SESSION_STORAGE_KEY } from './api/cloudAuth'
@@ -335,7 +336,12 @@ export default function App() {
   }
 
   if (cloudMode && !cloudWorkspaceId) {
-    return <CloudPortal sessionToken={cloudSessionToken} onWorkspaceReady={handleCloudWorkspaceReady} />
+    return (
+      <>
+        <CloudUpdateNotice sessionToken={cloudSessionToken} />
+        <CloudPortal sessionToken={cloudSessionToken} onWorkspaceReady={handleCloudWorkspaceReady} />
+      </>
+    )
   }
 
   // ── Empty state ──────────────────────────────────────────────────────────
@@ -362,6 +368,7 @@ export default function App() {
   // ── Main / Normal state ──────────────────────────────────────────────────
   return (
     <div className="w-full h-full flex flex-col overflow-hidden" style={{ background: 'var(--cc-bg)', fontFamily: 'Inter, sans-serif' }}>
+      {cloudMode && cloudSessionToken && <CloudUpdateNotice sessionToken={cloudSessionToken} />}
       {/* toolbar */}
       <TopToolbar
         appState={appState}

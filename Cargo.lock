@@ -336,6 +336,7 @@ dependencies = [
  "parking_lot",
  "project-indexer",
  "ra-client",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
