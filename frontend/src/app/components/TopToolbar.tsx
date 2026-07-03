@@ -10,6 +10,7 @@ import {
   Moon,
   SlidersHorizontal,
   Wifi,
+  FolderOpen,
 } from 'lucide-react'
 import type { AnalyzerServiceStatus, AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
 import { exportGraphCanvasAsSvg } from '../api/exportGraphSvg'
@@ -30,6 +31,7 @@ interface TopToolbarProps {
   onRecenter: () => void
   onCollapse: () => void
   onThemeToggle: () => void
+  onCloudHome?: () => void
   onClarityToggle: () => void
   clarityOpen: boolean
   clarityActive: boolean
@@ -73,6 +75,7 @@ export function TopToolbar({
   onRecenter,
   onCollapse,
   onThemeToggle,
+  onCloudHome,
   onClarityToggle,
   clarityOpen,
   clarityActive,
@@ -191,6 +194,12 @@ export function TopToolbar({
       </button>
 
       <div className="flex items-center gap-1 shrink-0">
+        {onCloudHome && (
+          <>
+            <ToolbarButton icon={<FolderOpen size={14} />} label="Back to workspaces" onClick={onCloudHome} />
+            <div style={{ width: 1, height: 18, background: 'var(--cc-border)', margin: '0 2px' }} />
+          </>
+        )}
         <ToolbarButton icon={<RefreshCw size={14} />} label="Refresh / recenter graph" onClick={onRecenter} />
         <ToolbarButton icon={<Minimize2 size={14} />} label="Architecture focus" onClick={onCollapse} />
         <ToolbarButton icon={<Download size={14} />} label="Export graph" onClick={exportVisibleGraphSvg} />

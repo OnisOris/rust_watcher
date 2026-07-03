@@ -88,6 +88,8 @@ struct ServeArgs {
         default_value = "dev-password"
     )]
     admin_password: String,
+    #[arg(long, env = "RUST_WATCHER_USERS", default_value = "")]
+    users: String,
     #[arg(long, env = "RUST_WATCHER_MAX_UPLOAD_MB", default_value_t = 200)]
     max_upload_mb: u64,
     #[arg(long, env = "RUST_WATCHER_MAX_FILES", default_value_t = 20_000)]
@@ -110,8 +112,7 @@ struct CloudApiState {
     analysis_config: Arc<CloudAnalysisConfig>,
     limits: Arc<CloudLimits>,
     dev_token: Arc<String>,
-    admin_username: Arc<String>,
-    admin_password: Arc<String>,
+    auth_users: Arc<HashMap<String, String>>,
     auth_sessions: Arc<RwLock<HashSet<String>>>,
     agent_sessions: Arc<RwLock<HashMap<String, AgentSession>>>,
     ws_tx: broadcast::Sender<CloudEvent>,
@@ -298,8 +299,7 @@ impl CloudApiState {
         analysis_config: CloudAnalysisConfig,
         limits: CloudLimits,
         dev_token: String,
-        admin_username: String,
-        admin_password: String,
+        auth_users: HashMap<String, String>,
         store: CloudMetadataStore,
         scheduler_config: JobSchedulerConfig,
         persisted: PersistedCloudState,
@@ -327,8 +327,7 @@ impl CloudApiState {
             analysis_config: Arc::new(analysis_config),
             limits: Arc::new(limits),
             dev_token: Arc::new(dev_token),
-            admin_username: Arc::new(admin_username),
-            admin_password: Arc::new(admin_password),
+            auth_users: Arc::new(auth_users),
             auth_sessions: Arc::new(RwLock::new(HashSet::new())),
             agent_sessions: Arc::new(RwLock::new(HashMap::new())),
             ws_tx: broadcast::channel(128).0,
@@ -1039,6 +1038,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let store = CloudMetadataStore::open(args.db_path.clone())?;
     store.init_schema()?;
     let persisted = store.load_all()?;
+    let auth_users = parse_auth_users(&args.users, &args.admin_username, &args.admin_password)?;
     let state = CloudApiState::from_persisted(
         args.blobs_dir.clone(),
         args.workspaces_dir.clone(),
@@ -1057,8 +1057,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             max_file_bytes: args.max_file_mb.saturating_mul(1024 * 1024),
         },
         args.dev_token.clone(),
-        args.admin_username.clone(),
-        args.admin_password.clone(),
+        auth_users,
         store,
         scheduler_config,
         persisted,
@@ -1157,7 +1156,11 @@ async fn cloud_login(
     State(state): State<CloudApiState>,
     Json(request): Json<CloudLoginRequest>,
 ) -> impl IntoResponse {
-    if request.username != *state.admin_username || request.password != *state.admin_password {
+    let valid = state
+        .auth_users
+        .get(&request.username)
+        .is_some_and(|password| password == &request.password);
+    if !valid {
         return (StatusCode::UNAUTHORIZED, "invalid username or password").into_response();
     }
     let session_token = Uuid::new_v4().to_string();
@@ -1472,6 +1475,33 @@ fn require_cloud_auth(state: &CloudApiState, headers: &HeaderMap) -> Result<(), 
     } else {
         Err(ApiError::Unauthorized("invalid or expired session".into()))
     }
+}
+
+fn parse_auth_users(
+    users: &str,
+    admin_username: &str,
+    admin_password: &str,
+) -> Result<HashMap<String, String>> {
+    let mut parsed = HashMap::new();
+    for raw_entry in users
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some((username, password)) = raw_entry.split_once(':') else {
+            anyhow::bail!("invalid RUST_WATCHER_USERS entry; expected username:password");
+        };
+        let username = username.trim();
+        let password = password.trim();
+        if username.is_empty() || password.is_empty() {
+            anyhow::bail!("invalid RUST_WATCHER_USERS entry; username and password are required");
+        }
+        parsed.insert(username.to_string(), password.to_string());
+    }
+    if parsed.is_empty() {
+        parsed.insert(admin_username.to_string(), admin_password.to_string());
+    }
+    Ok(parsed)
 }
 
 fn recover_running_jobs(jobs: &mut HashMap<String, AnalysisJob>) {
@@ -2820,8 +2850,7 @@ mod tests {
             analysis_config,
             test_cloud_limits(),
             "dev-token".into(),
-            "admin".into(),
-            "dev-password".into(),
+            test_auth_users(),
             store,
             scheduler_config,
             PersistedCloudState::default(),
@@ -2836,6 +2865,10 @@ mod tests {
             max_file_count: 20_000,
             max_file_bytes: 20 * 1024 * 1024,
         }
+    }
+
+    fn test_auth_users() -> HashMap<String, String> {
+        HashMap::from([("admin".into(), "dev-password".into())])
     }
 
     fn local_request() -> CreateAnalysisJobRequest {
@@ -3046,8 +3079,7 @@ mod tests {
             test_analysis_config(),
             test_cloud_limits(),
             "dev-token".into(),
-            "admin".into(),
-            "dev-password".into(),
+            test_auth_users(),
             store,
             JobSchedulerConfig::default(),
             persisted,
@@ -3470,8 +3502,7 @@ mod tests {
             test_analysis_config(),
             test_cloud_limits(),
             "dev-token".into(),
-            "admin".into(),
-            "dev-password".into(),
+            test_auth_users(),
             store,
             JobSchedulerConfig::default(),
             persisted,
@@ -3527,8 +3558,7 @@ mod tests {
             test_analysis_config(),
             test_cloud_limits(),
             "dev-token".into(),
-            "admin".into(),
-            "dev-password".into(),
+            test_auth_users(),
             store,
             JobSchedulerConfig::default(),
             persisted,

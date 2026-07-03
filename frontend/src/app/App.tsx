@@ -316,6 +316,15 @@ export default function App() {
     setCloudWorkspaceId(workspaceId)
   }, [])
 
+  const handleCloudHome = useCallback(() => {
+    const next = new URL(window.location.href)
+    next.searchParams.set('mode', 'cloud')
+    next.searchParams.delete('workspace')
+    window.history.replaceState(null, '', next)
+    setSelectedNodeId(null)
+    setCloudWorkspaceId(null)
+  }, [setSelectedNodeId])
+
   const handleCloudLogin = useCallback((sessionToken: string) => {
     localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, sessionToken)
     setCloudSessionToken(sessionToken)
@@ -369,6 +378,7 @@ export default function App() {
         onRecenter={() => setRecenterKey(key => key + 1)}
         onCollapse={() => setGraphLens(current => current === 'architecture' ? 'all' : 'architecture')}
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
+        onCloudHome={cloudMode ? handleCloudHome : undefined}
         onClarityToggle={() => setClarityOpen(open => !open)}
         clarityOpen={clarityOpen}
         clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
