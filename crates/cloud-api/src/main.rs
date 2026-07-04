@@ -889,6 +889,104 @@ impl CloudApiState {
             .filter(|revision| revision.workspace_id == workspace_id)
             .cloned()
     }
+
+    fn current_revision(&self, workspace_id: &str) -> Result<WorkspaceRevision, ApiError> {
+        let workspace = self
+            .get_workspace(workspace_id)
+            .ok_or_else(|| ApiError::NotFound("workspace not found".into()))?;
+        let revision_id = workspace
+            .current_revision
+            .ok_or_else(|| ApiError::NotFound("workspace has no revision".into()))?;
+        self.get_revision(workspace_id, &revision_id)
+            .ok_or_else(|| ApiError::NotFound("revision not found".into()))
+    }
+
+    fn read_blob(&self, content_hash: &str) -> Result<Vec<u8>, ApiError> {
+        let blob = self
+            .blobs
+            .read()
+            .get(content_hash)
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound("blob not found".into()))?;
+        std::fs::read(&blob.storage_path)
+            .map_err(|error| ApiError::BadRequest(format!("failed to read blob: {error}")))
+    }
+
+    fn workspace_file_content(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        revision_id: Option<&str>,
+    ) -> Result<CloudWorkspaceFileContentResponse, ApiError> {
+        let path = validate_relative_path(path)?;
+        let revision = match revision_id {
+            Some(revision_id) => self
+                .get_revision(workspace_id, revision_id)
+                .ok_or_else(|| ApiError::NotFound("revision not found".into()))?,
+            None => self.current_revision(workspace_id)?,
+        };
+        let file = revision
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound("file not found".into()))?;
+        let bytes = self.read_blob(&file.content_hash)?;
+        let content = String::from_utf8(bytes)
+            .map_err(|_| ApiError::BadRequest("file is not valid UTF-8".into()))?;
+        Ok(CloudWorkspaceFileContentResponse {
+            workspace_id: workspace_id.to_string(),
+            revision_id: revision.id,
+            file,
+            content,
+        })
+    }
+
+    fn save_workspace_file(
+        &self,
+        workspace_id: &str,
+        request: SaveWorkspaceFileRequest,
+    ) -> Result<SaveWorkspaceFileResponse, ApiError> {
+        let path = validate_relative_path(&request.path)?;
+        let current = self.current_revision(workspace_id)?;
+        if let Some(base_revision) = &request.base_revision {
+            if base_revision != &current.id {
+                return Err(ApiError::Conflict("workspace revision changed".into()));
+            }
+        }
+        let bytes = request.content.as_bytes();
+        if bytes.len() as u64 > self.limits.max_file_bytes {
+            return Err(ApiError::BadRequest("file exceeds maximum size".into()));
+        }
+        let content_hash = sha256_content_hash(bytes);
+        self.upload_blob(workspace_id, &content_hash, bytes)?;
+        let new_entry = WorkspaceFileEntry {
+            path: path.clone(),
+            content_hash,
+            size_bytes: bytes.len() as u64,
+            language: language_for_path(Path::new(&path)),
+        };
+        let mut files = current.files.clone();
+        match files.iter_mut().find(|file| file.path == path) {
+            Some(file) => *file = new_entry.clone(),
+            None => files.push(new_entry.clone()),
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let response = self.create_revision(
+            workspace_id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: Some(current.id),
+                files,
+            },
+        )?;
+        Ok(SaveWorkspaceFileResponse {
+            workspace_id: response.workspace.id,
+            revision_id: response.revision.id,
+            file: new_entry,
+            files_count: response.revision.files_count,
+            total_bytes: response.revision.total_bytes,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1052,8 +1150,51 @@ struct CloudWorkspaceStatusResponse {
     source: CloudWorkspaceSourceResponse,
     status: String,
     file_count: u32,
+    current_revision: Option<String>,
     last_job_id: Option<String>,
     last_updated: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudWorkspaceFilesResponse {
+    workspace_id: String,
+    revision_id: String,
+    files: Vec<WorkspaceFileEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudWorkspaceFileContentResponse {
+    workspace_id: String,
+    revision_id: String,
+    file: WorkspaceFileEntry,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudWorkspaceFileContentQuery {
+    path: String,
+    revision_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveWorkspaceFileRequest {
+    path: String,
+    content: String,
+    base_revision: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveWorkspaceFileResponse {
+    workspace_id: String,
+    revision_id: String,
+    file: WorkspaceFileEntry,
+    files_count: u32,
+    total_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1202,6 +1343,18 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/api/cloud/workspaces/{id}/snapshot",
             get(cloud_workspace_snapshot),
+        )
+        .route(
+            "/api/cloud/workspaces/{id}/files",
+            get(cloud_workspace_files),
+        )
+        .route(
+            "/api/cloud/workspaces/{id}/files/content",
+            get(cloud_workspace_file_content).put(cloud_save_workspace_file),
+        )
+        .route(
+            "/api/cloud/workspaces/{id}/analyze",
+            post(cloud_analyze_workspace),
         )
         .route("/api/cloud/usage", get(cloud_usage))
         .route("/api/cloud/ws", get(cloud_ws_handler))
@@ -1473,6 +1626,101 @@ async fn cloud_workspace_snapshot(
         .map(|mode| graph_builder::filter_snapshot(&snapshot, mode))
         .unwrap_or(snapshot);
     Json(snapshot).into_response()
+}
+
+async fn cloud_workspace_files(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    if state.get_workspace_for_user(&id, &username).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match state.current_revision(&id) {
+        Ok(mut revision) => {
+            revision
+                .files
+                .sort_by(|left, right| left.path.cmp(&right.path));
+            Json(CloudWorkspaceFilesResponse {
+                workspace_id: id,
+                revision_id: revision.id,
+                files: revision.files,
+            })
+            .into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn cloud_workspace_file_content(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<CloudWorkspaceFileContentQuery>,
+) -> impl IntoResponse {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    if state.get_workspace_for_user(&id, &username).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match state.workspace_file_content(&id, &query.path, query.revision_id.as_deref()) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn cloud_save_workspace_file(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<SaveWorkspaceFileRequest>,
+) -> impl IntoResponse {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    if state.get_workspace_for_user(&id, &username).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match state.save_workspace_file(&id, request) {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn cloud_analyze_workspace(
+    State(state): State<CloudApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    if state.get_workspace_for_user(&id, &username).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let revision = match state.current_revision(&id) {
+        Ok(revision) => revision,
+        Err(error) => return error.into_response(),
+    };
+    let requested_analyzers = requested_analyzers_for_workspace_files(&revision.files);
+    match state.create_job_for_request(CreateAnalysisJobRequest {
+        source: None,
+        requested_analyzers,
+        project_name: None,
+        workspace_id: Some(id),
+        revision_id: Some(revision.id),
+    }) {
+        Ok(job) => (StatusCode::ACCEPTED, Json(cloud_job_response(&state, job))).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn cloud_usage(State(state): State<CloudApiState>, headers: HeaderMap) -> impl IntoResponse {
@@ -2320,6 +2568,7 @@ fn cloud_workspace_status_response(
         },
         status,
         file_count: workspace.files_count,
+        current_revision: workspace.current_revision,
         last_job_id: last_job.map(|job| job.id),
         last_updated: workspace.updated_at,
     }
@@ -3449,6 +3698,69 @@ mod tests {
             .unwrap()
             .revision;
         (workspace, revision)
+    }
+
+    #[test]
+    fn save_workspace_file_creates_new_revision_and_reads_content() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+
+        let response = state
+            .save_workspace_file(
+                &workspace.id,
+                SaveWorkspaceFileRequest {
+                    path: "src/main.rs".into(),
+                    content: "fn main() { println!(\"hi\"); }\n".into(),
+                    base_revision: Some(revision.id.clone()),
+                },
+            )
+            .unwrap();
+
+        assert_ne!(response.revision_id, revision.id);
+        assert_eq!(response.file.path, "src/main.rs");
+        assert_eq!(response.files_count, 2);
+
+        let content = state
+            .workspace_file_content(&workspace.id, "src/main.rs", Some(&response.revision_id))
+            .unwrap();
+        assert_eq!(content.content, "fn main() { println!(\"hi\"); }\n");
+        assert_eq!(content.revision_id, response.revision_id);
+        assert_eq!(
+            state.get_workspace(&workspace.id).unwrap().current_revision,
+            Some(response.revision_id)
+        );
+    }
+
+    #[test]
+    fn save_workspace_file_rejects_stale_base_revision() {
+        let state = test_state();
+        let (workspace, revision) = create_rust_revision(&state);
+        state
+            .save_workspace_file(
+                &workspace.id,
+                SaveWorkspaceFileRequest {
+                    path: "src/main.rs".into(),
+                    content: "fn main() {}\n".into(),
+                    base_revision: Some(revision.id.clone()),
+                },
+            )
+            .unwrap();
+
+        let error = state
+            .save_workspace_file(
+                &workspace.id,
+                SaveWorkspaceFileRequest {
+                    path: "src/main.rs".into(),
+                    content: "fn stale() {}\n".into(),
+                    base_revision: Some(revision.id),
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ApiError::Conflict("workspace revision changed".into())
+        );
     }
 
     fn workspace_job_request(

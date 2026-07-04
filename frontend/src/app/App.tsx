@@ -12,6 +12,7 @@ import { CloudPortal } from './components/CloudPortal'
 import { CloudLogin } from './components/CloudLogin'
 import { CloudUpdateNotice } from './components/CloudUpdateNotice'
 import { CloudShellNav, type CloudShellTab } from './components/CloudShellNav'
+import { BrowserIdeView } from './components/BrowserIdeView'
 import { useBackendGraph } from './api/useBackendGraph'
 import { useCloudWorkspaceGraph } from './api/useCloudWorkspaceGraph'
 import { CLOUD_SESSION_STORAGE_KEY, CLOUD_USERNAME_STORAGE_KEY } from './api/cloudAuth'
@@ -94,6 +95,8 @@ function isCloudShellTab(value: string | null): value is CloudShellTab {
 export default function App() {
   const urlParams = new URLSearchParams(window.location.search)
   const cloudMode = CLOUD_MODE || urlParams.get('mode') === 'cloud'
+  const cloudIdeInitialPath = urlParams.get('file')
+  const cloudIdeInitialLine = Number(urlParams.get('line'))
   const [cloudWorkspaceId, setCloudWorkspaceId] = useState<string | null>(urlParams.get('workspace'))
   const [cloudSessionToken, setCloudSessionToken] = useState<string | null>(initialCloudSession)
   const [cloudUsername, setCloudUsername] = useState<string | null>(initialCloudUsername)
@@ -332,25 +335,78 @@ export default function App() {
     next.searchParams.set('mode', 'cloud')
     next.searchParams.set('workspace', workspaceId)
     next.searchParams.set('tab', 'graph')
+    next.searchParams.delete('file')
+    next.searchParams.delete('line')
     window.history.replaceState(null, '', next)
     setCloudPortalTab('graph')
     setCloudWorkspaceId(workspaceId)
   }, [])
 
   const handleCloudTabChange = useCallback((tab: CloudShellTab) => {
-    if (tab === 'graph' && !cloudWorkspaceId) return
+    if ((tab === 'graph' || tab === 'ide') && !cloudWorkspaceId) return
     const next = new URL(window.location.href)
     next.searchParams.set('mode', 'cloud')
     next.searchParams.set('tab', tab)
-    if (tab === 'graph' && cloudWorkspaceId) {
+    if ((tab === 'graph' || tab === 'ide') && cloudWorkspaceId) {
       next.searchParams.set('workspace', cloudWorkspaceId)
+      if (tab === 'graph') {
+        next.searchParams.delete('file')
+        next.searchParams.delete('line')
+      }
     } else {
       next.searchParams.delete('workspace')
+      next.searchParams.delete('file')
+      next.searchParams.delete('line')
       setSelectedNodeId(null)
     }
     window.history.replaceState(null, '', next)
     setCloudPortalTab(tab)
   }, [cloudWorkspaceId, setSelectedNodeId])
+
+  const handleBackToCloudGraph = useCallback(() => {
+    if (!cloudWorkspaceId) return
+    const next = new URL(window.location.href)
+    next.searchParams.set('mode', 'cloud')
+    next.searchParams.set('workspace', cloudWorkspaceId)
+    next.searchParams.set('tab', 'graph')
+    next.searchParams.delete('file')
+    next.searchParams.delete('line')
+    window.history.replaceState(null, '', next)
+    setCloudPortalTab('graph')
+  }, [cloudWorkspaceId])
+
+  const openCloudEditor = useCallback((path: string, line?: number | null) => {
+    if (!cloudWorkspaceId) return
+    const next = new URL(window.location.href)
+    next.searchParams.set('mode', 'cloud')
+    next.searchParams.set('workspace', cloudWorkspaceId)
+    next.searchParams.set('tab', 'ide')
+    next.searchParams.set('file', path)
+    if (line && line > 0) next.searchParams.set('line', String(line))
+    else next.searchParams.delete('line')
+    window.history.replaceState(null, '', next)
+    setCloudPortalTab('ide')
+  }, [cloudWorkspaceId])
+
+  const handleOpenNodeInEditor = useCallback((node: GraphNode) => {
+    if (!node.file) {
+      return
+    }
+    if (cloudMode) {
+      openCloudEditor(node.file, node.line ?? null)
+      return
+    }
+    openInEditor(node)
+  }, [cloudMode, openCloudEditor, openInEditor])
+
+  const handleFocusFile = useCallback((path: string) => {
+    if (cloudMode) {
+      openCloudEditor(path)
+      return
+    }
+    const node = graphNodes.find(node => node.type === 'File' && node.file === path)
+    if (node) openInEditor(node)
+  }, [cloudMode, graphNodes, openCloudEditor, openInEditor])
 
   const handleCloudLogin = useCallback((sessionToken: string, username: string) => {
     localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, sessionToken)
@@ -378,7 +434,7 @@ export default function App() {
     return <CloudLogin onLogin={handleCloudLogin} />
   }
 
-  if (cloudMode && (!cloudWorkspaceId || cloudPortalTab !== 'graph')) {
+  if (cloudMode && (!cloudWorkspaceId || (cloudPortalTab !== 'graph' && cloudPortalTab !== 'ide'))) {
     return (
       <>
         <CloudUpdateNotice sessionToken={cloudSessionToken} />
@@ -396,7 +452,7 @@ export default function App() {
   }
 
   // ── Empty state ──────────────────────────────────────────────────────────
-  if (appState === 'empty') {
+  if (appState === 'empty' && !(cloudMode && cloudPortalTab === 'ide')) {
     return (
       <div className="w-full h-full" style={{ background: 'var(--cc-bg)' }}>
         <EmptyState onOpenProject={handleOpenProject} />
@@ -405,7 +461,7 @@ export default function App() {
   }
 
   // ── Indexing state ───────────────────────────────────────────────────────
-  if (appState === 'indexing') {
+  if (appState === 'indexing' && !(cloudMode && cloudPortalTab === 'ide')) {
     return (
       <div
         className="w-full h-full flex flex-col items-center justify-center"
@@ -417,9 +473,18 @@ export default function App() {
   }
 
   // ── Main / Normal state ──────────────────────────────────────────────────
+  const cloudIdeActive = cloudMode && cloudWorkspaceId && cloudPortalTab === 'ide'
+
   return (
-    <div className="w-full h-full flex flex-col overflow-hidden" style={{ background: 'var(--cc-bg)', fontFamily: 'Inter, sans-serif' }}>
+    <div className="w-full h-full relative overflow-hidden" style={{ background: 'var(--cc-bg)', fontFamily: 'Inter, sans-serif' }}>
       {cloudMode && cloudSessionToken && <CloudUpdateNotice sessionToken={cloudSessionToken} />}
+      <div
+        className="absolute inset-0 flex flex-col overflow-hidden"
+        style={{
+          visibility: cloudIdeActive ? 'hidden' : 'visible',
+          pointerEvents: cloudIdeActive ? 'none' : 'auto',
+        }}
+      >
       {cloudMode && (
         <CloudShellNav
           activeTab="graph"
@@ -460,7 +525,7 @@ export default function App() {
           selectedNodeId={selectedNodeId}
           diagnosticsByFile={diagnosticsByFile}
           onSelectNode={handleSelectNode}
-          onFocusFile={() => {}}
+          onFocusFile={handleFocusFile}
         />
 
         {/* graph area */}
@@ -480,6 +545,7 @@ export default function App() {
             highlightedTraceEdgeIds={traceHighlights?.edgeIds}
             onSelectNode={handleSelectNode}
             onUpdateNodes={handleUpdateNodes}
+            onOpenNode={handleOpenNodeInEditor}
           />
 
           {zeroEdgeHint && (
@@ -579,7 +645,7 @@ export default function App() {
           onToggleCollapse={toggleCollapseGroup}
           collapsedGroups={collapsedGroups}
           onSelectNode={handleSelectNode}
-          onOpenInEditor={openInEditor}
+          onOpenInEditor={handleOpenNodeInEditor}
           onTraceLoaded={handleTraceLoaded}
           onClearTraceHighlight={clearTraceHighlight}
         />
@@ -604,6 +670,22 @@ export default function App() {
 
       {/* settings modal placeholder */}
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      </div>
+
+      {cloudIdeActive && (
+        <div className="absolute inset-0 z-30">
+          <BrowserIdeView
+            workspaceId={cloudWorkspaceId}
+            sessionToken={cloudSessionToken}
+            username={cloudUsername}
+            theme={theme}
+            initialPath={cloudIdeInitialPath}
+            initialLine={Number.isFinite(cloudIdeInitialLine) ? cloudIdeInitialLine : null}
+            onTabChange={handleCloudTabChange}
+            onBackToGraph={handleBackToCloudGraph}
+          />
+        </div>
+      )}
     </div>
   )
 }

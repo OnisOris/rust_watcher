@@ -14,8 +14,8 @@ const tabs: Array<{ id: CloudShellTab; label: string; icon: ReactNode; disabled?
   { id: 'workspaces', label: 'Workspaces', icon: <FolderOpen size={15} /> },
   { id: 'new', label: 'New analysis', icon: <GitBranch size={15} /> },
   { id: 'graph', label: 'Graph', icon: <Boxes size={15} /> },
+  { id: 'ide', label: 'Browser IDE', icon: <Code2 size={15} /> },
   { id: 'account', label: 'Account', icon: <UserRound size={15} /> },
-  { id: 'ide', label: 'Browser IDE', icon: <Code2 size={15} />, disabled: true },
 ]
 
 export function CloudShellNav({ activeTab, username, graphEnabled = false, onNavigate }: CloudShellNavProps) {
@@ -44,7 +44,7 @@ export function CloudShellNav({ activeTab, username, graphEnabled = false, onNav
 
       <div className="flex items-center gap-1 rounded-xl p-1" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
         {tabs.map(tab => {
-          const disabled = tab.disabled || (tab.id === 'graph' && !graphEnabled)
+          const disabled = tab.disabled || ((tab.id === 'graph' || tab.id === 'ide') && !graphEnabled)
           const active = activeTab === tab.id
           return (
             <button
@@ -52,7 +52,7 @@ export function CloudShellNav({ activeTab, username, graphEnabled = false, onNav
               onClick={() => !disabled && onNavigate(tab.id)}
               disabled={disabled}
               className="flex items-center gap-1.5 rounded-lg"
-              title={tab.id === 'ide' ? 'Planned: VS Code-compatible browser workspace' : tab.label}
+              title={tab.label}
               style={{
                 minHeight: 34,
                 padding: '0 12px',

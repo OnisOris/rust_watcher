@@ -17,6 +17,7 @@ interface LiveCodeGraphProps {
   highlightedTraceEdgeIds?: Set<string>
   onSelectNode: (id: string | null) => void
   onUpdateNodes: (nodes: GraphNode[]) => void
+  onOpenNode?: (node: GraphNode) => void
 }
 
 const NODE_COLORS: Record<NodeType, string> = {
@@ -758,7 +759,7 @@ function isEditableTarget(target: EventTarget | null) {
   return target.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select'
 }
 
-export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, graphMode, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes }: LiveCodeGraphProps) {
+export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterKey, theme, layoutSettings, graphMode, labelMode, diagnosticsByNode, highlightedTraceNodeIds, highlightedTraceEdgeIds, onSelectNode, onUpdateNodes, onOpenNode }: LiveCodeGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const nodesRef = useRef<GraphNode[]>([])
   const edgesRef = useRef<GraphEdge[]>(edges)
@@ -783,6 +784,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   const continuousSimulationRef = useRef(false)
   const onUpdateNodesRef = useRef(onUpdateNodes)
   const onSelectNodeRef = useRef(onSelectNode)
+  const onOpenNodeRef = useRef(onOpenNode)
   const [hoveredNode, setHoveredNode] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
 
@@ -796,6 +798,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
   pausedRef.current = paused
   onUpdateNodesRef.current = onUpdateNodes
   onSelectNodeRef.current = onSelectNode
+  onOpenNodeRef.current = onOpenNode
 
   const fitCurrentGraph = useCallback((force = false) => {
     const canvas = canvasRef.current
@@ -1199,6 +1202,13 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
     scheduleDraw()
   }, [scheduleDraw])
 
+  const handleDoubleClick = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+    const hit = hitTest(event.clientX, event.clientY)
+    if (!hit) return
+    onSelectNodeRef.current(hit.id)
+    onOpenNodeRef.current?.(hit)
+  }, [hitTest])
+
   return (
     <div className="relative w-full h-full overflow-hidden">
       <canvas
@@ -1209,6 +1219,7 @@ export function LiveCodeGraph({ nodes, edges, filters, selectedNodeId, recenterK
         onMouseMove={handleMouseMove}
         onMouseUp={finishDrag}
         onMouseLeave={finishDrag}
+        onDoubleClick={handleDoubleClick}
         onWheel={handleWheel}
       />
     </div>
