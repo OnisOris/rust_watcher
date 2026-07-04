@@ -131,7 +131,8 @@ struct CloudApiState {
     limits: Arc<CloudLimits>,
     dev_token: Arc<String>,
     auth_users: Arc<HashMap<String, String>>,
-    auth_sessions: Arc<RwLock<HashSet<String>>>,
+    auth_sessions: Arc<RwLock<HashMap<String, String>>>,
+    default_owner_username: Arc<String>,
     agent_sessions: Arc<RwLock<HashMap<String, AgentSession>>>,
     update_config: Arc<SelfUpdateConfig>,
     update_state: Arc<RwLock<SelfUpdateState>>,
@@ -172,6 +173,7 @@ struct SelfUpdateState {
 #[derive(Debug, Clone)]
 struct AgentSession {
     workspace_id: String,
+    owner_username: String,
     project_name: String,
     files: HashMap<String, WorkspaceFileEntry>,
 }
@@ -334,6 +336,7 @@ impl CloudApiState {
         limits: CloudLimits,
         dev_token: String,
         auth_users: HashMap<String, String>,
+        default_owner_username: String,
         update_config: SelfUpdateConfig,
         store: CloudMetadataStore,
         scheduler_config: JobSchedulerConfig,
@@ -363,7 +366,8 @@ impl CloudApiState {
             limits: Arc::new(limits),
             dev_token: Arc::new(dev_token),
             auth_users: Arc::new(auth_users),
-            auth_sessions: Arc::new(RwLock::new(HashSet::new())),
+            auth_sessions: Arc::new(RwLock::new(HashMap::new())),
+            default_owner_username: Arc::new(default_owner_username),
             agent_sessions: Arc::new(RwLock::new(HashMap::new())),
             update_config: Arc::new(update_config),
             update_state: Arc::new(RwLock::new(SelfUpdateState::default())),
@@ -699,6 +703,7 @@ impl CloudApiState {
         let workspace = CloudWorkspace {
             id: id.clone(),
             display_name: request.display_name,
+            owner_username: request.owner_username,
             source: request.source,
             current_revision: None,
             files_count: 0,
@@ -719,8 +724,44 @@ impl CloudApiState {
         workspaces
     }
 
+    fn workspace_owner<'a>(&'a self, workspace: &'a CloudWorkspace) -> &'a str {
+        workspace
+            .owner_username
+            .as_deref()
+            .unwrap_or(self.default_owner_username.as_str())
+    }
+
+    fn workspace_belongs_to(&self, workspace: &CloudWorkspace, username: &str) -> bool {
+        self.workspace_owner(workspace) == username
+    }
+
+    fn list_workspaces_for_user(&self, username: &str) -> Vec<CloudWorkspace> {
+        let mut workspaces = self
+            .workspaces
+            .read()
+            .values()
+            .filter(|workspace| self.workspace_belongs_to(workspace, username))
+            .cloned()
+            .collect::<Vec<_>>();
+        workspaces.sort_by(|left, right| right.id.cmp(&left.id));
+        workspaces
+    }
+
     fn get_workspace(&self, id: &str) -> Option<CloudWorkspace> {
         self.workspaces.read().get(id).cloned()
+    }
+
+    fn get_workspace_for_user(&self, id: &str, username: &str) -> Option<CloudWorkspace> {
+        self.get_workspace(id)
+            .filter(|workspace| self.workspace_belongs_to(workspace, username))
+    }
+
+    fn can_access_job(&self, job: &AnalysisJob, username: &str) -> bool {
+        let Some(target) = self.get_job_revision_target(&job.id) else {
+            return true;
+        };
+        self.get_workspace_for_user(&target.workspace_id, username)
+            .is_some()
     }
 
     fn sync_plan(
@@ -855,6 +896,8 @@ impl CloudApiState {
 struct CreateWorkspaceRequest {
     display_name: String,
     #[serde(default)]
+    owner_username: Option<String>,
+    #[serde(default)]
     source: Option<AnalysisJobSource>,
 }
 
@@ -925,6 +968,7 @@ struct CloudLoginResponse {
 #[serde(rename_all = "camelCase")]
 struct CloudMeResponse {
     authenticated: bool,
+    username: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1129,6 +1173,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         },
         args.dev_token.clone(),
         auth_users,
+        args.admin_username.clone(),
         SelfUpdateConfig {
             repository: args.update_repository.clone(),
             asset_prefix: args.update_asset_prefix.clone(),
@@ -1243,14 +1288,18 @@ async fn cloud_login(
         return (StatusCode::UNAUTHORIZED, "invalid username or password").into_response();
     }
     let session_token = Uuid::new_v4().to_string();
-    state.auth_sessions.write().insert(session_token.clone());
+    state
+        .auth_sessions
+        .write()
+        .insert(session_token.clone(), request.username);
     Json(CloudLoginResponse { session_token }).into_response()
 }
 
 async fn cloud_me(State(state): State<CloudApiState>, headers: HeaderMap) -> impl IntoResponse {
     match require_cloud_auth(&state, &headers) {
-        Ok(()) => Json(CloudMeResponse {
+        Ok(username) => Json(CloudMeResponse {
             authenticated: true,
+            username,
         })
         .into_response(),
         Err(error) => error.into_response(),
@@ -1323,10 +1372,11 @@ async fn cloud_import_github(
     headers: HeaderMap,
     Json(request): Json<GithubImportRequest>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
-    }
-    match import_github_workspace(&state, request).await {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    match import_github_workspace(&state, &username, request).await {
         Ok(response) => (StatusCode::ACCEPTED, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1337,10 +1387,11 @@ async fn cloud_upload_zip(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
-    }
-    match upload_zip_workspace(&state, &mut multipart).await {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    match upload_zip_workspace(&state, &username, &mut multipart).await {
         Ok(response) => (StatusCode::ACCEPTED, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1351,11 +1402,15 @@ async fn cloud_get_job(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
-    }
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
     match state.get_job(&id) {
-        Some(job) => Json(cloud_job_response(&state, job)).into_response(),
+        Some(job) if state.can_access_job(&job, &username) => {
+            Json(cloud_job_response(&state, job)).into_response()
+        }
+        Some(_) => StatusCode::NOT_FOUND.into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1364,14 +1419,13 @@ async fn cloud_list_workspaces(
     State(state): State<CloudApiState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
-    }
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
     let mut workspaces = state
-        .workspaces
-        .read()
-        .values()
-        .cloned()
+        .list_workspaces_for_user(&username)
+        .into_iter()
         .map(|workspace| cloud_workspace_status_response(&state, workspace))
         .collect::<Vec<_>>();
     workspaces.sort_by(|left, right| {
@@ -1388,10 +1442,11 @@ async fn cloud_workspace_status(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
-    }
-    match state.get_workspace(&id) {
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    match state.get_workspace_for_user(&id, &username) {
         Some(workspace) => Json(cloud_workspace_status_response(&state, workspace)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -1403,8 +1458,12 @@ async fn cloud_workspace_snapshot(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<SnapshotQuery>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    if state.get_workspace_for_user(&id, &username).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
     }
     let Some(snapshot) = latest_workspace_snapshot(&state, &id) else {
         return StatusCode::ACCEPTED.into_response();
@@ -1417,10 +1476,11 @@ async fn cloud_workspace_snapshot(
 }
 
 async fn cloud_usage(State(state): State<CloudApiState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(error) = require_cloud_auth(&state, &headers) {
-        return error.into_response();
-    }
-    Json(cloud_usage_response(&state)).into_response()
+    let username = match require_cloud_auth(&state, &headers) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    Json(cloud_usage_response(&state, &username)).into_response()
 }
 
 async fn cloud_ws_handler(
@@ -1434,11 +1494,13 @@ async fn agent_create_session(
     State(state): State<CloudApiState>,
     Json(request): Json<AgentSessionRequest>,
 ) -> impl IntoResponse {
-    if request.token != *state.dev_token {
-        return (StatusCode::UNAUTHORIZED, "invalid agent token").into_response();
-    }
+    let owner_username = match agent_owner_for_token(&state, &request.token) {
+        Some(username) => username,
+        None => return (StatusCode::UNAUTHORIZED, "invalid agent token").into_response(),
+    };
     let workspace = state.create_workspace(CreateWorkspaceRequest {
         display_name: request.project_name.clone(),
+        owner_username: Some(owner_username.clone()),
         source: Some(AnalysisJobSource {
             kind: graph_core::AnalysisJobSourceKind::LocalPath,
             display_name: Some(request.project_name.clone()),
@@ -1453,6 +1515,7 @@ async fn agent_create_session(
         session_id.clone(),
         AgentSession {
             workspace_id: workspace.id.clone(),
+            owner_username,
             project_name: request.project_name,
             files: HashMap::new(),
         },
@@ -1602,7 +1665,7 @@ fn cloud_status_name(status: AnalysisJobStatus) -> &'static str {
     }
 }
 
-fn require_cloud_auth(state: &CloudApiState, headers: &HeaderMap) -> Result<(), ApiError> {
+fn require_cloud_auth(state: &CloudApiState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1610,11 +1673,19 @@ fn require_cloud_auth(state: &CloudApiState, headers: &HeaderMap) -> Result<(), 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::Unauthorized("missing bearer token".into()))?;
-    if state.auth_sessions.read().contains(token) {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized("invalid or expired session".into()))
+    state
+        .auth_sessions
+        .read()
+        .get(token)
+        .cloned()
+        .ok_or_else(|| ApiError::Unauthorized("invalid or expired session".into()))
+}
+
+fn agent_owner_for_token(state: &CloudApiState, token: &str) -> Option<String> {
+    if token == state.dev_token.as_str() {
+        return Some(state.default_owner_username.to_string());
     }
+    state.auth_sessions.read().get(token).cloned()
 }
 
 async fn cloud_update_status_response(
@@ -1856,6 +1927,7 @@ async fn get_revision(
 
 async fn import_github_workspace(
     state: &CloudApiState,
+    owner_username: &str,
     request: GithubImportRequest,
 ) -> Result<CloudStartResponse, ApiError> {
     let github = parse_github_url(&request.url)?;
@@ -1895,6 +1967,7 @@ async fn import_github_workspace(
     }
     import_project_directory(
         state,
+        owner_username,
         &checkout_dir,
         github.repo.as_str(),
         Some(AnalysisJobSource {
@@ -1910,6 +1983,7 @@ async fn import_github_workspace(
 
 async fn upload_zip_workspace(
     state: &CloudApiState,
+    owner_username: &str,
     multipart: &mut Multipart,
 ) -> Result<CloudStartResponse, ApiError> {
     let mut archive = None;
@@ -1957,6 +2031,7 @@ async fn upload_zip_workspace(
         .unwrap_or_else(|| "uploaded-project".into());
     import_project_directory(
         state,
+        owner_username,
         &unpack_dir,
         &display_name,
         Some(AnalysisJobSource {
@@ -1972,12 +2047,14 @@ async fn upload_zip_workspace(
 
 fn import_project_directory(
     state: &CloudApiState,
+    owner_username: &str,
     root: &Path,
     display_name: &str,
     source: Option<AnalysisJobSource>,
 ) -> Result<CloudStartResponse, ApiError> {
     let workspace = state.create_workspace(CreateWorkspaceRequest {
         display_name: display_name.to_string(),
+        owner_username: Some(owner_username.to_string()),
         source,
     });
     let files = collect_workspace_files(root, &state.limits)?;
@@ -2159,7 +2236,10 @@ fn analyze_agent_session(
         revision_id: Some(revision_response.revision.id),
     })?;
     let session_token = Uuid::new_v4().to_string();
-    state.auth_sessions.write().insert(session_token.clone());
+    state
+        .auth_sessions
+        .write()
+        .insert(session_token.clone(), session.owner_username);
     Ok(CloudStartResponse {
         workspace_id: revision_response.workspace.id,
         job_id: job.id,
@@ -2260,12 +2340,20 @@ fn latest_workspace_snapshot(state: &CloudApiState, workspace_id: &str) -> Optio
         .map(|result| result.snapshot.clone())
 }
 
-fn cloud_usage_response(state: &CloudApiState) -> CloudUsageResponse {
+fn cloud_usage_response(state: &CloudApiState, username: &str) -> CloudUsageResponse {
     let jobs = state.jobs.read();
+    let workspaces = state.workspaces.read();
     let mut usage = state
         .analysis_usage
         .read()
         .values()
+        .filter(|usage| {
+            usage
+                .workspace_id
+                .as_deref()
+                .and_then(|workspace_id| workspaces.get(workspace_id))
+                .is_some_and(|workspace| state.workspace_belongs_to(workspace, username))
+        })
         .cloned()
         .collect::<Vec<_>>();
     usage.sort_by(|left, right| right.created_at.cmp(&left.created_at));
@@ -3123,6 +3211,7 @@ mod tests {
             test_cloud_limits(),
             "dev-token".into(),
             test_auth_users(),
+            "admin".into(),
             test_update_config(),
             store,
             scheduler_config,
@@ -3173,8 +3262,108 @@ mod tests {
     fn workspace_request() -> CreateWorkspaceRequest {
         CreateWorkspaceRequest {
             display_name: "demo".into(),
+            owner_username: None,
             source: None,
         }
+    }
+
+    #[test]
+    fn cloud_workspace_listing_is_scoped_to_owner() {
+        let state = test_state();
+        let admin_workspace = state.create_workspace(CreateWorkspaceRequest {
+            display_name: "admin-demo".into(),
+            owner_username: Some("admin".into()),
+            source: None,
+        });
+        let user_workspace = state.create_workspace(CreateWorkspaceRequest {
+            display_name: "user-demo".into(),
+            owner_username: Some("user".into()),
+            source: None,
+        });
+        let legacy_workspace = state.create_workspace(CreateWorkspaceRequest {
+            display_name: "legacy-demo".into(),
+            owner_username: None,
+            source: None,
+        });
+
+        let admin_ids = state
+            .list_workspaces_for_user("admin")
+            .into_iter()
+            .map(|workspace| workspace.id)
+            .collect::<HashSet<_>>();
+        let user_ids = state
+            .list_workspaces_for_user("user")
+            .into_iter()
+            .map(|workspace| workspace.id)
+            .collect::<HashSet<_>>();
+
+        assert!(admin_ids.contains(&admin_workspace.id));
+        assert!(admin_ids.contains(&legacy_workspace.id));
+        assert!(!admin_ids.contains(&user_workspace.id));
+        assert_eq!(user_ids, HashSet::from([user_workspace.id]));
+    }
+
+    #[test]
+    fn cloud_usage_is_scoped_to_owner() {
+        let state = test_state();
+        let admin_workspace = state.create_workspace(CreateWorkspaceRequest {
+            display_name: "admin-demo".into(),
+            owner_username: Some("admin".into()),
+            source: None,
+        });
+        let user_workspace = state.create_workspace(CreateWorkspaceRequest {
+            display_name: "user-demo".into(),
+            owner_username: Some("user".into()),
+            source: None,
+        });
+        state.analysis_usage.write().insert(
+            "admin-job".into(),
+            CloudAnalysisUsage {
+                job_id: "admin-job".into(),
+                workspace_id: Some(admin_workspace.id),
+                revision_id: None,
+                input_files: 1,
+                input_bytes: 10,
+                output_nodes: 1,
+                output_edges: 0,
+                output_files: 1,
+                requested_analyzers: Vec::new(),
+                materialization_ms: 1,
+                graph_build_ms: 1,
+                total_wall_ms: 2,
+                credits_estimated: 7,
+                credits_used: 7,
+                created_at: Some("2".into()),
+            },
+        );
+        state.analysis_usage.write().insert(
+            "user-job".into(),
+            CloudAnalysisUsage {
+                job_id: "user-job".into(),
+                workspace_id: Some(user_workspace.id),
+                revision_id: None,
+                input_files: 1,
+                input_bytes: 10,
+                output_nodes: 1,
+                output_edges: 0,
+                output_files: 1,
+                requested_analyzers: Vec::new(),
+                materialization_ms: 1,
+                graph_build_ms: 1,
+                total_wall_ms: 2,
+                credits_estimated: 3,
+                credits_used: 3,
+                created_at: Some("1".into()),
+            },
+        );
+
+        let admin_usage = cloud_usage_response(&state, "admin");
+        let user_usage = cloud_usage_response(&state, "user");
+
+        assert_eq!(admin_usage.credits_used, 7);
+        assert_eq!(admin_usage.jobs.len(), 1);
+        assert_eq!(user_usage.credits_used, 3);
+        assert_eq!(user_usage.jobs.len(), 1);
     }
 
     fn file_entry(content: &[u8]) -> WorkspaceFileEntry {
@@ -3362,6 +3551,7 @@ mod tests {
             test_cloud_limits(),
             "dev-token".into(),
             test_auth_users(),
+            "admin".into(),
             test_update_config(),
             store,
             JobSchedulerConfig::default(),
@@ -3755,6 +3945,7 @@ mod tests {
         let workspace = CloudWorkspace {
             id: "workspace_1".into(),
             display_name: "demo".into(),
+            owner_username: None,
             source: None,
             current_revision: Some("revision_1".into()),
             files_count: 1,
@@ -3786,6 +3977,7 @@ mod tests {
             test_cloud_limits(),
             "dev-token".into(),
             test_auth_users(),
+            "admin".into(),
             test_update_config(),
             store,
             JobSchedulerConfig::default(),
@@ -3811,6 +4003,7 @@ mod tests {
         let workspace = CloudWorkspace {
             id: "workspace_1".into(),
             display_name: "demo".into(),
+            owner_username: None,
             source: None,
             current_revision: Some("revision_1".into()),
             files_count: 1,
@@ -3843,6 +4036,7 @@ mod tests {
             test_cloud_limits(),
             "dev-token".into(),
             test_auth_users(),
+            "admin".into(),
             test_update_config(),
             store,
             JobSchedulerConfig::default(),

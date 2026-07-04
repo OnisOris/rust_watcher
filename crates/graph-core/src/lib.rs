@@ -1011,6 +1011,8 @@ pub fn estimate_cloud_analysis_credits(
 pub struct CloudWorkspace {
     pub id: String,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<AnalysisJobSource>,
     pub current_revision: Option<String>,

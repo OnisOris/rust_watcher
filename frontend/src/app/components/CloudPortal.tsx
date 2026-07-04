@@ -252,7 +252,7 @@ export function CloudPortal({ sessionToken, username, activeTab, graphEnabled = 
 {`cargo run -p local-agent -- connect \\
   --project /path/to/project \\
   --server ${window.location.origin} \\
-  --token dev-token`}
+  --token ${sessionToken}`}
                   </pre>
                 </section>
               </div>

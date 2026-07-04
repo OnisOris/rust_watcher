@@ -331,6 +331,7 @@ mod tests {
         CloudWorkspace {
             id: "workspace_1".into(),
             display_name: "demo".into(),
+            owner_username: None,
             source: None,
             current_revision: None,
             files_count: 0,
