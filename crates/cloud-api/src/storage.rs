@@ -1,4 +1,4 @@
-use crate::{CloudAnalysisResult, JobRevisionTarget, StoredBlob};
+use crate::state::{CloudAnalysisResult, JobRevisionTarget, StoredBlob};
 use anyhow::{Context, Result};
 use graph_core::{AnalysisJob, CloudAnalysisUsage, CloudWorkspace, WorkspaceRevision};
 use rusqlite::{params, Connection};
