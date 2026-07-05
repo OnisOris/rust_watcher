@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use graph_core::{
@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::auth::require_internal_api_token;
 use crate::errors::ApiError;
 use crate::ide::{
     CloudWorkspaceFileContentResponse, SaveWorkspaceFileRequest, SaveWorkspaceFileResponse,
@@ -365,21 +366,34 @@ impl CloudApiState {
 
 pub(crate) async fn create_workspace(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     Json(request): Json<CreateWorkspaceRequest>,
 ) -> impl IntoResponse {
-    (StatusCode::CREATED, Json(state.create_workspace(request)))
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
+    (StatusCode::CREATED, Json(state.create_workspace(request))).into_response()
 }
 pub(crate) async fn list_workspaces(
     State(state): State<CloudApiState>,
-) -> Json<ListWorkspacesResponse> {
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     Json(ListWorkspacesResponse {
         workspaces: state.list_workspaces(),
     })
+    .into_response()
 }
 pub(crate) async fn get_workspace(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.get_workspace(&id) {
         Some(workspace) => Json(workspace).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -387,9 +401,13 @@ pub(crate) async fn get_workspace(
 }
 pub(crate) async fn sync_plan(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<WorkspaceSyncPlanRequest>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.sync_plan(&id, request) {
         Ok(plan) => Json(plan).into_response(),
         Err(error) => error.into_response(),
@@ -397,9 +415,13 @@ pub(crate) async fn sync_plan(
 }
 pub(crate) async fn upload_blob(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath((id, content_hash)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.upload_blob(&id, &content_hash, &body) {
         Ok((status, _blob)) => status.into_response(),
         Err(error) => error.into_response(),
@@ -407,9 +429,13 @@ pub(crate) async fn upload_blob(
 }
 pub(crate) async fn create_revision(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<CreateWorkspaceRevisionRequest>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.create_revision(&id, request) {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => error.into_response(),
@@ -417,8 +443,12 @@ pub(crate) async fn create_revision(
 }
 pub(crate) async fn get_revision(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath((workspace_id, revision_id)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.get_revision(&workspace_id, &revision_id) {
         Some(revision) => Json(revision).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),

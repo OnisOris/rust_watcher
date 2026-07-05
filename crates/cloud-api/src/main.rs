@@ -68,6 +68,8 @@ pub(crate) struct ServeArgs {
     pub(crate) max_queued_jobs: usize,
     #[arg(long, env = "RUST_WATCHER_DEV_TOKEN", default_value = DEFAULT_DEV_TOKEN)]
     pub(crate) dev_token: String,
+    #[arg(long, env = "RUST_WATCHER_INTERNAL_API_TOKEN")]
+    pub(crate) internal_api_token: Option<String>,
     #[arg(long, env = "RUST_WATCHER_ADMIN_USERNAME", default_value = DEFAULT_ADMIN_USERNAME)]
     pub(crate) admin_username: String,
     #[arg(
@@ -167,6 +169,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
             max_file_bytes: args.max_file_mb.saturating_mul(1024 * 1024),
         },
         args.dev_token.clone(),
+        args.internal_api_token
+            .as_ref()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty()),
         auth_users,
         args.auth_session_ttl_seconds,
         args.admin_username.clone(),

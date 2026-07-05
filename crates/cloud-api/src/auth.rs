@@ -15,6 +15,7 @@ pub(crate) const DEFAULT_DEV_TOKEN: &str = "dev-token";
 pub(crate) const DEFAULT_ADMIN_USERNAME: &str = "admin";
 pub(crate) const DEFAULT_ADMIN_PASSWORD: &str = "dev-password";
 pub(crate) const DEFAULT_AUTH_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
+pub(crate) const INTERNAL_API_TOKEN_HEADER: &str = "x-rust-watcher-token";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +97,32 @@ pub(crate) fn agent_owner_for_token(state: &CloudApiState, token: &str) -> Optio
         return Some(state.default_owner_username.to_string());
     }
     session_owner_for_token(state, token).ok()
+}
+
+pub(crate) fn require_internal_api_token(
+    state: &CloudApiState,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let expected = state
+        .internal_api_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| ApiError::Forbidden("internal API is disabled".into()))?;
+    let supplied = bearer_token(headers)
+        .ok()
+        .or_else(|| {
+            headers
+                .get(INTERNAL_API_TOKEN_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| ApiError::Forbidden("missing internal API token".into()))?;
+    if supplied != expected {
+        return Err(ApiError::Forbidden("invalid internal API token".into()));
+    }
+    Ok(())
 }
 
 pub(crate) fn create_auth_session(state: &CloudApiState, username: String) -> String {

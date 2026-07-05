@@ -12,7 +12,7 @@ use serde::Serialize;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::auth::require_cloud_auth;
+use crate::auth::{require_cloud_auth, require_internal_api_token};
 use crate::errors::ApiError;
 use crate::scheduler::{
     cloud_status_name, is_terminal, parser_analyzer_statuses, requests_rust_analyzer,
@@ -517,8 +517,12 @@ pub(crate) async fn cloud_ws_handler(
 }
 pub(crate) async fn create_job(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     Json(request): Json<CreateAnalysisJobRequest>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.create_job_for_request(request) {
         Ok(job) => (StatusCode::CREATED, Json(job)).into_response(),
         Err(error) => error.into_response(),
@@ -526,8 +530,12 @@ pub(crate) async fn create_job(
 }
 pub(crate) async fn get_job(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.get_job(&id) {
         Some(job) => (StatusCode::OK, Json(job)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -535,15 +543,24 @@ pub(crate) async fn get_job(
 }
 pub(crate) async fn list_jobs(
     State(state): State<CloudApiState>,
-) -> Json<ListAnalysisJobsResponse> {
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     Json(ListAnalysisJobsResponse {
         jobs: state.list_jobs(),
     })
+    .into_response()
 }
 pub(crate) async fn get_job_snapshot(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     if let Some(result) = state.analysis_results.read().get(&id).cloned() {
         return (StatusCode::OK, Json(result.snapshot)).into_response();
     }
@@ -561,8 +578,12 @@ pub(crate) async fn get_job_snapshot(
 }
 pub(crate) async fn get_job_usage(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     if let Some(usage) = state.analysis_usage.read().get(&id).cloned() {
         return (StatusCode::OK, Json(usage)).into_response();
     }
@@ -580,18 +601,28 @@ pub(crate) async fn get_job_usage(
 }
 pub(crate) async fn usage_summary(
     State(state): State<CloudApiState>,
-) -> Json<UsageSummaryResponse> {
-    Json(state.usage_summary())
+    headers: HeaderMap,
+) -> Result<Json<UsageSummaryResponse>, ApiError> {
+    require_internal_api_token(&state, &headers)?;
+    Ok(Json(state.usage_summary()))
 }
 pub(crate) async fn get_analysis_queue(
     State(state): State<CloudApiState>,
-) -> Json<AnalysisQueueStatusResponse> {
-    Json(state.queue_status())
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
+    Json(state.queue_status()).into_response()
 }
 pub(crate) async fn cancel_job(
     State(state): State<CloudApiState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Err(error) = require_internal_api_token(&state, &headers) {
+        return error.into_response();
+    }
     match state.cancel_job(&id) {
         Ok(Some(job)) => Json(job).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),

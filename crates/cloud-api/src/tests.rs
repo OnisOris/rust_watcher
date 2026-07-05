@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::auth::{
     cloud_logout, create_auth_session, require_cloud_auth, unix_timestamp, validate_auth_defaults,
     DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, DEFAULT_AUTH_SESSION_TTL_SECONDS,
-    DEFAULT_DEV_TOKEN,
+    DEFAULT_DEV_TOKEN, INTERNAL_API_TOKEN_HEADER,
 };
 use crate::errors::ApiError;
 use crate::ide::SaveWorkspaceFileRequest;
@@ -51,6 +51,26 @@ fn test_state_with_config_and_scheduler_config(
     analysis_config: CloudAnalysisConfig,
     scheduler_config: JobSchedulerConfig,
 ) -> CloudApiState {
+    test_state_with_config_scheduler_and_internal_token(
+        analysis_config,
+        scheduler_config,
+        Some("internal-token".into()),
+    )
+}
+
+fn test_state_without_internal_token() -> CloudApiState {
+    test_state_with_config_scheduler_and_internal_token(
+        test_analysis_config(),
+        JobSchedulerConfig::default(),
+        None,
+    )
+}
+
+fn test_state_with_config_scheduler_and_internal_token(
+    analysis_config: CloudAnalysisConfig,
+    scheduler_config: JobSchedulerConfig,
+    internal_api_token: Option<String>,
+) -> CloudApiState {
     let root = std::env::temp_dir().join(format!("rust-watcher-cloud-api-{}", Uuid::new_v4()));
     let blobs_dir = root.join("blobs");
     let workspaces_dir = root.join("workspaces");
@@ -64,6 +84,7 @@ fn test_state_with_config_and_scheduler_config(
         analysis_config,
         test_cloud_limits(),
         "dev-token".into(),
+        internal_api_token,
         test_auth_users(),
         DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
@@ -119,6 +140,15 @@ fn auth_headers(token: &str) -> HeaderMap {
     headers.insert(
         axum::http::header::AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    headers
+}
+
+fn internal_headers(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        INTERNAL_API_TOKEN_HEADER,
+        HeaderValue::from_str(token).unwrap(),
     );
     headers
 }
@@ -197,6 +227,47 @@ async fn logout_invalidates_session() {
         require_cloud_auth(&state, &headers),
         Err(ApiError::Unauthorized(_))
     ));
+}
+
+#[tokio::test]
+async fn legacy_internal_endpoint_forbidden_without_token() {
+    let state = test_state();
+
+    let missing_header_response =
+        crate::workspaces::list_workspaces(State(state.clone()), HeaderMap::new())
+            .await
+            .into_response();
+
+    assert_eq!(missing_header_response.status(), StatusCode::FORBIDDEN);
+
+    let disabled_state = test_state_without_internal_token();
+    let disabled_response = crate::workspaces::list_workspaces(
+        State(disabled_state),
+        internal_headers("internal-token"),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(disabled_response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn legacy_internal_endpoint_accepts_internal_token() {
+    let state = test_state();
+
+    let header_response = crate::workspaces::list_workspaces(
+        State(state.clone()),
+        internal_headers("internal-token"),
+    )
+    .await
+    .into_response();
+    let bearer_response =
+        crate::workspaces::list_workspaces(State(state), auth_headers("internal-token"))
+            .await
+            .into_response();
+
+    assert_eq!(header_response.status(), StatusCode::OK);
+    assert_eq!(bearer_response.status(), StatusCode::OK);
 }
 
 #[test]
@@ -545,6 +616,7 @@ fn running_jobs_are_marked_failed_on_state_hydration() {
         test_analysis_config(),
         test_cloud_limits(),
         "dev-token".into(),
+        Some("internal-token".into()),
         test_auth_users(),
         DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
@@ -856,12 +928,14 @@ async fn queue_full_returns_too_many_requests() {
     let (workspace, revision) = create_rust_revision(&state);
     let first_response = create_job(
         State(state.clone()),
+        internal_headers("internal-token"),
         Json(workspace_job_request(&workspace, &revision)),
     )
     .await
     .into_response();
     let second_response = create_job(
         State(state.clone()),
+        internal_headers("internal-token"),
         Json(workspace_job_request(&workspace, &revision)),
     )
     .await
@@ -916,9 +990,13 @@ async fn running_job_cancellation_returns_conflict() {
         .unwrap();
     state.scheduler.mark_running(job.id.clone());
 
-    let response = cancel_job(State(state.clone()), AxumPath(job.id.clone()))
-        .await
-        .into_response();
+    let response = cancel_job(
+        State(state.clone()),
+        internal_headers("internal-token"),
+        AxumPath(job.id.clone()),
+    )
+    .await
+    .into_response();
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(
@@ -971,6 +1049,7 @@ fn startup_requeues_valid_queued_jobs() {
         test_analysis_config(),
         test_cloud_limits(),
         "dev-token".into(),
+        Some("internal-token".into()),
         test_auth_users(),
         DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
@@ -1031,6 +1110,7 @@ fn startup_does_not_requeue_recovered_running_jobs() {
         test_analysis_config(),
         test_cloud_limits(),
         "dev-token".into(),
+        Some("internal-token".into()),
         test_auth_users(),
         DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
@@ -1247,9 +1327,13 @@ async fn usage_endpoint_returns_accepted_before_usage_is_ready() {
         })
         .unwrap();
 
-    let response = get_job_usage(State(state), AxumPath(job.id))
-        .await
-        .into_response();
+    let response = get_job_usage(
+        State(state),
+        internal_headers("internal-token"),
+        AxumPath(job.id),
+    )
+    .await
+    .into_response();
 
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
@@ -1284,9 +1368,13 @@ async fn usage_endpoint_returns_usage_after_completion() {
         .unwrap();
     run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
 
-    let response = get_job_usage(State(state), AxumPath(job.id))
-        .await
-        .into_response();
+    let response = get_job_usage(
+        State(state),
+        internal_headers("internal-token"),
+        AxumPath(job.id),
+    )
+    .await
+    .into_response();
 
     assert_eq!(response.status(), StatusCode::OK);
 }
@@ -1294,9 +1382,13 @@ async fn usage_endpoint_returns_usage_after_completion() {
 #[tokio::test]
 async fn usage_endpoint_reports_missing_and_failed_jobs() {
     let state = test_state();
-    let missing_response = get_job_usage(State(state.clone()), AxumPath("missing".into()))
-        .await
-        .into_response();
+    let missing_response = get_job_usage(
+        State(state.clone()),
+        internal_headers("internal-token"),
+        AxumPath("missing".into()),
+    )
+    .await
+    .into_response();
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
 
     let workspace = state.create_workspace(workspace_request());
@@ -1324,9 +1416,13 @@ async fn usage_endpoint_reports_missing_and_failed_jobs() {
         .unwrap();
     run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
 
-    let failed_response = get_job_usage(State(state), AxumPath(job.id))
-        .await
-        .into_response();
+    let failed_response = get_job_usage(
+        State(state),
+        internal_headers("internal-token"),
+        AxumPath(job.id),
+    )
+    .await
+    .into_response();
 
     assert_eq!(failed_response.status(), StatusCode::CONFLICT);
 }
@@ -1361,7 +1457,9 @@ async fn usage_summary_includes_completed_job_usage() {
         .unwrap();
     run_parser_cloud_analysis(state.clone(), job.id).await;
 
-    let Json(summary) = usage_summary(State(state)).await;
+    let Json(summary) = usage_summary(State(state), internal_headers("internal-token"))
+        .await
+        .unwrap();
 
     assert_eq!(summary.jobs_count, 1);
     assert_eq!(summary.completed_jobs, 1);

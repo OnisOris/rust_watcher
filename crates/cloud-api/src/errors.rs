@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 pub(crate) enum ApiError {
     NotFound(String),
     Unauthorized(String),
+    Forbidden(String),
     BadRequest(String),
     Conflict(String),
     TooManyRequests(String),
@@ -15,6 +16,7 @@ impl IntoResponse for ApiError {
         match self {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message).into_response(),
+            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message).into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
             Self::Conflict(message) => (StatusCode::CONFLICT, message).into_response(),
             Self::TooManyRequests(message) => {
