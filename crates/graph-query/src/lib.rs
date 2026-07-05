@@ -8,7 +8,106 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub mod context_pack;
 pub mod trace;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphIndexes {
+    pub node_by_id: HashMap<String, usize>,
+    pub incoming_edges: HashMap<String, Vec<usize>>,
+    pub outgoing_edges: HashMap<String, Vec<usize>>,
+    pub edges_by_id: HashMap<String, usize>,
+}
+
+pub fn build_graph_indexes(snapshot: &GraphSnapshot) -> GraphIndexes {
+    let node_by_id = snapshot
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut incoming_edges: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut outgoing_edges: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut edges_by_id = HashMap::new();
+    for (index, edge) in snapshot.edges.iter().enumerate() {
+        edges_by_id.insert(edge.id.clone(), index);
+        outgoing_edges
+            .entry(edge.source.clone())
+            .or_default()
+            .push(index);
+        incoming_edges
+            .entry(edge.target.clone())
+            .or_default()
+            .push(index);
+    }
+    GraphIndexes {
+        node_by_id,
+        incoming_edges,
+        outgoing_edges,
+        edges_by_id,
+    }
+}
+
 pub fn focus_subgraph(
+    snapshot: &GraphSnapshot,
+    node_id: &str,
+    depth: Option<u8>,
+) -> Option<FocusResponse> {
+    let indexes = build_graph_indexes(snapshot);
+    focus_subgraph_with_indexes(snapshot, &indexes, node_id, depth)
+}
+
+pub fn focus_subgraph_with_indexes(
+    snapshot: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    node_id: &str,
+    depth: Option<u8>,
+) -> Option<FocusResponse> {
+    let center_node = node_by_id(snapshot, indexes, node_id)?;
+    let center_id = center_node.id.as_str();
+
+    let max_depth = depth.map(usize::from).unwrap_or(usize::MAX);
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([(center_id, 0usize)]);
+    seen.insert(center_id);
+
+    while let Some((current, current_depth)) = queue.pop_front() {
+        if current_depth >= max_depth {
+            continue;
+        }
+        for edge in outgoing_edges(snapshot, indexes, current) {
+            let next = edge.target.as_str();
+            if seen.insert(next) {
+                queue.push_back((next, current_depth.saturating_add(1)));
+            }
+        }
+        for edge in incoming_edges(snapshot, indexes, current) {
+            let next = edge.source.as_str();
+            if seen.insert(next) {
+                queue.push_back((next, current_depth.saturating_add(1)));
+            }
+        }
+    }
+
+    let nodes = snapshot
+        .nodes
+        .iter()
+        .filter(|node| seen.contains(node.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let edges = snapshot
+        .edges
+        .iter()
+        .filter(|edge| seen.contains(edge.source.as_str()) && seen.contains(edge.target.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Some(FocusResponse {
+        center: center_id.to_string(),
+        nodes,
+        edges,
+    })
+}
+
+#[cfg(test)]
+fn focus_subgraph_legacy(
     snapshot: &GraphSnapshot,
     node_id: &str,
     depth: Option<u8>,
@@ -91,7 +190,85 @@ pub fn endpoint_details_for_node(
     })
 }
 
+pub fn endpoint_details_for_node_with_indexes(
+    graph: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    node: &GraphNode,
+) -> Option<EndpointDetails> {
+    if node.node_type != NodeType::Endpoint {
+        return None;
+    }
+    let route = graph_core::route_key_from_label(&node.label)?;
+    let handlers = outgoing_edges(graph, indexes, &node.id)
+        .filter(|edge| edge.edge_type == EdgeType::EndpointHandler)
+        .filter_map(|edge| node_by_id(graph, indexes, &edge.target))
+        .map(|handler| EndpointHandlerDetails {
+            node_id: handler.id.clone(),
+            label: handler.label.clone(),
+            handler_language: handler.language.clone(),
+            handler_file: handler.file.clone(),
+        })
+        .collect::<Vec<_>>();
+    Some(EndpointDetails {
+        route_method: route.method,
+        route_path: route.path,
+        route_key: route.key,
+        endpoint_language: node.language.clone(),
+        handlers,
+    })
+}
+
 pub fn node_details_base(
+    graph: &GraphSnapshot,
+    node_id: &str,
+    diagnostics: Vec<DiagnosticRecord>,
+    references: Vec<ReferenceRecord>,
+) -> Option<NodeDetailsResponse> {
+    let indexes = build_graph_indexes(graph);
+    node_details_base_with_indexes(graph, &indexes, node_id, diagnostics, references)
+}
+
+pub fn node_details_base_with_indexes(
+    graph: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    node_id: &str,
+    diagnostics: Vec<DiagnosticRecord>,
+    references: Vec<ReferenceRecord>,
+) -> Option<NodeDetailsResponse> {
+    let node = node_by_id(graph, indexes, node_id)?.clone();
+    let incoming_edge_refs = incoming_edges(graph, indexes, node_id).collect::<Vec<_>>();
+    let outgoing_edge_refs = outgoing_edges(graph, indexes, node_id).collect::<Vec<_>>();
+    let callers = incoming_edge_refs
+        .iter()
+        .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
+        .filter_map(|edge| node_by_id(graph, indexes, &edge.source).cloned())
+        .collect::<Vec<_>>();
+    let callees = outgoing_edge_refs
+        .iter()
+        .filter(|edge| matches!(edge.edge_type, EdgeType::Calls | EdgeType::EndpointHandler))
+        .filter_map(|edge| node_by_id(graph, indexes, &edge.target).cloned())
+        .collect::<Vec<_>>();
+    let related_types =
+        related_type_nodes_indexed(graph, indexes, &incoming_edge_refs, &outgoing_edge_refs);
+    let endpoint_details = endpoint_details_for_node_with_indexes(graph, indexes, &node);
+    let incoming_edges = incoming_edge_refs.into_iter().cloned().collect::<Vec<_>>();
+    let outgoing_edges = outgoing_edge_refs.into_iter().cloned().collect::<Vec<_>>();
+
+    Some(NodeDetailsResponse {
+        node,
+        incoming_edges,
+        outgoing_edges,
+        callers,
+        callees,
+        references,
+        related_types,
+        diagnostics,
+        endpoint_details,
+    })
+}
+
+#[cfg(test)]
+fn node_details_base_legacy(
     graph: &GraphSnapshot,
     node_id: &str,
     diagnostics: Vec<DiagnosticRecord>,
@@ -162,6 +339,27 @@ pub fn graph_reference_records(
             )
         })
         .filter_map(|edge| node_by_id.get(edge.source.as_str()).copied())
+        .filter_map(|node| reference_from_node(Some(node.clone())))
+        .collect()
+}
+
+pub fn graph_reference_records_for_node(
+    graph: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    node_id: &str,
+) -> Vec<ReferenceRecord> {
+    incoming_edges(graph, indexes, node_id)
+        .filter(|edge| {
+            matches!(
+                edge.edge_type,
+                EdgeType::Calls
+                    | EdgeType::EndpointHandler
+                    | EdgeType::TypeReference
+                    | EdgeType::Uses
+                    | EdgeType::DataFlow
+            )
+        })
+        .filter_map(|edge| node_by_id(graph, indexes, &edge.source))
         .filter_map(|node| reference_from_node(Some(node.clone())))
         .collect()
 }
@@ -258,6 +456,15 @@ pub fn find_active_endpoint_by_route_key<'a>(
     graph: &'a GraphSnapshot,
     requested: &str,
 ) -> Option<&'a GraphNode> {
+    let indexes = build_graph_indexes(graph);
+    find_active_endpoint_by_route_key_with_indexes(graph, &indexes, requested)
+}
+
+pub fn find_active_endpoint_by_route_key_with_indexes<'a>(
+    graph: &'a GraphSnapshot,
+    indexes: &GraphIndexes,
+    requested: &str,
+) -> Option<&'a GraphNode> {
     let mut candidates = graph
         .nodes
         .iter()
@@ -269,14 +476,18 @@ pub fn find_active_endpoint_by_route_key<'a>(
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        endpoint_route_score(graph, right)
-            .cmp(&endpoint_route_score(graph, left))
+        endpoint_route_score(graph, indexes, right)
+            .cmp(&endpoint_route_score(graph, indexes, left))
             .then(left.id.cmp(&right.id))
     });
     candidates.into_iter().next()
 }
 
-fn endpoint_route_score(graph: &GraphSnapshot, endpoint: &GraphNode) -> u16 {
+fn endpoint_route_score(
+    graph: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    endpoint: &GraphNode,
+) -> u16 {
     let mut score = 0u16;
     if matches!(
         endpoint.reachability,
@@ -284,7 +495,7 @@ fn endpoint_route_score(graph: &GraphSnapshot, endpoint: &GraphNode) -> u16 {
     ) {
         score += 100;
     }
-    if endpoint_has_local_handler(graph, endpoint) {
+    if endpoint_has_local_handler(graph, indexes, endpoint) {
         score += 80;
     }
     let crate_name = endpoint.crate_name.as_deref().unwrap_or_default();
@@ -302,16 +513,90 @@ fn endpoint_route_score(graph: &GraphSnapshot, endpoint: &GraphNode) -> u16 {
     score
 }
 
-fn endpoint_has_local_handler(graph: &GraphSnapshot, endpoint: &GraphNode) -> bool {
-    graph
-        .edges
-        .iter()
-        .filter(|edge| edge.source == endpoint.id && edge.edge_type == EdgeType::EndpointHandler)
-        .filter_map(|edge| graph.nodes.iter().find(|node| node.id == edge.target))
+fn endpoint_has_local_handler(
+    graph: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    endpoint: &GraphNode,
+) -> bool {
+    outgoing_edges(graph, indexes, &endpoint.id)
+        .filter(|edge| edge.edge_type == EdgeType::EndpointHandler)
+        .filter_map(|edge| node_by_id(graph, indexes, &edge.target))
         .any(|handler| {
             handler.file == endpoint.file
                 || (handler.crate_name == endpoint.crate_name && handler.module == endpoint.module)
         })
+}
+
+fn node_by_id<'a>(
+    graph: &'a GraphSnapshot,
+    indexes: &GraphIndexes,
+    node_id: &str,
+) -> Option<&'a GraphNode> {
+    indexes
+        .node_by_id
+        .get(node_id)
+        .and_then(|index| graph.nodes.get(*index))
+}
+
+fn incoming_edges<'a>(
+    graph: &'a GraphSnapshot,
+    indexes: &'a GraphIndexes,
+    node_id: &str,
+) -> impl Iterator<Item = &'a GraphEdge> {
+    indexes
+        .incoming_edges
+        .get(node_id)
+        .into_iter()
+        .flat_map(|edge_indexes| edge_indexes.iter())
+        .filter_map(|index| graph.edges.get(*index))
+}
+
+fn outgoing_edges<'a>(
+    graph: &'a GraphSnapshot,
+    indexes: &'a GraphIndexes,
+    node_id: &str,
+) -> impl Iterator<Item = &'a GraphEdge> {
+    indexes
+        .outgoing_edges
+        .get(node_id)
+        .into_iter()
+        .flat_map(|edge_indexes| edge_indexes.iter())
+        .filter_map(|index| graph.edges.get(*index))
+}
+
+fn related_type_nodes_indexed(
+    graph: &GraphSnapshot,
+    indexes: &GraphIndexes,
+    incoming_edges: &[&GraphEdge],
+    outgoing_edges: &[&GraphEdge],
+) -> Vec<GraphNode> {
+    let mut seen = HashSet::new();
+    incoming_edges
+        .iter()
+        .copied()
+        .chain(outgoing_edges.iter().copied())
+        .filter(|edge| {
+            matches!(
+                edge.edge_type,
+                EdgeType::TypeReference | EdgeType::Implements
+            )
+        })
+        .flat_map(|edge| [edge.source.as_str(), edge.target.as_str()])
+        .filter_map(|id| node_by_id(graph, indexes, id))
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                NodeType::Struct
+                    | NodeType::Enum
+                    | NodeType::Trait
+                    | NodeType::Impl
+                    | NodeType::Interface
+                    | NodeType::TypeAlias
+            )
+        })
+        .filter(|node| seen.insert(node.id.clone()))
+        .cloned()
+        .collect()
 }
 
 fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
@@ -449,6 +734,55 @@ mod tests {
     }
 
     #[test]
+    fn graph_indexes_record_node_and_edge_positions() {
+        let graph = test_snapshot(
+            vec![
+                test_node("a", "A", NodeType::Function),
+                test_node("b", "B", NodeType::Function),
+                test_node("c", "C", NodeType::Function),
+            ],
+            vec![
+                test_edge(EdgeType::Calls, "a", "b"),
+                test_edge(EdgeType::Uses, "c", "b"),
+            ],
+        );
+
+        let indexes = build_graph_indexes(&graph);
+
+        assert_eq!(indexes.node_by_id["a"], 0);
+        assert_eq!(indexes.node_by_id["c"], 2);
+        assert_eq!(indexes.outgoing_edges["a"], vec![0]);
+        assert_eq!(indexes.incoming_edges["b"], vec![0, 1]);
+        assert_eq!(indexes.edges_by_id[&graph.edges[1].id], 1);
+    }
+
+    #[test]
+    fn focus_subgraph_indexed_matches_legacy_behavior() {
+        let graph = test_snapshot(
+            vec![
+                test_node("a", "A", NodeType::Function),
+                test_node("b", "B", NodeType::Function),
+                test_node("c", "C", NodeType::Function),
+                test_node("d", "D", NodeType::Function),
+            ],
+            vec![
+                test_edge(EdgeType::Calls, "a", "b"),
+                test_edge(EdgeType::Calls, "b", "c"),
+                test_edge(EdgeType::Uses, "d", "a"),
+            ],
+        );
+        let indexes = build_graph_indexes(&graph);
+
+        let legacy = focus_subgraph_legacy(&graph, "a", Some(1)).unwrap();
+        let indexed = focus_subgraph_with_indexes(&graph, &indexes, "a", Some(1)).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(indexed).unwrap(),
+            serde_json::to_value(legacy).unwrap()
+        );
+    }
+
+    #[test]
     fn search_nodes_finds_label() {
         let graph = test_snapshot(
             vec![test_node("handler", "UserHandler", NodeType::Function)],
@@ -537,5 +871,36 @@ mod tests {
         assert_eq!(details.callers[0].id, "a");
         assert_eq!(details.callees.len(), 1);
         assert_eq!(details.callees[0].id, "c");
+    }
+
+    #[test]
+    fn node_details_base_indexed_matches_legacy_behavior() {
+        let endpoint = test_node("endpoint", "GET /api/users", NodeType::Endpoint);
+        let handler = test_node("handler", "users", NodeType::Function);
+        let model = test_node("model", "User", NodeType::Struct);
+        let graph = test_snapshot(
+            vec![
+                test_node("caller", "Caller", NodeType::Function),
+                endpoint,
+                handler,
+                model,
+            ],
+            vec![
+                test_edge(EdgeType::Calls, "caller", "endpoint"),
+                test_edge(EdgeType::EndpointHandler, "endpoint", "handler"),
+                test_edge(EdgeType::TypeReference, "handler", "model"),
+            ],
+        );
+        let indexes = build_graph_indexes(&graph);
+
+        let legacy = node_details_base_legacy(&graph, "endpoint", Vec::new(), Vec::new()).unwrap();
+        let indexed =
+            node_details_base_with_indexes(&graph, &indexes, "endpoint", Vec::new(), Vec::new())
+                .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(indexed).unwrap(),
+            serde_json::to_value(legacy).unwrap()
+        );
     }
 }

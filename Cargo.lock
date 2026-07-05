@@ -771,6 +771,7 @@ name = "graph-query"
 version = "0.1.0"
 dependencies = [
  "graph-core",
+ "serde_json",
  "uuid",
 ]
 

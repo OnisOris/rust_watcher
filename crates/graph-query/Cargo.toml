@@ -8,4 +8,5 @@ license.workspace = true
 graph-core = { path = "../graph-core" }
 
 [dev-dependencies]
+serde_json.workspace = true
 uuid.workspace = true
