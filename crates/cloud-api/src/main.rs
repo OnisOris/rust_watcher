@@ -21,7 +21,10 @@ mod state;
 mod storage;
 mod workspaces;
 
-use auth::parse_auth_users;
+use auth::{
+    parse_auth_users, validate_auth_defaults, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME,
+    DEFAULT_AUTH_SESSION_TTL_SECONDS, DEFAULT_DEV_TOKEN,
+};
 use scheduler::{start_analysis_workers, JobSchedulerConfig};
 use state::{CloudAnalysisConfig, CloudApiState, CloudLimits, SelfUpdateConfig};
 use storage::CloudMetadataStore;
@@ -63,18 +66,30 @@ pub(crate) struct ServeArgs {
     pub(crate) max_concurrent_jobs: usize,
     #[arg(long, default_value_t = 100)]
     pub(crate) max_queued_jobs: usize,
-    #[arg(long, env = "RUST_WATCHER_DEV_TOKEN", default_value = "dev-token")]
+    #[arg(long, env = "RUST_WATCHER_DEV_TOKEN", default_value = DEFAULT_DEV_TOKEN)]
     pub(crate) dev_token: String,
-    #[arg(long, env = "RUST_WATCHER_ADMIN_USERNAME", default_value = "admin")]
+    #[arg(long, env = "RUST_WATCHER_ADMIN_USERNAME", default_value = DEFAULT_ADMIN_USERNAME)]
     pub(crate) admin_username: String,
     #[arg(
         long,
         env = "RUST_WATCHER_ADMIN_PASSWORD",
-        default_value = "dev-password"
+        default_value = DEFAULT_ADMIN_PASSWORD
     )]
     pub(crate) admin_password: String,
     #[arg(long, env = "RUST_WATCHER_USERS", default_value = "")]
     pub(crate) users: String,
+    #[arg(
+        long,
+        env = "RUST_WATCHER_ALLOW_INSECURE_DEV_AUTH",
+        default_value_t = false
+    )]
+    pub(crate) allow_insecure_dev_auth: bool,
+    #[arg(
+        long,
+        env = "RUST_WATCHER_AUTH_SESSION_TTL_SECONDS",
+        default_value_t = DEFAULT_AUTH_SESSION_TTL_SECONDS
+    )]
+    pub(crate) auth_session_ttl_seconds: u64,
     #[arg(
         long,
         env = "RUST_WATCHER_UPDATE_REPOSITORY",
@@ -126,6 +141,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let store = CloudMetadataStore::open(args.db_path.clone())?;
     store.init_schema()?;
     let persisted = store.load_all()?;
+    validate_auth_defaults(
+        &args.users,
+        &args.admin_username,
+        &args.admin_password,
+        &args.dev_token,
+        args.allow_insecure_dev_auth,
+    )?;
     let auth_users = parse_auth_users(&args.users, &args.admin_username, &args.admin_password)?;
     let state = CloudApiState::from_persisted(
         args.blobs_dir.clone(),
@@ -146,6 +168,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         },
         args.dev_token.clone(),
         auth_users,
+        args.auth_session_ttl_seconds,
         args.admin_username.clone(),
         SelfUpdateConfig {
             repository: args.update_repository.clone(),

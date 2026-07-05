@@ -44,6 +44,7 @@ pub(crate) fn router() -> Router<CloudApiState> {
     Router::new()
         .route("/api/cloud/health", get(cloud_health))
         .route("/api/cloud/auth/login", post(auth::cloud_login))
+        .route("/api/cloud/auth/logout", post(auth::cloud_logout))
         .route("/api/cloud/auth/me", get(auth::cloud_me))
         .route(
             "/api/cloud/update/status",

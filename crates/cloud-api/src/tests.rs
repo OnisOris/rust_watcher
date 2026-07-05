@@ -1,5 +1,5 @@
 use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use graph_core::{
@@ -11,13 +11,20 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::auth::{
+    cloud_logout, create_auth_session, require_cloud_auth, unix_timestamp, validate_auth_defaults,
+    DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, DEFAULT_AUTH_SESSION_TTL_SECONDS,
+    DEFAULT_DEV_TOKEN,
+};
 use crate::errors::ApiError;
 use crate::ide::SaveWorkspaceFileRequest;
 use crate::jobs::{cancel_job, cloud_usage_response, create_job, get_job_usage, usage_summary};
 use crate::scheduler::{
     requests_rust_analyzer, run_one_queued_job, run_parser_cloud_analysis, JobSchedulerConfig,
 };
-use crate::state::{CloudAnalysisConfig, CloudApiState, CloudLimits, SelfUpdateConfig};
+use crate::state::{
+    AuthSession, CloudAnalysisConfig, CloudApiState, CloudLimits, SelfUpdateConfig,
+};
 use crate::storage::{CloudMetadataStore, PersistedCloudState};
 use crate::workspaces::{
     materialize_revision, materialized_child_path, sha256_content_hash, timestamp,
@@ -58,6 +65,7 @@ fn test_state_with_config_and_scheduler_config(
         test_cloud_limits(),
         "dev-token".into(),
         test_auth_users(),
+        DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
         test_update_config(),
         store,
@@ -106,12 +114,89 @@ fn local_request() -> CreateAnalysisJobRequest {
     }
 }
 
+fn auth_headers(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+    headers
+}
+
 fn workspace_request() -> CreateWorkspaceRequest {
     CreateWorkspaceRequest {
         display_name: "demo".into(),
         owner_username: None,
         source: None,
     }
+}
+
+#[test]
+fn default_dev_credentials_are_rejected_without_allow_flag() {
+    assert!(validate_auth_defaults(
+        "",
+        DEFAULT_ADMIN_USERNAME,
+        DEFAULT_ADMIN_PASSWORD,
+        DEFAULT_DEV_TOKEN,
+        false,
+    )
+    .is_err());
+    assert!(validate_auth_defaults(
+        "admin:dev-password",
+        "root",
+        "strong-password",
+        "non-default-token",
+        false,
+    )
+    .is_err());
+    assert!(validate_auth_defaults(
+        "",
+        DEFAULT_ADMIN_USERNAME,
+        DEFAULT_ADMIN_PASSWORD,
+        DEFAULT_DEV_TOKEN,
+        true,
+    )
+    .is_ok());
+}
+
+#[test]
+fn expired_session_is_rejected() {
+    let state = test_state();
+    let token = "expired-session".to_string();
+    state.auth_sessions.write().insert(
+        token.clone(),
+        AuthSession {
+            username: "admin".into(),
+            expires_at: unix_timestamp().saturating_sub(1),
+        },
+    );
+
+    let result = require_cloud_auth(&state, &auth_headers(&token));
+
+    assert!(matches!(result, Err(ApiError::Unauthorized(_))));
+    assert!(!state.auth_sessions.read().contains_key(&token));
+}
+
+#[tokio::test]
+async fn logout_invalidates_session() {
+    let state = test_state();
+    let token = create_auth_session(&state, "admin".into());
+    let headers = auth_headers(&token);
+
+    assert_eq!(
+        require_cloud_auth(&state, &headers).unwrap(),
+        "admin".to_string()
+    );
+
+    let response = cloud_logout(State(state.clone()), headers.clone())
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(matches!(
+        require_cloud_auth(&state, &headers),
+        Err(ApiError::Unauthorized(_))
+    ));
 }
 
 #[test]
@@ -461,6 +546,7 @@ fn running_jobs_are_marked_failed_on_state_hydration() {
         test_cloud_limits(),
         "dev-token".into(),
         test_auth_users(),
+        DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
         test_update_config(),
         store,
@@ -886,6 +972,7 @@ fn startup_requeues_valid_queued_jobs() {
         test_cloud_limits(),
         "dev-token".into(),
         test_auth_users(),
+        DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
         test_update_config(),
         store,
@@ -945,6 +1032,7 @@ fn startup_does_not_requeue_recovered_running_jobs() {
         test_cloud_limits(),
         "dev-token".into(),
         test_auth_users(),
+        DEFAULT_AUTH_SESSION_TTL_SECONDS,
         "admin".into(),
         test_update_config(),
         store,

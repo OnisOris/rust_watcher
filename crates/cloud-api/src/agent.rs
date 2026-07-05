@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::auth::agent_owner_for_token;
+use crate::auth::{agent_owner_for_token, create_auth_session};
 use crate::errors::ApiError;
 use crate::imports::CloudStartResponse;
 use crate::state::{AgentSession, CloudApiState};
@@ -175,11 +175,7 @@ pub(crate) fn analyze_agent_session(
         workspace_id: Some(revision_response.workspace.id.clone()),
         revision_id: Some(revision_response.revision.id),
     })?;
-    let session_token = Uuid::new_v4().to_string();
-    state
-        .auth_sessions
-        .write()
-        .insert(session_token.clone(), session.owner_username);
+    let session_token = create_auth_session(state, session.owner_username);
     Ok(CloudStartResponse {
         workspace_id: revision_response.workspace.id,
         job_id: job.id,

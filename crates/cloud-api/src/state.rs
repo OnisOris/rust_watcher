@@ -28,7 +28,8 @@ pub(crate) struct CloudApiState {
     pub(crate) limits: Arc<CloudLimits>,
     pub(crate) dev_token: Arc<String>,
     pub(crate) auth_users: Arc<HashMap<String, String>>,
-    pub(crate) auth_sessions: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) auth_sessions: Arc<RwLock<HashMap<String, AuthSession>>>,
+    pub(crate) auth_session_ttl_seconds: u64,
     pub(crate) default_owner_username: Arc<String>,
     pub(crate) agent_sessions: Arc<RwLock<HashMap<String, AgentSession>>>,
     pub(crate) update_config: Arc<SelfUpdateConfig>,
@@ -61,6 +62,11 @@ pub(crate) struct SelfUpdateConfig {
 pub(crate) struct SelfUpdateState {
     pub(crate) running: bool,
     pub(crate) last_message: Option<String>,
+}
+#[derive(Debug, Clone)]
+pub(crate) struct AuthSession {
+    pub(crate) username: String,
+    pub(crate) expires_at: u64,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct AgentSession {
@@ -117,6 +123,7 @@ impl CloudApiState {
         limits: CloudLimits,
         dev_token: String,
         auth_users: HashMap<String, String>,
+        auth_session_ttl_seconds: u64,
         default_owner_username: String,
         update_config: SelfUpdateConfig,
         store: CloudMetadataStore,
@@ -148,6 +155,7 @@ impl CloudApiState {
             dev_token: Arc::new(dev_token),
             auth_users: Arc::new(auth_users),
             auth_sessions: Arc::new(RwLock::new(HashMap::new())),
+            auth_session_ttl_seconds,
             default_owner_username: Arc::new(default_owner_username),
             agent_sessions: Arc::new(RwLock::new(HashMap::new())),
             update_config: Arc::new(update_config),
