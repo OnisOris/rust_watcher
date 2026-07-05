@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, CSSProperties } from 'react'
 import Editor from '@monaco-editor/react'
 import { AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, File, Folder, Play, RefreshCw, Save } from 'lucide-react'
-import { analyzeWorkspace, loadWorkspaceFileContent, loadWorkspaceFiles, saveWorkspaceFileContent } from '../api/cloudIde'
-import type { WorkspaceFileEntry } from '../api/cloudIde'
+import { analyzeWorkspace, loadWorkspaceFileContent, loadWorkspaceFiles, loadWorkspaceRevisionDiff, saveWorkspaceFileContent } from '../api/cloudIde'
+import type { WorkspaceFileEntry, WorkspaceRevisionDiffResponse, WorkspaceRevisionFileDiffEntry } from '../api/cloudIde'
 import { CloudShellNav, type CloudShellTab } from './CloudShellNav'
 
 interface BrowserIdeViewProps {
@@ -29,6 +29,9 @@ interface FileTreeNode {
 export function BrowserIdeView({ workspaceId, sessionToken, username, theme, initialPath, initialLine, onTabChange, onBackToGraph }: BrowserIdeViewProps) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([])
   const [revisionId, setRevisionId] = useState<string | null>(null)
+  const [changes, setChanges] = useState<WorkspaceRevisionDiffResponse | null>(null)
+  const [loadingChanges, setLoadingChanges] = useState(false)
+  const [sidePanel, setSidePanel] = useState<'files' | 'changes'>('files')
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [content, setContent] = useState('')
   const [savedContent, setSavedContent] = useState('')
@@ -45,6 +48,7 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
   const dirty = content !== savedContent
   const selectedFile = selectedPath ? files.find(file => file.path === selectedPath) ?? null : null
   const fileTree = useMemo(() => buildFileTree(files), [files])
+  const changedFiles = useMemo(() => changes ? flattenChanges(changes) : [], [changes])
   const editorLanguage = selectedPath ? languageForPath(selectedPath) : 'plaintext'
 
   const loadFiles = useCallback(async (preferredPath?: string | null) => {
@@ -54,6 +58,7 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
       const payload = await loadWorkspaceFiles(workspaceId, sessionToken)
       setFiles(payload.files)
       setRevisionId(payload.revisionId)
+      setChanges(null)
       setExpanded(defaultExpandedDirectories(payload.files))
       setSelectedPath(current => {
         const nextPreferred = preferredPath ?? current
@@ -112,14 +117,25 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
 
   const saveFile = useCallback(async () => {
     if (!selectedPath || !revisionId || saving || !dirty) return
+    const baseRevisionId = revisionId
     setSaving(true)
     setError(null)
     try {
-      const response = await saveWorkspaceFileContent(workspaceId, selectedPath, content, revisionId, sessionToken)
+      const response = await saveWorkspaceFileContent(workspaceId, selectedPath, content, baseRevisionId, sessionToken)
       setRevisionId(response.revisionId)
       setSavedContent(content)
       setFiles(current => current.map(file => file.path === selectedPath ? response.file : file))
       setMessage(`Saved ${selectedPath}`)
+      setSidePanel('changes')
+      setLoadingChanges(true)
+      try {
+        const diff = await loadWorkspaceRevisionDiff(workspaceId, baseRevisionId, sessionToken, response.revisionId)
+        setChanges(diff)
+      } catch (error) {
+        setError(error instanceof Error ? error.message : 'Changes failed to load.')
+      } finally {
+        setLoadingChanges(false)
+      }
     } catch (error) {
       setError(error instanceof Error ? error.message : 'File failed to save.')
     } finally {
@@ -172,10 +188,14 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div style={{ fontSize: 12, fontWeight: 780, color: 'var(--cc-text)', textTransform: 'uppercase' }}>
-                  Workspace files
+                  {sidePanel === 'files' ? 'Workspace files' : 'Changes'}
                 </div>
                 <div style={{ marginTop: 2, fontSize: 10, color: 'var(--cc-text-subtle)' }}>
-                  {files.length} files · {revisionId ? revisionId.slice(0, 8) : 'no revision'}
+                  {sidePanel === 'files'
+                    ? `${files.length} files · ${revisionId ? revisionId.slice(0, 8) : 'no revision'}`
+                    : changes
+                      ? `${changedFiles.length} changed · ${changes.unchangedCount} unchanged`
+                      : 'No saved changes yet'}
                 </div>
               </div>
               <button
@@ -188,10 +208,38 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
                 <RefreshCw size={14} />
               </button>
             </div>
+            <div className="mt-2 grid grid-cols-2 gap-1" style={{ minHeight: 28 }}>
+              <button
+                onClick={() => setSidePanel('files')}
+                style={panelTabStyle(sidePanel === 'files')}
+              >
+                Files
+              </button>
+              <button
+                onClick={() => setSidePanel('changes')}
+                style={panelTabStyle(sidePanel === 'changes')}
+              >
+                Changes
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 min-h-0 overflow-auto py-2" style={{ scrollbarWidth: 'thin', scrollbarColor: 'var(--cc-border) transparent' }}>
-            {loadingFiles ? (
+            {sidePanel === 'changes' ? (
+              loadingChanges ? (
+                <div style={{ padding: 14, fontSize: 12, color: 'var(--cc-text-muted)' }}>Loading changes...</div>
+              ) : changedFiles.length === 0 ? (
+                <div style={{ padding: 14, fontSize: 12, color: 'var(--cc-text-muted)' }}>
+                  Save a file to see revision changes.
+                </div>
+              ) : (
+                <ChangesList
+                  entries={changedFiles}
+                  selectedPath={selectedPath}
+                  onSelect={selectFile}
+                />
+              )
+            ) : loadingFiles ? (
               <div style={{ padding: 14, fontSize: 12, color: 'var(--cc-text-muted)' }}>Loading files...</div>
             ) : fileTree.length === 0 ? (
               <div style={{ padding: 14, fontSize: 12, color: 'var(--cc-text-muted)' }}>No editable files found.</div>
@@ -319,6 +367,85 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
       </div>
     </div>
   )
+}
+
+type ChangeKind = 'added' | 'modified' | 'removed'
+
+interface ChangeListEntry extends WorkspaceRevisionFileDiffEntry {
+  kind: ChangeKind
+}
+
+function ChangesList({
+  entries,
+  selectedPath,
+  onSelect,
+}: {
+  entries: ChangeListEntry[]
+  selectedPath: string | null
+  onSelect: (path: string) => void
+}) {
+  return (
+    <div className="px-2">
+      {entries.map(entry => {
+        const selectable = entry.kind !== 'removed'
+        const selected = entry.path === selectedPath
+        return (
+          <button
+            key={`${entry.kind}:${entry.path}`}
+            onClick={() => selectable && onSelect(entry.path)}
+            disabled={!selectable}
+            title={entry.path}
+            className="w-full flex items-center gap-2"
+            style={{
+              minHeight: 38,
+              padding: '5px 8px',
+              marginBottom: 2,
+              background: selected ? 'var(--cc-selected-soft)' : 'transparent',
+              border: '1px solid transparent',
+              borderLeft: selected ? '2px solid var(--cc-accent)' : '2px solid transparent',
+              color: selectable ? 'var(--cc-text)' : 'var(--cc-text-muted)',
+              cursor: selectable ? 'pointer' : 'default',
+              opacity: selectable ? 1 : 0.78,
+              textAlign: 'left',
+            }}
+          >
+            <span style={changeBadgeStyle(entry.kind)}>{changeLabel(entry.kind)}</span>
+            <span className="min-w-0 flex-1">
+              <span style={{ display: 'block', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {entry.path}
+              </span>
+              <span style={{ display: 'block', marginTop: 2, fontSize: 10, color: 'var(--cc-text-subtle)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {changeMeta(entry)}
+              </span>
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function flattenChanges(changes: WorkspaceRevisionDiffResponse): ChangeListEntry[] {
+  return [
+    ...changes.modifiedFiles.map(file => ({ ...file, kind: 'modified' as const })),
+    ...changes.addedFiles.map(file => ({ ...file, kind: 'added' as const })),
+    ...changes.removedFiles.map(file => ({ ...file, kind: 'removed' as const })),
+  ].sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function changeLabel(kind: ChangeKind) {
+  if (kind === 'added') return 'A'
+  if (kind === 'removed') return 'D'
+  return 'M'
+}
+
+function changeMeta(entry: ChangeListEntry) {
+  const oldSize = entry.oldSizeBytes === undefined ? 'new' : formatBytes(entry.oldSizeBytes)
+  const newSize = entry.newSizeBytes === undefined ? 'removed' : formatBytes(entry.newSizeBytes)
+  const oldHash = entry.oldContentHash?.slice(0, 8)
+  const newHash = entry.newContentHash?.slice(0, 8)
+  if (oldHash && newHash && oldHash !== newHash) return `${oldSize} -> ${newSize} · ${oldHash} -> ${newHash}`
+  return `${oldSize} -> ${newSize}`
 }
 
 function TreeNodeRow({
@@ -476,6 +603,37 @@ function buttonStyle(disabled: boolean): CSSProperties {
     fontSize: 12,
     fontWeight: 740,
     cursor: disabled ? 'not-allowed' : 'pointer',
+  }
+}
+
+function panelTabStyle(active: boolean): CSSProperties {
+  return {
+    minHeight: 28,
+    borderRadius: 6,
+    border: `1px solid ${active ? 'var(--cc-accent)' : 'var(--cc-border)'}`,
+    background: active ? 'var(--cc-selected-soft)' : 'var(--cc-surface)',
+    color: active ? 'var(--cc-accent)' : 'var(--cc-text-muted)',
+    fontSize: 11,
+    fontWeight: 740,
+    cursor: 'pointer',
+  }
+}
+
+function changeBadgeStyle(kind: ChangeKind): CSSProperties {
+  const color = kind === 'added' ? '#16A34A' : kind === 'removed' ? '#DC2626' : '#D97706'
+  return {
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    border: `1px solid ${color}55`,
+    background: `${color}14`,
+    color,
+    fontSize: 10,
+    fontWeight: 800,
   }
 }
 

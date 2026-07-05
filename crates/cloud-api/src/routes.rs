@@ -74,6 +74,14 @@ pub(crate) fn router() -> Router<CloudApiState> {
             get(ide::cloud_workspace_files),
         )
         .route(
+            "/api/cloud/workspaces/{id}/diff",
+            get(ide::cloud_workspace_diff),
+        )
+        .route(
+            "/api/cloud/workspaces/{id}/files/diff",
+            get(ide::cloud_workspace_file_diff),
+        )
+        .route(
             "/api/cloud/workspaces/{id}/files/content",
             get(ide::cloud_workspace_file_content).put(ide::cloud_save_workspace_file),
         )

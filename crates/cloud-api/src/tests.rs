@@ -1,4 +1,4 @@
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -515,6 +515,134 @@ fn save_workspace_file_rejects_stale_base_revision() {
         error,
         ApiError::Conflict("workspace revision changed".into())
     );
+}
+
+#[test]
+fn workspace_revision_diff_reports_added_removed_modified_and_unchanged() {
+    let state = test_state();
+    let workspace = state.create_workspace(workspace_request());
+    let unchanged = file_entry_at("src/unchanged.rs", b"pub fn same() {}\n");
+    let old_modified = file_entry_at("src/modified.rs", b"pub fn value() -> i32 { 1 }\n");
+    let removed = file_entry_at("src/removed.rs", b"pub fn removed() {}\n");
+    let new_modified = file_entry_at("src/modified.rs", b"pub fn value() -> i32 { 2 }\n");
+    let added = file_entry_at("src/added.rs", b"pub fn added() {}\n");
+    for (entry, content) in [
+        (&unchanged, b"pub fn same() {}\n".as_slice()),
+        (&old_modified, b"pub fn value() -> i32 { 1 }\n".as_slice()),
+        (&removed, b"pub fn removed() {}\n".as_slice()),
+        (&new_modified, b"pub fn value() -> i32 { 2 }\n".as_slice()),
+        (&added, b"pub fn added() {}\n".as_slice()),
+    ] {
+        state
+            .upload_blob(&workspace.id, &entry.content_hash, content)
+            .unwrap();
+    }
+    let base = state
+        .create_revision(
+            &workspace.id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: None,
+                files: vec![unchanged.clone(), old_modified.clone(), removed.clone()],
+            },
+        )
+        .unwrap()
+        .revision;
+    let head = state
+        .create_revision(
+            &workspace.id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: Some(base.id.clone()),
+                files: vec![unchanged.clone(), new_modified.clone(), added.clone()],
+            },
+        )
+        .unwrap()
+        .revision;
+
+    let diff = state
+        .workspace_revision_diff(&workspace.id, &base.id, Some(&head.id))
+        .unwrap();
+    let current_head_diff = state
+        .workspace_revision_diff(&workspace.id, &base.id, None)
+        .unwrap();
+
+    assert_eq!(diff.added_files.len(), 1);
+    assert_eq!(current_head_diff.head_revision_id, head.id);
+    assert_eq!(diff.added_files[0].path, "src/added.rs");
+    assert_eq!(diff.removed_files.len(), 1);
+    assert_eq!(diff.removed_files[0].path, "src/removed.rs");
+    assert_eq!(diff.modified_files.len(), 1);
+    assert_eq!(diff.modified_files[0].path, "src/modified.rs");
+    assert_eq!(diff.unchanged_count, 1);
+    assert_eq!(
+        diff.modified_files[0].old_content_hash.as_deref(),
+        Some(old_modified.content_hash.as_str())
+    );
+    assert_eq!(
+        diff.modified_files[0].new_content_hash.as_deref(),
+        Some(new_modified.content_hash.as_str())
+    );
+
+    let file_diff = state
+        .workspace_file_diff(&workspace.id, "src/modified.rs", &base.id, Some(&head.id))
+        .unwrap();
+
+    assert_eq!(file_diff.old_size_bytes, Some(old_modified.size_bytes));
+    assert_eq!(file_diff.new_size_bytes, Some(new_modified.size_bytes));
+    assert_eq!(
+        file_diff.old_content_hash.as_deref(),
+        Some(old_modified.content_hash.as_str())
+    );
+    assert_eq!(
+        file_diff.new_content_hash.as_deref(),
+        Some(new_modified.content_hash.as_str())
+    );
+    assert!(!file_diff.truncated);
+    let unified = file_diff.unified_diff.expect("unified diff");
+    assert!(unified.contains("-pub fn value() -> i32 { 1 }"));
+    assert!(unified.contains("+pub fn value() -> i32 { 2 }"));
+}
+
+#[tokio::test]
+async fn workspace_revision_diff_requires_workspace_owner() {
+    let state = test_state();
+    let (workspace, revision) = create_rust_revision(&state);
+    let user_workspace = state.create_workspace(CreateWorkspaceRequest {
+        display_name: "user-demo".into(),
+        owner_username: Some("user".into()),
+        source: None,
+    });
+    let user_file = file_entry_at("src/lib.rs", b"pub fn user() {}\n");
+    state
+        .upload_blob(
+            &user_workspace.id,
+            &user_file.content_hash,
+            b"pub fn user() {}\n",
+        )
+        .unwrap();
+    state
+        .create_revision(
+            &user_workspace.id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: None,
+                files: vec![user_file],
+            },
+        )
+        .unwrap();
+    let token = create_auth_session(&state, "admin".into());
+
+    let response = crate::ide::cloud_workspace_diff(
+        State(state),
+        auth_headers(&token),
+        AxumPath(user_workspace.id),
+        Query(crate::ide::WorkspaceRevisionDiffQuery {
+            base_revision_id: revision.id,
+            head_revision_id: Some(workspace.current_revision.unwrap_or_default()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 fn workspace_job_request(

@@ -28,6 +28,24 @@ export interface SaveWorkspaceFileResponse {
   totalBytes: number
 }
 
+export interface WorkspaceRevisionFileDiffEntry {
+  path: string
+  oldSizeBytes?: number
+  newSizeBytes?: number
+  oldContentHash?: string
+  newContentHash?: string
+}
+
+export interface WorkspaceRevisionDiffResponse {
+  workspaceId: string
+  baseRevisionId: string
+  headRevisionId: string
+  addedFiles: WorkspaceRevisionFileDiffEntry[]
+  removedFiles: WorkspaceRevisionFileDiffEntry[]
+  modifiedFiles: WorkspaceRevisionFileDiffEntry[]
+  unchangedCount: number
+}
+
 export interface CloudAnalyzeResponse {
   jobId: string
   workspaceId?: string
@@ -86,6 +104,23 @@ export async function saveWorkspaceFileContent(
   )
   if (!response.ok) throw await responseError(response, 'Saving file')
   return await response.json() as SaveWorkspaceFileResponse
+}
+
+export async function loadWorkspaceRevisionDiff(
+  workspaceId: string,
+  baseRevisionId: string,
+  sessionToken: string,
+  headRevisionId?: string,
+) {
+  const params = new URLSearchParams({ baseRevisionId })
+  if (headRevisionId) params.set('headRevisionId', headRevisionId)
+  const response = await cloudFetch(
+    `/api/cloud/workspaces/${encodeURIComponent(workspaceId)}/diff?${params}`,
+    {},
+    sessionToken,
+  )
+  if (!response.ok) throw await responseError(response, 'Loading workspace changes')
+  return await response.json() as WorkspaceRevisionDiffResponse
 }
 
 export async function analyzeWorkspace(workspaceId: string, sessionToken: string) {
