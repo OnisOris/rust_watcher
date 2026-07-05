@@ -2,9 +2,9 @@ use anyhow::Result;
 use graph_core::{AppStatus, DiagnosticRecord, GraphSnapshot, ServerMessage};
 use parking_lot::RwLock;
 use ra_client::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -27,6 +27,10 @@ pub(crate) struct AppStateHandle {
     pub(crate) diagnostics_by_node: Arc<RwLock<HashMap<String, Vec<DiagnosticRecord>>>>,
     pub(crate) watcher: Arc<RwLock<Option<notify::RecommendedWatcher>>>,
     pub(crate) is_indexing: Arc<AtomicBool>,
+    pub(crate) pending_changed_files: Arc<RwLock<HashSet<String>>>,
+    pub(crate) pending_changed_files_root: Arc<RwLock<Option<PathBuf>>>,
+    pub(crate) watcher_debounce_running: Arc<AtomicBool>,
+    pub(crate) watcher_event_generation: Arc<AtomicU64>,
     pub(crate) enable_editor_open: bool,
 }
 

@@ -208,9 +208,9 @@ pub(crate) async fn index_and_patch(
     state: AppStateHandle,
     project_root: PathBuf,
     changed_files: Vec<String>,
-) {
+) -> bool {
     if state.is_indexing.swap(true, Ordering::SeqCst) {
-        return;
+        return false;
     }
     crate::update_status(&state, |status| {
         status.analyzer_status = AnalyzerStatus::Indexing;
@@ -283,7 +283,7 @@ pub(crate) async fn index_and_patch(
             {
                 Ok(()) => {
                     state.is_indexing.store(false, Ordering::SeqCst);
-                    return;
+                    return true;
                 }
                 Err(error) => warn!(
                     ?error,
@@ -298,7 +298,7 @@ pub(crate) async fn index_and_patch(
         {
             Ok(()) => {
                 state.is_indexing.store(false, Ordering::SeqCst);
-                return;
+                return true;
             }
             Err(error) => warn!(
                 ?error,
@@ -312,7 +312,7 @@ pub(crate) async fn index_and_patch(
         {
             Ok(()) => {
                 state.is_indexing.store(false, Ordering::SeqCst);
-                return;
+                return true;
             }
             Err(error) => warn!(
                 ?error,
@@ -325,7 +325,7 @@ pub(crate) async fn index_and_patch(
         {
             Ok(()) => {
                 state.is_indexing.store(false, Ordering::SeqCst);
-                return;
+                return true;
             }
             Err(error) => warn!(
                 ?error,
@@ -340,6 +340,7 @@ pub(crate) async fn index_and_patch(
     } else {
         rebuild_language_patch_snapshot(state, project_root, changed_files, detected).await;
     }
+    true
 }
 
 async fn rebuild_patch_snapshot(

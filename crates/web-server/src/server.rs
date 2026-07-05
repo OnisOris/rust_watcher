@@ -7,12 +7,13 @@ use graph_core::{
 };
 use parking_lot::RwLock;
 use project_indexer::start_watcher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
 use tower_http::cors::CorsLayer;
@@ -127,6 +128,10 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         diagnostics_by_node: Arc::new(RwLock::new(HashMap::new())),
         watcher: Arc::new(RwLock::new(None)),
         is_indexing: Arc::new(AtomicBool::new(false)),
+        pending_changed_files: Arc::new(RwLock::new(HashSet::new())),
+        pending_changed_files_root: Arc::new(RwLock::new(None)),
+        watcher_debounce_running: Arc::new(AtomicBool::new(false)),
+        watcher_event_generation: Arc::new(AtomicU64::new(0)),
         enable_editor_open: args.enable_editor_open,
     };
     install_watcher(&state, project_root.clone());
@@ -165,11 +170,18 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
 }
 
 pub(crate) fn install_watcher(state: &AppStateHandle, root: PathBuf) {
-    let handle = tokio::runtime::Handle::current();
+    clear_pending_changed_files(
+        &state.pending_changed_files_root,
+        &state.pending_changed_files,
+    );
+    let handle = Handle::current();
     let watch_state = state.clone();
+    let watched_root = root.clone();
     match start_watcher(root.clone(), move |event| {
         let state = watch_state.clone();
-        if state.is_indexing.load(Ordering::Relaxed) {
+        let watched_root = watched_root.clone();
+        let root = state.project_root.read().clone();
+        if root != watched_root {
             return;
         }
         let changed_path = event
@@ -177,7 +189,21 @@ pub(crate) fn install_watcher(state: &AppStateHandle, root: PathBuf) {
             .first()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let root = state.project_root.read().clone();
+        let changed_files = event
+            .paths
+            .iter()
+            .map(|path| project_indexer::relative_to(&root, path))
+            .collect::<Vec<_>>();
+        enqueue_pending_changed_files(
+            &state.pending_changed_files_root,
+            &state.pending_changed_files,
+            &root,
+            changed_files,
+        );
+        state
+            .watcher_event_generation
+            .fetch_add(1, Ordering::SeqCst);
+        spawn_watcher_debounce_loop(&handle, state.clone());
         handle.spawn(async move {
             let analysis_event = analysis_event(
                 AnalysisEventType::Analyzer,
@@ -196,13 +222,6 @@ pub(crate) fn install_watcher(state: &AppStateHandle, root: PathBuf) {
             let _ = state
                 .ws_tx
                 .send(ServerMessage::AnalysisEvent(analysis_event));
-            sleep(Duration::from_millis(250)).await;
-            let changed_files = event
-                .paths
-                .iter()
-                .map(|path| project_indexer::relative_to(&root, path))
-                .collect::<Vec<_>>();
-            analysis::index_and_patch(state, root, changed_files).await;
         });
     }) {
         Ok(watcher) => {
@@ -211,6 +230,104 @@ pub(crate) fn install_watcher(state: &AppStateHandle, root: PathBuf) {
         }
         Err(error) => {
             warn!(project_root = %root.display(), ?error, "failed to install file watcher")
+        }
+    }
+}
+
+const WATCHER_DEBOUNCE_DELAY: Duration = Duration::from_millis(350);
+const WATCHER_INDEXING_POLL_DELAY: Duration = Duration::from_millis(100);
+
+fn enqueue_pending_changed_files(
+    pending_changed_files_root: &RwLock<Option<PathBuf>>,
+    pending_changed_files: &RwLock<HashSet<String>>,
+    root: &PathBuf,
+    changed_files: impl IntoIterator<Item = String>,
+) {
+    let mut pending_root = pending_changed_files_root.write();
+    let mut pending = pending_changed_files.write();
+    if pending_root.as_ref() != Some(root) {
+        pending.clear();
+        *pending_root = Some(root.clone());
+    }
+    pending.extend(changed_files.into_iter().filter(|file| !file.is_empty()));
+}
+
+fn drain_pending_changed_files(
+    pending_changed_files_root: &RwLock<Option<PathBuf>>,
+    pending_changed_files: &RwLock<HashSet<String>>,
+) -> Option<(PathBuf, Vec<String>)> {
+    let mut pending_root = pending_changed_files_root.write();
+    let mut pending = pending_changed_files.write();
+    let mut changed_files = pending.drain().collect::<Vec<_>>();
+    changed_files.sort();
+    let root = pending_root.take()?;
+    (!changed_files.is_empty()).then_some((root, changed_files))
+}
+
+fn clear_pending_changed_files(
+    pending_changed_files_root: &RwLock<Option<PathBuf>>,
+    pending_changed_files: &RwLock<HashSet<String>>,
+) {
+    *pending_changed_files_root.write() = None;
+    pending_changed_files.write().clear();
+}
+
+fn pending_changed_files_is_empty(pending_changed_files: &RwLock<HashSet<String>>) -> bool {
+    pending_changed_files.read().is_empty()
+}
+
+fn spawn_watcher_debounce_loop(handle: &Handle, state: AppStateHandle) {
+    if state.watcher_debounce_running.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    handle.spawn(async move {
+        watcher_debounce_loop(state).await;
+    });
+}
+
+async fn watcher_debounce_loop(state: AppStateHandle) {
+    loop {
+        let observed_generation = state.watcher_event_generation.load(Ordering::SeqCst);
+        sleep(WATCHER_DEBOUNCE_DELAY).await;
+        if state.watcher_event_generation.load(Ordering::SeqCst) != observed_generation {
+            continue;
+        }
+        while state.is_indexing.load(Ordering::SeqCst) {
+            sleep(WATCHER_INDEXING_POLL_DELAY).await;
+            if state.watcher_event_generation.load(Ordering::SeqCst) != observed_generation {
+                break;
+            }
+        }
+        if state.watcher_event_generation.load(Ordering::SeqCst) != observed_generation {
+            continue;
+        }
+
+        let Some((root, changed_files)) = drain_pending_changed_files(
+            &state.pending_changed_files_root,
+            &state.pending_changed_files,
+        ) else {
+            state
+                .watcher_debounce_running
+                .store(false, Ordering::SeqCst);
+            if pending_changed_files_is_empty(&state.pending_changed_files) {
+                return;
+            }
+            if state.watcher_debounce_running.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            continue;
+        };
+
+        if *state.project_root.read() != root {
+            continue;
+        }
+        if !analysis::index_and_patch(state.clone(), root.clone(), changed_files.clone()).await {
+            enqueue_pending_changed_files(
+                &state.pending_changed_files_root,
+                &state.pending_changed_files,
+                &root,
+                changed_files,
+            );
         }
     }
 }
@@ -621,5 +738,61 @@ pub(crate) fn analysis_event(
         message: message.into(),
         timestamp: timestamp(),
         file,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_changed_files_coalesce_before_drain() {
+        let root = PathBuf::from("/workspace/app");
+        let other_root = PathBuf::from("/workspace/other");
+        let pending_root = RwLock::new(None);
+        let pending = RwLock::new(HashSet::new());
+
+        enqueue_pending_changed_files(
+            &pending_root,
+            &pending,
+            &root,
+            [
+                "src/main.rs".to_string(),
+                "src/lib.rs".to_string(),
+                "src/main.rs".to_string(),
+            ],
+        );
+        enqueue_pending_changed_files(
+            &pending_root,
+            &pending,
+            &root,
+            ["Cargo.toml".to_string(), "src/lib.rs".to_string()],
+        );
+
+        assert_eq!(
+            drain_pending_changed_files(&pending_root, &pending),
+            Some((
+                root.clone(),
+                vec![
+                    "Cargo.toml".to_string(),
+                    "src/lib.rs".to_string(),
+                    "src/main.rs".to_string()
+                ]
+            ))
+        );
+        assert!(drain_pending_changed_files(&pending_root, &pending).is_none());
+
+        enqueue_pending_changed_files(&pending_root, &pending, &root, ["src/old.rs".to_string()]);
+        enqueue_pending_changed_files(
+            &pending_root,
+            &pending,
+            &other_root,
+            ["src/new.rs".to_string()],
+        );
+
+        assert_eq!(
+            drain_pending_changed_files(&pending_root, &pending),
+            Some((other_root, vec!["src/new.rs".to_string()]))
+        );
     }
 }
