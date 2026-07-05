@@ -723,9 +723,9 @@ fn diff_snapshots(
             .nodes
             .iter()
             .filter(|node| {
-                old_nodes.get(node.id.as_str()).is_some_and(|old| {
-                    serde_json::to_value(old).ok() != serde_json::to_value(node).ok()
-                })
+                old_nodes
+                    .get(node.id.as_str())
+                    .is_some_and(|old| old != node)
             })
             .cloned()
             .collect(),
@@ -745,9 +745,9 @@ fn diff_snapshots(
             .edges
             .iter()
             .filter(|edge| {
-                old_edges.get(edge.id.as_str()).is_some_and(|old| {
-                    serde_json::to_value(old).ok() != serde_json::to_value(edge).ok()
-                })
+                old_edges
+                    .get(edge.id.as_str())
+                    .is_some_and(|old| old != edge)
             })
             .cloned()
             .collect(),
@@ -1426,5 +1426,60 @@ mod tests {
         assert_eq!(patch.updated_nodes.len(), 1);
         assert!(patch.updated_nodes.len() < new.nodes.len());
         assert_eq!(patch.changed_files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn graph_patch_updates_only_changed_nodes_and_edges() {
+        let unchanged_node = test_node("unchanged", Some("src/lib.rs"), Some("app"));
+        let changed_node = test_node("changed", Some("src/lib.rs"), Some("app"));
+        let unchanged_edge = test_edge(
+            EdgeType::Calls,
+            "fn:unchanged@1",
+            "fn:changed@1",
+            EdgeConfidence::Exact,
+        );
+        let changed_edge = test_edge(
+            EdgeType::Uses,
+            "fn:changed@1",
+            "fn:unchanged@1",
+            EdgeConfidence::SyntaxFallback,
+        );
+        let old = GraphSnapshot {
+            nodes: vec![unchanged_node.clone(), changed_node.clone()],
+            edges: vec![unchanged_edge.clone(), changed_edge.clone()],
+            files: Vec::new(),
+            events: Vec::new(),
+            status: AppStatus::empty(),
+        };
+        let mut new = old.clone();
+        new.nodes[1].signature = Some("fn changed()".into());
+        new.edges[1].confidence = EdgeConfidence::Semantic;
+
+        let patch = diff_snapshots(&old, &new, Vec::new(), Vec::new());
+
+        assert!(!patch
+            .updated_nodes
+            .iter()
+            .any(|node| node.id == unchanged_node.id));
+        assert_eq!(
+            patch
+                .updated_nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![changed_node.id.as_str()]
+        );
+        assert!(!patch
+            .updated_edges
+            .iter()
+            .any(|edge| edge.id == unchanged_edge.id));
+        assert_eq!(
+            patch
+                .updated_edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![changed_edge.id.as_str()]
+        );
     }
 }
