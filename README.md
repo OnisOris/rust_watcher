@@ -29,6 +29,8 @@ Build the Rust workspace:
 cargo build
 ```
 
+Cloud deployment and secure auth setup are documented in [docs/cloud.md](docs/cloud.md).
+
 ## Analyzer Setup
 
 Rust Code Command Center works with parser fallbacks, but external analyzers unlock richer semantic data.
