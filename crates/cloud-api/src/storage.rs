@@ -35,7 +35,8 @@ impl CloudMetadataStore {
     }
 
     pub fn init_schema(&self) -> Result<()> {
-        self.connection()?
+        let connection = self.connection()?;
+        connection
             .execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS workspaces (
@@ -60,6 +61,9 @@ impl CloudMetadataStore {
                     id TEXT PRIMARY KEY,
                     workspace_id TEXT,
                     revision_id TEXT,
+                    base_revision_id TEXT,
+                    incremental INTEGER NOT NULL DEFAULT 0,
+                    changed_files_json TEXT,
                     json TEXT NOT NULL,
                     created_at TEXT,
                     updated_at TEXT
@@ -78,7 +82,16 @@ impl CloudMetadataStore {
                 );
                 "#,
             )
-            .context("failed to initialize cloud metadata schema")
+            .context("failed to initialize cloud metadata schema")?;
+        ensure_column(&connection, "analysis_jobs", "base_revision_id", "TEXT")?;
+        ensure_column(
+            &connection,
+            "analysis_jobs",
+            "incremental",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&connection, "analysis_jobs", "changed_files_json", "TEXT")?;
+        Ok(())
     }
 
     pub fn load_all(&self) -> Result<PersistedCloudState> {
@@ -139,18 +152,46 @@ impl CloudMetadataStore {
         Ok(())
     }
 
-    pub fn save_job(
+    pub fn save_job_with_target(
+        &self,
+        job: &AnalysisJob,
+        target: Option<&JobRevisionTarget>,
+    ) -> Result<()> {
+        self.save_job_record(
+            job,
+            target.map(|target| target.workspace_id.as_str()),
+            target.map(|target| target.revision_id.as_str()),
+            target.and_then(|target| target.base_revision_id.as_deref()),
+            target.is_some_and(|target| target.incremental),
+            target
+                .map(|target| target.changed_files.as_slice())
+                .unwrap_or(&[]),
+        )
+    }
+
+    fn save_job_record(
         &self,
         job: &AnalysisJob,
         workspace_id: Option<&str>,
         revision_id: Option<&str>,
+        base_revision_id: Option<&str>,
+        incremental: bool,
+        changed_files: &[String],
     ) -> Result<()> {
+        let changed_files_json = if changed_files.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(changed_files)?)
+        };
         self.connection()?.execute(
-            "INSERT OR REPLACE INTO analysis_jobs (id, workspace_id, revision_id, json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO analysis_jobs (id, workspace_id, revision_id, base_revision_id, incremental, changed_files_json, json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &job.id,
                 workspace_id,
                 revision_id,
+                base_revision_id,
+                if incremental { 1 } else { 0 },
+                changed_files_json.as_deref(),
                 serde_json::to_string(job)?,
                 job.created_at.as_deref(),
                 job.finished_at.as_deref().or(job.started_at.as_deref()),
@@ -230,33 +271,73 @@ fn load_jobs(
     HashMap<String, AnalysisJob>,
     HashMap<String, JobRevisionTarget>,
 )> {
-    let mut statement =
-        connection.prepare("SELECT id, workspace_id, revision_id, json FROM analysis_jobs")?;
+    let mut statement = connection.prepare(
+        "SELECT id, workspace_id, revision_id, base_revision_id, incremental, changed_files_json, json FROM analysis_jobs",
+    )?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
         ))
     })?;
     let mut jobs = HashMap::new();
     let mut targets = HashMap::new();
     for row in rows {
-        let (id, workspace_id, revision_id, json) = row?;
+        let (
+            id,
+            workspace_id,
+            revision_id,
+            base_revision_id,
+            incremental,
+            changed_files_json,
+            json,
+        ) = row?;
         let job: AnalysisJob = serde_json::from_str(&json)?;
         if let (Some(workspace_id), Some(revision_id)) = (workspace_id, revision_id) {
+            let changed_files = changed_files_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?
+                .unwrap_or_default();
             targets.insert(
                 id.clone(),
                 JobRevisionTarget {
                     workspace_id,
                     revision_id,
+                    base_revision_id,
+                    incremental: incremental != 0,
+                    changed_files,
                 },
             );
         }
         jobs.insert(job.id.clone(), job);
     }
     Ok((jobs, targets))
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(());
+        }
+    }
+    connection.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )?;
+    Ok(())
 }
 
 fn load_analysis_results(connection: &Connection) -> Result<HashMap<String, CloudAnalysisResult>> {
@@ -313,8 +394,8 @@ impl HasId for CloudAnalysisUsage {
 mod tests {
     use super::*;
     use graph_core::{
-        AnalysisJobSource, AnalysisJobSourceKind, AnalysisJobStatus, AnalyzerEngine, AppStatus,
-        GraphSnapshot, WorkspaceFileEntry,
+        AnalysisJobSource, AnalysisJobSourceKind, AnalysisJobStatus, AnalysisMode, AnalyzerEngine,
+        AppStatus, GraphSnapshot, WorkspaceFileEntry,
     };
     use uuid::Uuid;
 
@@ -373,6 +454,7 @@ mod tests {
             project_name: Some("demo".into()),
             message: Some("queued".into()),
             progress: Some(0),
+            analysis_mode: AnalysisMode::Full,
             requested_analyzers: vec![AnalyzerEngine::Parser],
             analyzer_statuses: Vec::new(),
             created_at: Some("3".into()),
@@ -381,6 +463,16 @@ mod tests {
             credits_estimated: Some(1),
             credits_used: None,
             error: None,
+        }
+    }
+
+    fn job_target() -> JobRevisionTarget {
+        JobRevisionTarget {
+            workspace_id: "workspace_1".into(),
+            revision_id: "revision_1".into(),
+            base_revision_id: None,
+            incremental: false,
+            changed_files: Vec::new(),
         }
     }
 
@@ -459,36 +551,40 @@ mod tests {
     #[test]
     fn job_persistence_roundtrip_includes_revision_target() {
         let store = store();
+        let target = JobRevisionTarget {
+            workspace_id: "workspace_1".into(),
+            revision_id: "revision_1".into(),
+            base_revision_id: Some("revision_0".into()),
+            incremental: true,
+            changed_files: vec!["src/main.rs".into()],
+        };
         store
-            .save_job(
-                &job(AnalysisJobStatus::Queued),
-                Some("workspace_1"),
-                Some("revision_1"),
-            )
+            .save_job_with_target(&job(AnalysisJobStatus::Queued), Some(&target))
             .unwrap();
 
         let loaded = store.load_all().unwrap();
         assert!(loaded.jobs.contains_key("job_1"));
+        let loaded_target = &loaded.job_revision_targets["job_1"];
+        assert_eq!(loaded_target.revision_id, "revision_1");
         assert_eq!(
-            loaded.job_revision_targets["job_1"].revision_id,
-            "revision_1"
+            loaded_target.base_revision_id.as_deref(),
+            Some("revision_0")
         );
+        assert!(loaded_target.incremental);
+        assert_eq!(loaded_target.changed_files, vec!["src/main.rs".to_string()]);
     }
 
     #[test]
     fn job_status_update_persists() {
         let store = store();
+        let target = job_target();
         store
-            .save_job(
-                &job(AnalysisJobStatus::Queued),
-                Some("workspace_1"),
-                Some("revision_1"),
-            )
+            .save_job_with_target(&job(AnalysisJobStatus::Queued), Some(&target))
             .unwrap();
         let mut completed = job(AnalysisJobStatus::Completed);
         completed.finished_at = Some("4".into());
         store
-            .save_job(&completed, Some("workspace_1"), Some("revision_1"))
+            .save_job_with_target(&completed, Some(&target))
             .unwrap();
 
         assert_eq!(

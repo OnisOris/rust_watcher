@@ -225,6 +225,8 @@ pub(crate) fn import_project_directory(
         project_name: Some(workspace.display_name),
         workspace_id: Some(revision_response.workspace.id.clone()),
         revision_id: Some(revision_response.revision.id),
+        incremental: false,
+        base_revision_id: None,
     })?;
     Ok(CloudStartResponse {
         workspace_id: revision_response.workspace.id,

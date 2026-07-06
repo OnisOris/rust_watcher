@@ -174,6 +174,8 @@ pub(crate) fn analyze_agent_session(
         project_name: Some(session.project_name),
         workspace_id: Some(revision_response.workspace.id.clone()),
         revision_id: Some(revision_response.revision.id),
+        incremental: false,
+        base_revision_id: None,
     })?;
     let session_token = create_auth_session(state, session.owner_username);
     Ok(CloudStartResponse {

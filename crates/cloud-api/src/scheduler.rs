@@ -1,8 +1,8 @@
 use anyhow::Result;
 use graph_core::{
-    estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobStatus, AnalyzerCapability,
-    AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus, AnalyzerStatus,
-    AppState, AppStatus, CloudAnalysisUsage, GraphSnapshot,
+    estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobStatus, AnalysisMode,
+    AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
+    AnalyzerStatus, AppState, AppStatus, CloudAnalysisUsage, GraphSnapshot,
 };
 use parking_lot::RwLock;
 use project_indexer::ProjectIndex;
@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::errors::ApiError;
 use crate::jobs::AnalysisQueueStatusResponse;
-use crate::state::{CloudAnalysisResult, CloudApiState};
+use crate::state::{CloudAnalysisResult, CloudApiState, JobRevisionTarget};
 use crate::workspaces::{materialize_revision, timestamp};
 
 #[derive(Debug, Clone, Copy)]
@@ -222,6 +222,7 @@ pub(crate) async fn execute_cloud_analysis_job(
         .get_job(&job_id)
         .map(|job| job.requested_analyzers)
         .unwrap_or_default();
+    let analysis_mode = prepare_cloud_analysis_mode(&state, &job_id, &target);
     let credits_estimated = estimate_cloud_analysis_credits(
         revision.files_count,
         revision.total_bytes,
@@ -230,7 +231,11 @@ pub(crate) async fn execute_cloud_analysis_job(
     state.update_job_status(
         &job_id,
         AnalysisJobStatus::Preparing,
-        "Preparing cloud analysis",
+        match analysis_mode {
+            AnalysisMode::Full => "Preparing cloud analysis",
+            AnalysisMode::Incremental => "Preparing incremental cloud analysis",
+            AnalysisMode::FallbackFull => "Preparing full cloud analysis fallback",
+        },
         Some(10),
     );
     let materialization_start = Instant::now();
@@ -389,6 +394,42 @@ pub(crate) async fn execute_cloud_analysis_job(
     state.set_job_analyzer_statuses(&job_id, snapshot.status.analyzers.clone());
     state.complete_job(&job_id, &snapshot, credits_used);
     Ok(snapshot)
+}
+
+fn prepare_cloud_analysis_mode(
+    state: &CloudApiState,
+    job_id: &str,
+    target: &JobRevisionTarget,
+) -> AnalysisMode {
+    if !target.incremental {
+        state.set_job_analysis_mode(job_id, AnalysisMode::Full);
+        return AnalysisMode::Full;
+    }
+    let Some(base_revision_id) = target.base_revision_id.as_deref() else {
+        state.set_job_analysis_mode(job_id, AnalysisMode::FallbackFull);
+        return AnalysisMode::FallbackFull;
+    };
+    let Ok(diff) = state.workspace_revision_diff(
+        &target.workspace_id,
+        base_revision_id,
+        Some(&target.revision_id),
+    ) else {
+        state.set_job_analysis_mode(job_id, AnalysisMode::FallbackFull);
+        return AnalysisMode::FallbackFull;
+    };
+    let changed_files = diff
+        .added_files
+        .iter()
+        .chain(diff.modified_files.iter())
+        .chain(diff.removed_files.iter())
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    if let Some(target) = state.job_revision_targets.write().get_mut(job_id) {
+        target.changed_files = changed_files;
+    }
+    let mode = AnalysisMode::FallbackFull;
+    state.set_job_analysis_mode(job_id, mode);
+    mode
 }
 pub(crate) fn build_initial_snapshot(project_root: &Path) -> (GraphSnapshot, Option<ProjectIndex>) {
     let status = AppStatus {

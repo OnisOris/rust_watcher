@@ -306,6 +306,8 @@ impl CloudClient {
                 ),
                 workspace_id: Some(sync.workspace.id.clone()),
                 revision_id: Some(sync.revision.id.clone()),
+                incremental: false,
+                base_revision_id: None,
             })
             .await?;
         let job = self.wait_for_analysis_job(&job.id, request.wait).await?;
@@ -510,7 +512,7 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_core::{AnalysisJobSource, AnalysisJobSourceKind};
+    use graph_core::{AnalysisJobSource, AnalysisJobSourceKind, AnalysisMode};
     use std::io::Write;
 
     fn test_root(name: &str) -> PathBuf {
@@ -545,6 +547,7 @@ mod tests {
             project_name: Some("demo".into()),
             message: None,
             progress: None,
+            analysis_mode: AnalysisMode::Full,
             requested_analyzers: Vec::new(),
             analyzer_statuses: Vec::new(),
             created_at: None,

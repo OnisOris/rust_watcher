@@ -96,6 +96,9 @@ pub(crate) struct CloudEvent {
 pub(crate) struct JobRevisionTarget {
     pub(crate) workspace_id: String,
     pub(crate) revision_id: String,
+    pub(crate) base_revision_id: Option<String>,
+    pub(crate) incremental: bool,
+    pub(crate) changed_files: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,11 +139,7 @@ impl CloudApiState {
         recover_running_jobs(&mut jobs);
         for (id, job) in &jobs {
             let target = persisted.job_revision_targets.get(id);
-            store.save_job(
-                job,
-                target.map(|target| target.workspace_id.as_str()),
-                target.map(|target| target.revision_id.as_str()),
-            )?;
+            store.save_job_with_target(job, target)?;
         }
         let state = Self {
             jobs: Arc::new(RwLock::new(jobs)),

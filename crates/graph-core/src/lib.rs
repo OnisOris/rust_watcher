@@ -887,6 +887,14 @@ pub enum AnalysisJobStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnalysisMode {
+    Full,
+    Incremental,
+    FallbackFull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AnalysisJobSourceKind {
     LocalPath,
@@ -922,6 +930,8 @@ pub struct AnalysisJob {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<u8>,
+    #[serde(default = "default_analysis_mode")]
+    pub analysis_mode: AnalysisMode,
     pub requested_analyzers: Vec<AnalyzerEngine>,
     pub analyzer_statuses: Vec<AnalyzerServiceStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -938,6 +948,10 @@ pub struct AnalysisJob {
     pub error: Option<String>,
 }
 
+fn default_analysis_mode() -> AnalysisMode {
+    AnalysisMode::Full
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAnalysisJobRequest {
@@ -951,6 +965,10 @@ pub struct CreateAnalysisJobRequest {
     pub workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_id: Option<String>,
+    #[serde(default)]
+    pub incremental: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1355,6 +1373,7 @@ mod tests {
             project_name: Some("project".into()),
             message: None,
             progress: Some(0),
+            analysis_mode: AnalysisMode::Full,
             requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
             analyzer_statuses: Vec::new(),
             created_at: None,
@@ -1393,6 +1412,7 @@ mod tests {
             project_name: None,
             message: None,
             progress: None,
+            analysis_mode: AnalysisMode::Full,
             requested_analyzers: Vec::new(),
             analyzer_statuses: Vec::new(),
             created_at: None,
@@ -1420,6 +1440,8 @@ mod tests {
             project_name: Some("demo".into()),
             workspace_id: Some("workspace_1".into()),
             revision_id: Some("revision_1".into()),
+            incremental: false,
+            base_revision_id: None,
         };
 
         let value = serde_json::to_value(request).expect("serialize create analysis job request");

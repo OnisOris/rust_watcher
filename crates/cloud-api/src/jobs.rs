@@ -6,9 +6,10 @@ use axum::Json;
 use futures_util::{SinkExt, StreamExt};
 use graph_core::{
     estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobSource, AnalysisJobStatus,
-    AnalyzerServiceStatus, AnalyzerStatus, CloudWorkspace, CreateAnalysisJobRequest, GraphSnapshot,
+    AnalysisMode, AnalyzerServiceStatus, AnalyzerStatus, CloudWorkspace, CreateAnalysisJobRequest,
+    GraphSnapshot,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -58,6 +59,7 @@ pub(crate) struct CloudJobResponse {
     pub(crate) status: AnalysisJobStatus,
     pub(crate) message: Option<String>,
     pub(crate) progress: Option<f32>,
+    pub(crate) analysis_mode: AnalysisMode,
     pub(crate) created_at: Option<String>,
     pub(crate) updated_at: Option<String>,
     pub(crate) credits_estimated: Option<u32>,
@@ -69,6 +71,13 @@ pub(crate) struct CloudJobResponse {
 pub(crate) struct CloudJobAnalyzerResponse {
     pub(crate) kind: String,
     pub(crate) status: AnalyzerStatus,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloudAnalyzeWorkspaceRequest {
+    #[serde(default)]
+    pub(crate) incremental: bool,
+    pub(crate) base_revision_id: Option<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +105,9 @@ impl CloudApiState {
             (Some(workspace_id), Some(revision_id)) => Some(JobRevisionTarget {
                 workspace_id: workspace_id.clone(),
                 revision_id: revision_id.clone(),
+                base_revision_id: request.base_revision_id.clone(),
+                incremental: request.incremental,
+                changed_files: Vec::new(),
             }),
             _ => None,
         };
@@ -134,6 +146,11 @@ impl CloudApiState {
             ),
         };
         let id = Uuid::new_v4().to_string();
+        let analysis_mode = if request.incremental {
+            AnalysisMode::Incremental
+        } else {
+            AnalysisMode::Full
+        };
         let job = AnalysisJob {
             id: id.clone(),
             status: AnalysisJobStatus::Queued,
@@ -141,6 +158,7 @@ impl CloudApiState {
             project_name,
             message: Some(message.into()),
             progress: Some(0),
+            analysis_mode,
             requested_analyzers: request.requested_analyzers,
             analyzer_statuses: Vec::<AnalyzerServiceStatus>::new(),
             created_at: Some(timestamp()),
@@ -266,6 +284,21 @@ impl CloudApiState {
         self.emit_job_event(&job, "snapshotReady", job.message.clone());
         Some(job)
     }
+    pub(crate) fn set_job_analysis_mode(
+        &self,
+        id: &str,
+        analysis_mode: AnalysisMode,
+    ) -> Option<AnalysisJob> {
+        let job = {
+            let mut jobs = self.jobs.write();
+            let job = jobs.get_mut(id)?;
+            job.analysis_mode = analysis_mode;
+            job.clone()
+        };
+        self.persist_job(&job);
+        self.emit_job_event(&job, "jobStatus", job.message.clone());
+        Some(job)
+    }
     pub(crate) fn complete_job(
         &self,
         id: &str,
@@ -333,11 +366,7 @@ impl CloudApiState {
     }
     pub(crate) fn persist_job(&self, job: &AnalysisJob) {
         let target = self.job_revision_targets.read().get(&job.id).cloned();
-        if let Err(error) = self.store.save_job(
-            job,
-            target.as_ref().map(|target| target.workspace_id.as_str()),
-            target.as_ref().map(|target| target.revision_id.as_str()),
-        ) {
+        if let Err(error) = self.store.save_job_with_target(job, target.as_ref()) {
             warn!(job_id = %job.id, %error, "failed to persist cloud analysis job");
         }
     }
@@ -475,6 +504,7 @@ pub(crate) async fn cloud_analyze_workspace(
     State(state): State<CloudApiState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
+    body: Option<Json<CloudAnalyzeWorkspaceRequest>>,
 ) -> impl IntoResponse {
     let username = match require_cloud_auth(&state, &headers) {
         Ok(username) => username,
@@ -487,6 +517,12 @@ pub(crate) async fn cloud_analyze_workspace(
         Ok(revision) => revision,
         Err(error) => return error.into_response(),
     };
+    let body = body
+        .map(|Json(body)| body)
+        .unwrap_or(CloudAnalyzeWorkspaceRequest {
+            incremental: false,
+            base_revision_id: None,
+        });
     let requested_analyzers = requested_analyzers_for_workspace_files(&revision.files);
     match state.create_job_for_request(CreateAnalysisJobRequest {
         source: None,
@@ -494,6 +530,8 @@ pub(crate) async fn cloud_analyze_workspace(
         project_name: None,
         workspace_id: Some(id),
         revision_id: Some(revision.id),
+        incremental: body.incremental,
+        base_revision_id: body.base_revision_id,
     }) {
         Ok(job) => (StatusCode::ACCEPTED, Json(cloud_job_response(&state, job))).into_response(),
         Err(error) => error.into_response(),
@@ -640,6 +678,7 @@ pub(crate) fn cloud_job_response(state: &CloudApiState, job: AnalysisJob) -> Clo
         status: job.status,
         message: job.error.clone().or(job.message),
         progress: job.progress.map(|progress| f32::from(progress) / 100.0),
+        analysis_mode: job.analysis_mode,
         created_at: job.created_at,
         updated_at,
         credits_estimated: job.credits_estimated,

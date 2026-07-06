@@ -3,9 +3,9 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use graph_core::{
-    AnalysisJob, AnalysisJobSource, AnalysisJobStatus, AnalyzerEngine, AnalyzerServiceStatus,
-    AnalyzerStatus, CloudAnalysisUsage, CloudWorkspace, CreateAnalysisJobRequest,
-    CreateWorkspaceRevisionRequest, WorkspaceRevision,
+    AnalysisJob, AnalysisJobSource, AnalysisJobStatus, AnalysisMode, AnalyzerEngine,
+    AnalyzerServiceStatus, AnalyzerStatus, CloudAnalysisUsage, CloudWorkspace,
+    CreateAnalysisJobRequest, CreateWorkspaceRevisionRequest, WorkspaceRevision,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,12 +18,16 @@ use crate::auth::{
 };
 use crate::errors::ApiError;
 use crate::ide::SaveWorkspaceFileRequest;
-use crate::jobs::{cancel_job, cloud_usage_response, create_job, get_job_usage, usage_summary};
+use crate::jobs::{
+    cancel_job, cloud_analyze_workspace, cloud_usage_response, create_job, get_job_usage,
+    usage_summary, CloudAnalyzeWorkspaceRequest,
+};
 use crate::scheduler::{
     requests_rust_analyzer, run_one_queued_job, run_parser_cloud_analysis, JobSchedulerConfig,
 };
 use crate::state::{
-    AuthSession, CloudAnalysisConfig, CloudApiState, CloudLimits, SelfUpdateConfig,
+    AuthSession, CloudAnalysisConfig, CloudApiState, CloudLimits, JobRevisionTarget,
+    SelfUpdateConfig,
 };
 use crate::storage::{CloudMetadataStore, PersistedCloudState};
 use crate::workspaces::{
@@ -131,6 +135,8 @@ fn local_request() -> CreateAnalysisJobRequest {
         requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
         workspace_id: None,
         revision_id: None,
+        incremental: false,
+        base_revision_id: None,
         project_name: Some("demo".into()),
     }
 }
@@ -393,6 +399,7 @@ fn terminal_job(status: AnalysisJobStatus) -> AnalysisJob {
         project_name: Some("demo".into()),
         message: Some("terminal".into()),
         progress: Some(100),
+        analysis_mode: AnalysisMode::Full,
         requested_analyzers: Vec::new(),
         analyzer_statuses: vec![AnalyzerServiceStatus {
             id: "rust-analyzer".into(),
@@ -415,6 +422,16 @@ fn terminal_job(status: AnalysisJobStatus) -> AnalysisJob {
         credits_estimated: None,
         credits_used: None,
         error: None,
+    }
+}
+
+fn stored_job_target(workspace_id: &str, revision_id: &str) -> JobRevisionTarget {
+    JobRevisionTarget {
+        workspace_id: workspace_id.into(),
+        revision_id: revision_id.into(),
+        base_revision_id: None,
+        incremental: false,
+        changed_files: Vec::new(),
     }
 }
 
@@ -645,6 +662,97 @@ async fn workspace_revision_diff_requires_workspace_owner() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn cloud_workspace_analyze_without_body_queues_full_job() {
+    let state = test_state();
+    let (workspace, _revision) = create_rust_revision(&state);
+    let token = create_auth_session(&state, "admin".into());
+
+    let response = cloud_analyze_workspace(
+        State(state.clone()),
+        auth_headers(&token),
+        AxumPath(workspace.id),
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job = state
+        .list_jobs()
+        .into_iter()
+        .next()
+        .expect("queued analysis job");
+    assert_eq!(job.analysis_mode, AnalysisMode::Full);
+}
+
+#[tokio::test]
+async fn incremental_workspace_analysis_falls_back_to_full_when_fast_path_unavailable() {
+    let state = test_state();
+    let (workspace, base_revision) = create_rust_revision(&state);
+    let base_job = state
+        .create_job_for_request(workspace_job_request(&workspace, &base_revision))
+        .unwrap();
+    run_parser_cloud_analysis(state.clone(), base_job.id.clone()).await;
+    let save = state
+        .save_workspace_file(
+            &workspace.id,
+            SaveWorkspaceFileRequest {
+                path: "src/main.rs".into(),
+                content: "fn main() { println!(\"incremental\"); }\n".into(),
+                base_revision: Some(base_revision.id.clone()),
+            },
+        )
+        .unwrap();
+    let token = create_auth_session(&state, "admin".into());
+
+    let response = cloud_analyze_workspace(
+        State(state.clone()),
+        auth_headers(&token),
+        AxumPath(workspace.id.clone()),
+        Some(Json(CloudAnalyzeWorkspaceRequest {
+            incremental: true,
+            base_revision_id: Some(base_revision.id.clone()),
+        })),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job = state
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id != base_job.id)
+        .expect("incremental queued job");
+    assert_eq!(job.analysis_mode, AnalysisMode::Incremental);
+    let target = state.get_job_revision_target(&job.id).unwrap();
+    assert!(target.incremental);
+    assert_eq!(
+        target.base_revision_id.as_deref(),
+        Some(base_revision.id.as_str())
+    );
+
+    run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+    let completed = state.get_job(&job.id).unwrap();
+    assert_eq!(completed.analysis_mode, AnalysisMode::FallbackFull);
+    assert_eq!(
+        state
+            .get_job_revision_target(&job.id)
+            .unwrap()
+            .changed_files,
+        vec!["src/main.rs".to_string()]
+    );
+    let result = state
+        .analysis_results
+        .read()
+        .get(&job.id)
+        .cloned()
+        .expect("analysis result");
+    assert_eq!(result.revision_id, save.revision_id);
+    assert!(!result.snapshot.nodes.is_empty());
+}
+
 fn workspace_job_request(
     workspace: &CloudWorkspace,
     revision: &WorkspaceRevision,
@@ -654,6 +762,8 @@ fn workspace_job_request(
         requested_analyzers: Vec::new(),
         workspace_id: Some(workspace.id.clone()),
         revision_id: Some(revision.id.clone()),
+        incremental: false,
+        base_revision_id: None,
         project_name: None,
     }
 }
@@ -733,8 +843,9 @@ fn running_jobs_are_marked_failed_on_state_hydration() {
     store.init_schema().unwrap();
     let running_job = terminal_job(AnalysisJobStatus::RunningAnalyzers);
     let job_id = running_job.id.clone();
+    let target = stored_job_target("workspace_1", "revision_1");
     store
-        .save_job(&running_job, Some("workspace_1"), Some("revision_1"))
+        .save_job_with_target(&running_job, Some(&target))
         .unwrap();
     let persisted = store.load_all().unwrap();
 
@@ -1022,6 +1133,8 @@ fn creating_analysis_job_from_workspace_revision_succeeds() {
             requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1166,8 +1279,9 @@ fn startup_requeues_valid_queued_jobs() {
     let queued_job = terminal_job(AnalysisJobStatus::Queued);
     store.save_workspace(&workspace).unwrap();
     store.save_revision(&revision).unwrap();
+    let target = stored_job_target(&workspace.id, &revision.id);
     store
-        .save_job(&queued_job, Some(&workspace.id), Some(&revision.id))
+        .save_job_with_target(&queued_job, Some(&target))
         .unwrap();
     let persisted = store.load_all().unwrap();
 
@@ -1227,8 +1341,9 @@ fn startup_does_not_requeue_recovered_running_jobs() {
     let job_id = running_job.id.clone();
     store.save_workspace(&workspace).unwrap();
     store.save_revision(&revision).unwrap();
+    let target = stored_job_target(&workspace.id, &revision.id);
     store
-        .save_job(&running_job, Some(&workspace.id), Some(&revision.id))
+        .save_job_with_target(&running_job, Some(&target))
         .unwrap();
     let persisted = store.load_all().unwrap();
 
@@ -1290,6 +1405,8 @@ fn creating_analysis_job_from_missing_revision_fails() {
             requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
             workspace_id: Some(workspace.id),
             revision_id: Some("missing".into()),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap_err();
@@ -1318,6 +1435,8 @@ fn rust_analyzer_job_estimates_more_credits_than_parser_only() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id.clone()),
             revision_id: Some(revision.id.clone()),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1327,6 +1446,8 @@ fn rust_analyzer_job_estimates_more_credits_than_parser_only() {
             requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1359,6 +1480,8 @@ async fn parser_cloud_job_completes_and_stores_snapshot() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id.clone()),
             revision_id: Some(revision.id.clone()),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1403,6 +1526,8 @@ async fn unavailable_rust_analyzer_fails_requested_job() {
             requested_analyzers: vec![AnalyzerEngine::RustAnalyzer],
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1451,6 +1576,8 @@ async fn usage_endpoint_returns_accepted_before_usage_is_ready() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1491,6 +1618,8 @@ async fn usage_endpoint_returns_usage_after_completion() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1539,6 +1668,8 @@ async fn usage_endpoint_reports_missing_and_failed_jobs() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1580,6 +1711,8 @@ async fn usage_summary_includes_completed_job_usage() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
@@ -1620,6 +1753,8 @@ async fn failed_parser_cloud_job_records_error() {
             requested_analyzers: Vec::new(),
             workspace_id: Some(workspace.id),
             revision_id: Some(revision.id),
+            incremental: false,
+            base_revision_id: None,
             project_name: None,
         })
         .unwrap();
