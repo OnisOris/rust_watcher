@@ -16,6 +16,34 @@ pub struct GraphIndexes {
     pub edges_by_id: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchIndex {
+    entries: Vec<SearchIndexEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchIndexEntry {
+    node_index: usize,
+    label: String,
+    file: String,
+    module: String,
+    crate_name: String,
+    node_type: String,
+    language: String,
+    route_path: String,
+    route_method: String,
+    fields: Vec<String>,
+    tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParsedSearchQuery {
+    terms: Vec<String>,
+    kind: Option<String>,
+    lang: Option<String>,
+    file: Option<String>,
+}
+
 pub fn build_graph_indexes(snapshot: &GraphSnapshot) -> GraphIndexes {
     let node_by_id = snapshot
         .nodes
@@ -43,6 +71,67 @@ pub fn build_graph_indexes(snapshot: &GraphSnapshot) -> GraphIndexes {
         outgoing_edges,
         edges_by_id,
     }
+}
+
+pub fn build_search_index(snapshot: &GraphSnapshot) -> SearchIndex {
+    let entries = snapshot
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(node_index, node)| {
+            let route = (node.node_type == NodeType::Endpoint)
+                .then(|| graph_core::route_key_from_label(&node.label))
+                .flatten();
+            let label = normalize_search_text(&node.label);
+            let file = normalize_search_text(node.file.as_deref().unwrap_or_default());
+            let module = normalize_search_text(node.module.as_deref().unwrap_or_default());
+            let crate_name = normalize_search_text(node.crate_name.as_deref().unwrap_or_default());
+            let node_type = normalize_search_text(&format!("{:?}", node.node_type));
+            let language = normalize_search_text(node.language.as_deref().unwrap_or_default());
+            let route_path = normalize_search_text(
+                route
+                    .as_ref()
+                    .map(|route| route.path.as_str())
+                    .unwrap_or_default(),
+            );
+            let route_method = normalize_search_text(
+                route
+                    .as_ref()
+                    .map(|route| route.method.as_str())
+                    .unwrap_or_default(),
+            );
+            let fields = vec![
+                label.clone(),
+                file.clone(),
+                module.clone(),
+                crate_name.clone(),
+                node_type.clone(),
+                language.clone(),
+                route_path.clone(),
+                route_method.clone(),
+            ];
+            let tokens = fields
+                .iter()
+                .flat_map(|field| tokenize_search_text(field))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            SearchIndexEntry {
+                node_index,
+                label,
+                file,
+                module,
+                crate_name,
+                node_type,
+                language,
+                route_path,
+                route_method,
+                fields,
+                tokens,
+            }
+        })
+        .collect();
+    SearchIndex { entries }
 }
 
 pub fn focus_subgraph(
@@ -430,17 +519,35 @@ pub fn dedupe_references(references: &mut Vec<ReferenceRecord>) {
 }
 
 pub fn search_nodes(graph: &GraphSnapshot, query: &str, limit: usize) -> Vec<SearchResult> {
-    let query = query.to_lowercase();
-    let mut scored = graph
-        .nodes
+    let index = build_search_index(graph);
+    search_nodes_with_index(graph, &index, query, limit)
+}
+
+pub fn search_nodes_with_index(
+    graph: &GraphSnapshot,
+    index: &SearchIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<SearchResult> {
+    let parsed = parse_search_query(query);
+    let mut scored = index
+        .entries
         .iter()
-        .filter_map(|node| score_node(node, &query).map(|score| (score, node)))
+        .filter(|entry| search_filters_match(entry, &parsed))
+        .filter_map(|entry| score_search_entry(entry, &parsed).map(|score| (score, entry)))
         .collect::<Vec<_>>();
-    scored.sort_by(|(a_score, a), (b_score, b)| a_score.cmp(b_score).then(a.label.cmp(&b.label)));
+    scored.sort_by(|(a_score, a), (b_score, b)| {
+        a_score.cmp(b_score).then_with(|| {
+            graph.nodes[a.node_index]
+                .label
+                .cmp(&graph.nodes[b.node_index].label)
+        })
+    });
     scored
         .into_iter()
         .take(limit)
-        .map(|(_, node)| SearchResult {
+        .filter_map(|(_, entry)| graph.nodes.get(entry.node_index))
+        .map(|node| SearchResult {
             id: node.id.clone(),
             label: node.label.clone(),
             node_type: node.node_type,
@@ -599,26 +706,132 @@ fn related_type_nodes_indexed(
         .collect()
 }
 
-fn score_node(node: &GraphNode, query: &str) -> Option<u8> {
-    if query.is_empty() {
-        return Some(3);
+fn parse_search_query(query: &str) -> ParsedSearchQuery {
+    let mut parsed = ParsedSearchQuery::default();
+    for token in query.split_whitespace() {
+        let token = normalize_search_text(token);
+        if let Some(value) = token
+            .strip_prefix("kind:")
+            .filter(|value| !value.is_empty())
+        {
+            parsed.kind = Some(value.to_string());
+        } else if let Some(value) = token
+            .strip_prefix("lang:")
+            .filter(|value| !value.is_empty())
+        {
+            parsed.lang = Some(value.to_string());
+        } else if let Some(value) = token
+            .strip_prefix("file:")
+            .filter(|value| !value.is_empty())
+        {
+            parsed.file = Some(value.to_string());
+        } else if !token.is_empty() {
+            parsed.terms.push(token);
+        }
     }
-    let fields = [
-        node.label.to_lowercase(),
-        node.file.clone().unwrap_or_default().to_lowercase(),
-        node.module.clone().unwrap_or_default().to_lowercase(),
-        node.crate_name.clone().unwrap_or_default().to_lowercase(),
-        format!("{:?}", node.node_type).to_lowercase(),
-    ];
-    if fields.iter().any(|field| field == query) {
-        Some(0)
-    } else if fields.iter().any(|field| field.starts_with(query)) {
-        Some(1)
-    } else if fields.iter().any(|field| field.contains(query)) {
-        Some(2)
-    } else {
-        None
+    parsed
+}
+
+fn search_filters_match(entry: &SearchIndexEntry, query: &ParsedSearchQuery) -> bool {
+    query
+        .kind
+        .as_deref()
+        .is_none_or(|kind| kind_matches(kind, entry.node_type.as_str()))
+        && query
+            .lang
+            .as_deref()
+            .is_none_or(|lang| entry.language == lang || entry.language.starts_with(lang))
+        && query
+            .file
+            .as_deref()
+            .is_none_or(|file| entry.file.contains(file))
+}
+
+fn score_search_entry(entry: &SearchIndexEntry, query: &ParsedSearchQuery) -> Option<u16> {
+    if query.terms.is_empty() {
+        return Some(300);
     }
+    let mut score = 0u16;
+    for term in &query.terms {
+        score = score.saturating_add(score_search_term(entry, term)?);
+    }
+    Some(score)
+}
+
+fn score_search_term(entry: &SearchIndexEntry, term: &str) -> Option<u16> {
+    if entry.label == term {
+        return Some(0);
+    }
+    if entry.fields.iter().any(|field| field == term) {
+        return Some(5);
+    }
+    if entry.label.starts_with(term) {
+        return Some(10);
+    }
+    if entry.fields.iter().any(|field| field.starts_with(term)) {
+        return Some(20);
+    }
+    if entry.label.contains(term) {
+        return Some(30);
+    }
+    if entry.fields.iter().any(|field| field.contains(term)) {
+        return Some(40);
+    }
+    if entry.tokens.iter().any(|token| token.starts_with(term)) {
+        return Some(50);
+    }
+    if entry.tokens.iter().any(|token| token.contains(term)) {
+        return Some(60);
+    }
+    if fuzzy_match(term, &entry.label) || entry.fields.iter().any(|field| fuzzy_match(term, field))
+    {
+        return Some(80);
+    }
+    None
+}
+
+fn kind_matches(filter: &str, node_type: &str) -> bool {
+    match filter {
+        "function" => matches!(node_type, "function" | "method"),
+        "class" => matches!(node_type, "class"),
+        "endpoint" => matches!(node_type, "endpoint"),
+        "file" => matches!(node_type, "file"),
+        "component" => matches!(node_type, "component"),
+        _ => node_type == filter,
+    }
+}
+
+fn normalize_search_text(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn tokenize_search_text(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let mut chars = needle.chars();
+    let Some(mut expected) = chars.next() else {
+        return true;
+    };
+    for character in haystack.chars() {
+        if character == expected {
+            match chars.next() {
+                Some(next) => expected = next,
+                None => return true,
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -793,6 +1006,85 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].label, "UserHandler");
+    }
+
+    #[test]
+    fn search_ranks_exact_above_prefix_and_prefix_above_contains() {
+        let graph = test_snapshot(
+            vec![
+                test_node("contains", "MyUserHandler", NodeType::Function),
+                test_node("prefix", "UserHandler", NodeType::Function),
+                test_node("exact", "user", NodeType::Function),
+            ],
+            Vec::new(),
+        );
+
+        let results = search_nodes(&graph, "user", 30);
+        let labels = results
+            .iter()
+            .map(|result| result.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["user", "UserHandler", "MyUserHandler"]);
+    }
+
+    #[test]
+    fn search_endpoint_route_by_path() {
+        let graph = test_snapshot(
+            vec![test_node(
+                "endpoint",
+                "POST /api/workspaces",
+                NodeType::Endpoint,
+            )],
+            Vec::new(),
+        );
+
+        let results = search_nodes(&graph, "/api/workspaces", 30);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "endpoint");
+    }
+
+    #[test]
+    fn search_kind_and_language_filters_work() {
+        let mut rust_function = test_node("rust-fn", "render_user", NodeType::Function);
+        rust_function.language = Some("rust".into());
+        rust_function.file = Some("src/lib.rs".into());
+        let mut python_function = test_node("py-fn", "render_user", NodeType::Function);
+        python_function.language = Some("python".into());
+        python_function.file = Some("scripts/users.py".into());
+        let mut typescript_component = test_node("component", "UserCard", NodeType::Component);
+        typescript_component.language = Some("typescript".into());
+        typescript_component.file = Some("frontend/UserCard.tsx".into());
+        let graph = test_snapshot(
+            vec![rust_function, python_function, typescript_component],
+            Vec::new(),
+        );
+
+        let results = search_nodes(&graph, "render kind:function lang:python", 30);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "py-fn");
+        assert!(
+            search_nodes(&graph, "kind:component lang:typescript file:frontend", 30)
+                .iter()
+                .any(|result| result.id == "component")
+        );
+    }
+
+    #[test]
+    fn search_limit_caps_results() {
+        let graph = test_snapshot(
+            vec![
+                test_node("one", "UserOne", NodeType::Function),
+                test_node("two", "UserTwo", NodeType::Function),
+            ],
+            Vec::new(),
+        );
+
+        let results = search_nodes(&graph, "user", 1);
+
+        assert_eq!(results.len(), 1);
     }
 
     #[test]

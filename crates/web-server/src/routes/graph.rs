@@ -17,6 +17,10 @@ pub(crate) struct SnapshotQuery {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchQuery {
     q: Option<String>,
+    limit: Option<usize>,
+    kind: Option<String>,
+    lang: Option<String>,
+    file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,12 +99,30 @@ pub(crate) async fn search(
     State(state): State<AppStateHandle>,
     Query(query): Query<SearchQuery>,
 ) -> Json<SearchResponse> {
-    let query = query.q.unwrap_or_default();
+    let query_text = build_search_query_text(&query);
+    let limit = query.limit.unwrap_or(30).clamp(1, 200);
     let graph = state.graph.read().clone();
 
     Json(SearchResponse {
-        results: graph_query::search_nodes(&graph, &query, 30),
+        results: graph_query::search_nodes(&graph, &query_text, limit),
     })
+}
+
+fn build_search_query_text(query: &SearchQuery) -> String {
+    let mut parts = Vec::new();
+    if let Some(q) = query.q.as_deref().filter(|q| !q.trim().is_empty()) {
+        parts.push(q.trim().to_string());
+    }
+    if let Some(kind) = query.kind.as_deref().filter(|kind| !kind.trim().is_empty()) {
+        parts.push(format!("kind:{}", kind.trim()));
+    }
+    if let Some(lang) = query.lang.as_deref().filter(|lang| !lang.trim().is_empty()) {
+        parts.push(format!("lang:{}", lang.trim()));
+    }
+    if let Some(file) = query.file.as_deref().filter(|file| !file.trim().is_empty()) {
+        parts.push(format!("file:{}", file.trim()));
+    }
+    parts.join(" ")
 }
 
 pub(crate) async fn focus(
