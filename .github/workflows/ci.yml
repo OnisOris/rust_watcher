@@ -12,6 +12,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -36,6 +41,15 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: Typecheck frontend
+        working-directory: frontend
+        shell: bash
+        run: |
+          if node -e "const scripts = require('./package.json').scripts || {}; process.exit(scripts.typecheck ? 0 : 1)"; then
+            pnpm typecheck
+          else
+            echo "No frontend typecheck script configured; skipping."
+          fi
       - name: Test frontend
         working-directory: frontend
         run: pnpm test:run

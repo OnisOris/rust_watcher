@@ -1,5 +1,7 @@
 # Rust Code Command Center
 
+[![CI](https://github.com/OnisOris/rust_watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/OnisOris/rust_watcher/actions/workflows/ci.yml)
+
 Local browser app for exploring Rust and React/TypeScript projects as a live code graph.
 
 ![Rust Code Command Center](docs/img.jpg)
