@@ -16,16 +16,16 @@ pub(crate) struct SnapshotQuery {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchQuery {
-    q: Option<String>,
-    limit: Option<usize>,
-    kind: Option<String>,
-    lang: Option<String>,
-    file: Option<String>,
+    pub(crate) q: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) kind: Option<String>,
+    pub(crate) lang: Option<String>,
+    pub(crate) file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SearchResponse {
-    results: Vec<SearchResult>,
+    pub(crate) results: Vec<SearchResult>,
 }
 
 pub(crate) async fn snapshot(
@@ -45,7 +45,12 @@ pub(crate) async fn node(
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     let graph = state.graph.read();
-    match graph.nodes.iter().find(|node| node.id == id) {
+    let indexes = state.graph_indexes.read();
+    match indexes
+        .node_by_id
+        .get(&id)
+        .and_then(|index| graph.nodes.get(*index))
+    {
         Some(node) => (StatusCode::OK, Json(node.clone())).into_response(),
         None => (StatusCode::NOT_FOUND, "node not found").into_response(),
     }
@@ -56,7 +61,7 @@ pub(crate) async fn node_details(
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     let graph = state.graph.read().clone();
-    let indexes = graph_query::build_graph_indexes(&graph);
+    let indexes = state.graph_indexes.read().clone();
 
     let Some(node) = indexes
         .node_by_id
@@ -102,9 +107,10 @@ pub(crate) async fn search(
     let query_text = build_search_query_text(&query);
     let limit = query.limit.unwrap_or(30).clamp(1, 200);
     let graph = state.graph.read().clone();
+    let search_index = state.search_index.read().clone();
 
     Json(SearchResponse {
-        results: graph_query::search_nodes(&graph, &query_text, limit),
+        results: graph_query::search_nodes_with_index(&graph, &search_index, &query_text, limit),
     })
 }
 
@@ -134,8 +140,9 @@ pub(crate) async fn focus(
         FocusDepth::Full(_) => None,
     };
     let graph = state.graph.read();
+    let indexes = state.graph_indexes.read();
 
-    match graph_query::focus_subgraph(&graph, &request.node_id, depth) {
+    match graph_query::focus_subgraph_with_indexes(&graph, &indexes, &request.node_id, depth) {
         Some(response) => (StatusCode::OK, Json(response)).into_response(),
         None => (StatusCode::NOT_FOUND, "node not found").into_response(),
     }

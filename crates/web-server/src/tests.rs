@@ -1,3 +1,6 @@
+use crate::python_ty::{PythonAnalyzerMode, PythonTyState};
+use crate::qml_lsp::{QmlAnalyzerMode, QmlLspState};
+use crate::routes::graph::SearchQuery;
 use crate::routes::layout::{
     apply_layout_store_to_snapshot, clear_layout, layout_path, load_layout, save_layout,
     storage_dir_for_project, LayoutNode, LayoutStore,
@@ -5,15 +8,26 @@ use crate::routes::layout::{
 use crate::routes::views::{load_views, save_views, SavedView, SavedViewsStore};
 use crate::server::{analyzer_services_from_counts, AnalyzerFileCounts};
 use crate::services::diagnostics::diagnostic_from_lsp;
+use crate::state::{rust_analyzer_state, AppStateHandle};
+use crate::typescript_lsp::{TypeScriptAnalyzerMode, TypeScriptLspState};
+use axum::body::to_bytes;
+use axum::extract::{Json, Query, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use graph_core::{
     AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
     AnalyzerStatus, AppStatus, DiagnosticRecord, DiagnosticSeverity, EdgeConfidence, EdgeType,
-    GraphNode, GraphPatch, GraphSnapshot, LanguageId, LspPosition, LspRange, PythonAnalyzerStatus,
-    ReferenceRecord, SourceLocation, SourceReachability, SymbolIndex, TraceStepKind, Visibility,
+    FocusDepth, FocusRequest, FocusResponse, GraphMode, GraphNode, GraphPatch, GraphSnapshot,
+    LanguageId, LspPosition, LspRange, NodeDetailsResponse, PythonAnalyzerStatus, ReferenceRecord,
+    SourceLocation, SourceReachability, SymbolIndex, TraceStepKind, Visibility,
 };
 use graph_query::trace::{build_node_trace, build_route_trace};
-use std::collections::HashMap;
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::qml_lsp::QmlAnalyzerStatus;
@@ -78,6 +92,59 @@ fn test_edge(
         description: None,
         data_flow_kind: None,
         evidence: None,
+    }
+}
+
+fn test_snapshot(nodes: Vec<GraphNode>, edges: Vec<graph_core::GraphEdge>) -> GraphSnapshot {
+    GraphSnapshot {
+        nodes,
+        edges,
+        files: Vec::new(),
+        events: Vec::new(),
+        status: AppStatus::empty(),
+    }
+}
+
+fn test_app_state(snapshot: GraphSnapshot) -> AppStateHandle {
+    let root = temp_project_root("cached-graph-state");
+    let (ws_tx, _) = broadcast::channel(16);
+    AppStateHandle {
+        project_root: Arc::new(RwLock::new(root.clone())),
+        graph_indexes: Arc::new(RwLock::new(graph_query::build_graph_indexes(&snapshot))),
+        search_index: Arc::new(RwLock::new(graph_query::build_search_index(&snapshot))),
+        graph: Arc::new(RwLock::new(snapshot)),
+        status: Arc::new(RwLock::new(AppStatus::empty())),
+        ws_tx,
+        analyzer: Arc::new(rust_analyzer_state(
+            PathBuf::from("rust-analyzer"),
+            root.clone(),
+        )),
+        python_ty: Arc::new(PythonTyState::new(
+            PathBuf::from("ty"),
+            PythonAnalyzerMode::Parser,
+            root.clone(),
+        )),
+        typescript_lsp: Arc::new(TypeScriptLspState::new(
+            PathBuf::from("typescript-language-server"),
+            TypeScriptAnalyzerMode::Parser,
+            root.clone(),
+        )),
+        qml_lsp: Arc::new(QmlLspState::new(
+            PathBuf::from("qmlls"),
+            QmlAnalyzerMode::Parser,
+            None,
+            true,
+            root,
+        )),
+        diagnostics_by_file: Arc::new(RwLock::new(HashMap::new())),
+        diagnostics_by_node: Arc::new(RwLock::new(HashMap::new())),
+        watcher: Arc::new(RwLock::new(None)),
+        is_indexing: Arc::new(AtomicBool::new(false)),
+        pending_changed_files: Arc::new(RwLock::new(HashSet::new())),
+        pending_changed_files_root: Arc::new(RwLock::new(None)),
+        watcher_debounce_running: Arc::new(AtomicBool::new(false)),
+        watcher_event_generation: Arc::new(AtomicU64::new(0)),
+        enable_editor_open: false,
     }
 }
 
@@ -624,6 +691,130 @@ fn graph_patch_serializes_diagnostics_and_changed_files() {
     let value = serde_json::to_value(&patch).unwrap();
     assert_eq!(value["changedFiles"][0], "src/main.rs");
     assert_eq!(value["diagnostics"][0]["message"], "careful");
+}
+
+#[test]
+fn cached_graph_indexes_update_after_publish_and_replace() {
+    let alpha = test_node("alpha", Some("src/alpha.rs"), Some("app"));
+    let beta = test_node("beta", Some("src/beta.rs"), Some("app"));
+    let state = test_app_state(test_snapshot(Vec::new(), Vec::new()));
+
+    crate::publish_snapshot(&state, test_snapshot(vec![alpha.clone()], Vec::new()));
+
+    assert!(state
+        .graph_indexes
+        .read()
+        .node_by_id
+        .contains_key(&alpha.id));
+    assert_eq!(
+        graph_query::search_nodes_with_index(
+            &state.graph.read(),
+            &state.search_index.read(),
+            "alpha",
+            10,
+        )
+        .len(),
+        1
+    );
+
+    let edge = test_edge(
+        EdgeType::Calls,
+        alpha.id.clone(),
+        beta.id.clone(),
+        EdgeConfidence::Heuristic,
+    );
+    state.replace_graph_snapshot(test_snapshot(vec![alpha.clone(), beta.clone()], vec![edge]));
+
+    let indexes = state.graph_indexes.read();
+    assert!(indexes.node_by_id.contains_key(&beta.id));
+    assert_eq!(
+        indexes
+            .outgoing_edges
+            .get(&alpha.id)
+            .map(Vec::len)
+            .unwrap_or_default(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cached_search_index_serves_updated_snapshot() {
+    let state = test_app_state(test_snapshot(
+        vec![test_node("before", Some("src/before.rs"), Some("app"))],
+        Vec::new(),
+    ));
+    state.replace_graph_snapshot(test_snapshot(
+        vec![test_node("after", Some("src/after.rs"), Some("app"))],
+        Vec::new(),
+    ));
+
+    let Json(response) = crate::routes::graph::search(
+        State(state),
+        Query(SearchQuery {
+            q: Some("after".into()),
+            limit: Some(10),
+            kind: None,
+            lang: None,
+            file: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].label, "after");
+}
+
+#[tokio::test]
+async fn focus_and_details_routes_match_uncached_graph_query_results() {
+    let mut alpha = test_node("alpha", Some("src/alpha.rs"), Some("app"));
+    let mut beta = test_node("beta", Some("src/beta.rs"), Some("app"));
+    alpha.language = None;
+    beta.language = None;
+    let edge = test_edge(
+        EdgeType::Calls,
+        alpha.id.clone(),
+        beta.id.clone(),
+        EdgeConfidence::Heuristic,
+    );
+    let snapshot = test_snapshot(vec![alpha.clone(), beta.clone()], vec![edge]);
+    let state = test_app_state(snapshot.clone());
+
+    let focus_response = crate::routes::graph::focus(
+        State(state.clone()),
+        Json(FocusRequest {
+            node_id: alpha.id.clone(),
+            depth: FocusDepth::Number(1),
+            mode: GraphMode::Macro,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(focus_response.status(), StatusCode::OK);
+    let focus_body = to_bytes(focus_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let routed_focus: FocusResponse = serde_json::from_slice(&focus_body).unwrap();
+    let expected_focus = graph_query::focus_subgraph(&snapshot, &alpha.id, Some(1)).unwrap();
+    assert_eq!(routed_focus.nodes, expected_focus.nodes);
+    assert_eq!(routed_focus.edges, expected_focus.edges);
+
+    let details_response =
+        crate::routes::graph::node_details(State(state), axum::extract::Path(alpha.id.clone()))
+            .await
+            .into_response();
+    assert_eq!(details_response.status(), StatusCode::OK);
+    let details_body = to_bytes(details_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let routed_details: NodeDetailsResponse = serde_json::from_slice(&details_body).unwrap();
+    let expected_details =
+        graph_query::node_details_base(&snapshot, &alpha.id, Vec::new(), Vec::new()).unwrap();
+    assert_eq!(routed_details.node, expected_details.node);
+    assert_eq!(
+        routed_details.outgoing_edges,
+        expected_details.outgoing_edges
+    );
+    assert_eq!(routed_details.callees, expected_details.callees);
 }
 
 fn temp_project_root(name: &str) -> PathBuf {

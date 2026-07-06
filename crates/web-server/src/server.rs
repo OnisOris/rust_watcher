@@ -117,6 +117,12 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     ));
     let state = AppStateHandle {
         project_root: Arc::new(RwLock::new(project_root.clone())),
+        graph_indexes: Arc::new(RwLock::new(graph_query::build_graph_indexes(
+            &initial_snapshot,
+        ))),
+        search_index: Arc::new(RwLock::new(graph_query::build_search_index(
+            &initial_snapshot,
+        ))),
         graph: Arc::new(RwLock::new(initial_snapshot)),
         status: Arc::new(RwLock::new(initial_status)),
         ws_tx,
@@ -693,7 +699,7 @@ pub(crate) fn publish_snapshot(state: &AppStateHandle, mut snapshot: GraphSnapsh
     );
     snapshot.status.last_updated = Some(timestamp());
     *state.status.write() = snapshot.status.clone();
-    *state.graph.write() = snapshot.clone();
+    state.replace_graph_snapshot(snapshot.clone());
     let _ = state.ws_tx.send(ServerMessage::GraphSnapshot(snapshot));
 }
 

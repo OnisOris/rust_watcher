@@ -383,7 +383,7 @@ async fn rebuild_patch_snapshot(
         .collect::<Vec<_>>();
     apply_diagnostics_to_files(&mut snapshot, &diagnostics);
     let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
-    *state.graph.write() = snapshot;
+    state.replace_graph_snapshot(snapshot);
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     state.is_indexing.store(false, Ordering::SeqCst);
 }
@@ -410,7 +410,7 @@ async fn rebuild_language_patch_snapshot(
         .collect::<Vec<_>>();
     apply_diagnostics_to_files(&mut snapshot, &diagnostics);
     let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
-    *state.graph.write() = snapshot;
+    state.replace_graph_snapshot(snapshot);
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     state.is_indexing.store(false, Ordering::SeqCst);
 }
@@ -482,7 +482,7 @@ async fn index_changed_rust_files(
         .collect::<Vec<_>>();
     apply_diagnostics_to_files(&mut snapshot, &diagnostics);
     let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
-    *state.graph.write() = snapshot;
+    state.replace_graph_snapshot(snapshot);
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     Ok(())
 }
@@ -555,7 +555,7 @@ async fn index_changed_typescript_files(
         .collect::<Vec<_>>();
     apply_diagnostics_to_files(&mut snapshot, &diagnostics);
     let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
-    *state.graph.write() = snapshot;
+    state.replace_graph_snapshot(snapshot);
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     Ok(())
 }
@@ -603,7 +603,7 @@ async fn index_changed_python_files(
         .collect::<Vec<_>>();
     apply_diagnostics_to_files(&mut snapshot, &diagnostics);
     let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
-    *state.graph.write() = snapshot;
+    state.replace_graph_snapshot(snapshot);
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     Ok(())
 }
@@ -644,7 +644,7 @@ async fn index_changed_qml_files(
         .collect::<Vec<_>>();
     apply_diagnostics_to_files(&mut snapshot, &diagnostics);
     let patch = diff_snapshots(&old_snapshot, &snapshot, changed_files, diagnostics);
-    *state.graph.write() = snapshot;
+    state.replace_graph_snapshot(snapshot);
     let _ = state.ws_tx.send(ServerMessage::GraphPatch(patch));
     Ok(())
 }

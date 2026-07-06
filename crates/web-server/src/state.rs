@@ -1,5 +1,6 @@
 use anyhow::Result;
 use graph_core::{AppStatus, DiagnosticRecord, GraphSnapshot, ServerMessage};
+use graph_query::{GraphIndexes, SearchIndex};
 use parking_lot::RwLock;
 use ra_client::{LspRuntime, LspRuntimeConfig, LspRuntimeMode};
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,8 @@ use crate::typescript_lsp::TypeScriptLspState;
 pub(crate) struct AppStateHandle {
     pub(crate) project_root: Arc<RwLock<PathBuf>>,
     pub(crate) graph: Arc<RwLock<GraphSnapshot>>,
+    pub(crate) graph_indexes: Arc<RwLock<GraphIndexes>>,
+    pub(crate) search_index: Arc<RwLock<SearchIndex>>,
     pub(crate) status: Arc<RwLock<AppStatus>>,
     pub(crate) ws_tx: broadcast::Sender<ServerMessage>,
     pub(crate) analyzer: Arc<AnalyzerState>,
@@ -32,6 +35,19 @@ pub(crate) struct AppStateHandle {
     pub(crate) watcher_debounce_running: Arc<AtomicBool>,
     pub(crate) watcher_event_generation: Arc<AtomicU64>,
     pub(crate) enable_editor_open: bool,
+}
+
+impl AppStateHandle {
+    pub(crate) fn replace_graph_snapshot(&self, snapshot: GraphSnapshot) {
+        let indexes = graph_query::build_graph_indexes(&snapshot);
+        let search_index = graph_query::build_search_index(&snapshot);
+        let mut graph = self.graph.write();
+        let mut cached_indexes = self.graph_indexes.write();
+        let mut cached_search_index = self.search_index.write();
+        *graph = snapshot;
+        *cached_indexes = indexes;
+        *cached_search_index = search_index;
+    }
 }
 
 pub(crate) struct AnalyzerState {
