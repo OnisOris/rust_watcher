@@ -20,7 +20,7 @@ Production deployments must set non-default auth values:
 
 ```bash
 export RUST_WATCHER_ADMIN_USERNAME=admin
-export RUST_WATCHER_ADMIN_PASSWORD='replace-with-a-long-random-password'
+export RUST_WATCHER_ADMIN_PASSWORD='$argon2id$v=19$m=...'
 export RUST_WATCHER_DEV_TOKEN='replace-with-a-long-random-agent-token'
 export RUST_WATCHER_INTERNAL_API_TOKEN='replace-with-a-long-random-internal-token'
 export RUST_WATCHER_AUTH_SESSION_TTL_SECONDS=86400
@@ -28,17 +28,27 @@ export RUST_WATCHER_AUTH_SESSION_TTL_SECONDS=86400
 cargo run -p cloud-api -- serve
 ```
 
+Generate an argon2id password hash with the built-in helper:
+
+```bash
+printf '%s' 'replace-with-a-long-random-password' | cargo run -p cloud-api -- hash-password
+```
+
+You can also pass `--password`, but stdin avoids putting the password directly in shell history.
+
 Auth variables:
 
 - `RUST_WATCHER_ADMIN_USERNAME`: default cloud login username. Must not be the insecure default pair in production.
-- `RUST_WATCHER_ADMIN_PASSWORD`: default cloud login password. Use a long random value.
-- `RUST_WATCHER_USERS`: optional comma-separated `username:password` list. If set, these users replace the single admin username/password pair.
+- `RUST_WATCHER_ADMIN_PASSWORD`: default cloud login password hash. Production values must be argon2id PHC strings that start with `$argon2id$`.
+- `RUST_WATCHER_USERS`: optional comma-separated `username:$argon2id$...` list. If set, these users replace the single admin username/password pair.
 - `RUST_WATCHER_DEV_TOKEN`: token used by trusted local-agent flows. It is not accepted as a browser cloud session token.
 - `RUST_WATCHER_INTERNAL_API_TOKEN`: required for legacy internal endpoints such as `/api/workspaces`, `/api/analysis/jobs`, and `/api/usage/summary`. Send it as `Authorization: Bearer <token>` or `X-Rust-Watcher-Token: <token>`.
 - `RUST_WATCHER_AUTH_SESSION_TTL_SECONDS`: cloud browser session TTL. The default is `86400` seconds.
-- `RUST_WATCHER_ALLOW_INSECURE_DEV_AUTH`: set to `true` only for local development when using default credentials.
+- `RUST_WATCHER_ALLOW_INSECURE_DEV_AUTH`: set to `true` only for local development when using default credentials or plain text passwords.
 
 Cloud browser endpoints under `/api/cloud/...` use login sessions returned by `POST /api/cloud/auth/login`. Legacy internal endpoints are separate and require `RUST_WATCHER_INTERNAL_API_TOKEN`.
+
+Plain text cloud passwords are rejected unless `RUST_WATCHER_ALLOW_INSECURE_DEV_AUTH=true` is set. The default `admin` / `dev-password` fallback is only for local development with that flag enabled.
 
 The cloud websocket endpoint is authenticated too. Browser clients must connect with a valid cloud session token:
 
@@ -61,7 +71,7 @@ After=network.target
 WorkingDirectory=/home/resai/apps/rust_watcher_second
 Environment=RUST_LOG=cloud_api=info,tower_http=info
 Environment=RUST_WATCHER_ADMIN_USERNAME=admin2
-Environment=RUST_WATCHER_ADMIN_PASSWORD=replace-with-a-long-random-password
+Environment="RUST_WATCHER_ADMIN_PASSWORD=$argon2id$v=19$m=..."
 Environment=RUST_WATCHER_DEV_TOKEN=replace-with-a-long-random-agent-token
 Environment=RUST_WATCHER_INTERNAL_API_TOKEN=replace-with-a-long-random-internal-token
 Environment=RUST_WATCHER_AUTH_SESSION_TTL_SECONDS=86400

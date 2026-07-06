@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use tokio::net::TcpListener;
@@ -22,8 +23,8 @@ mod storage;
 mod workspaces;
 
 use auth::{
-    parse_auth_users, validate_auth_defaults, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME,
-    DEFAULT_AUTH_SESSION_TTL_SECONDS, DEFAULT_DEV_TOKEN,
+    hash_password, parse_auth_users, validate_auth_defaults, DEFAULT_ADMIN_PASSWORD,
+    DEFAULT_ADMIN_USERNAME, DEFAULT_AUTH_SESSION_TTL_SECONDS, DEFAULT_DEV_TOKEN,
 };
 use scheduler::{start_analysis_workers, JobSchedulerConfig};
 use state::{CloudAnalysisConfig, CloudApiState, CloudLimits, SelfUpdateConfig};
@@ -39,7 +40,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
+    HashPassword(HashPasswordArgs),
+}
+
+#[derive(Parser, Clone)]
+pub(crate) struct HashPasswordArgs {
+    #[arg(long)]
+    pub(crate) password: Option<String>,
 }
 
 #[derive(Parser, Clone)]
@@ -129,8 +137,27 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Serve(args) => serve(args).await,
+        Commands::Serve(args) => serve(*args).await,
+        Commands::HashPassword(args) => hash_password_command(args),
     }
+}
+
+fn hash_password_command(args: HashPasswordArgs) -> Result<()> {
+    let password = match args.password {
+        Some(password) => password,
+        None => {
+            let mut password = String::new();
+            std::io::stdin()
+                .read_to_string(&mut password)
+                .context("failed to read password from stdin")?;
+            password.trim_end_matches(['\r', '\n']).to_string()
+        }
+    };
+    if password.is_empty() {
+        anyhow::bail!("password is required via --password or stdin");
+    }
+    println!("{}", hash_password(&password)?);
+    Ok(())
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
@@ -150,7 +177,12 @@ async fn serve(args: ServeArgs) -> Result<()> {
         &args.dev_token,
         args.allow_insecure_dev_auth,
     )?;
-    let auth_users = parse_auth_users(&args.users, &args.admin_username, &args.admin_password)?;
+    let auth_users = parse_auth_users(
+        &args.users,
+        &args.admin_username,
+        &args.admin_password,
+        args.allow_insecure_dev_auth,
+    )?;
     let state = CloudApiState::from_persisted(
         args.blobs_dir.clone(),
         args.workspaces_dir.clone(),

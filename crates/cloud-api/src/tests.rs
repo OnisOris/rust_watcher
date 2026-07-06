@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::auth::{
-    cloud_logout, create_auth_session, require_cloud_auth, unix_timestamp, validate_auth_defaults,
-    DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, DEFAULT_AUTH_SESSION_TTL_SECONDS,
-    DEFAULT_DEV_TOKEN, INTERNAL_API_TOKEN_HEADER,
+    cloud_logout, create_auth_session, hash_password, parse_auth_users, require_cloud_auth,
+    unix_timestamp, validate_auth_defaults, verify_password, DEFAULT_ADMIN_PASSWORD,
+    DEFAULT_ADMIN_USERNAME, DEFAULT_AUTH_SESSION_TTL_SECONDS, DEFAULT_DEV_TOKEN,
+    INTERNAL_API_TOKEN_HEADER,
 };
 use crate::errors::ApiError;
 use crate::ide::SaveWorkspaceFileRequest;
@@ -196,6 +197,71 @@ fn default_dev_credentials_are_rejected_without_allow_flag() {
         true,
     )
     .is_ok());
+}
+
+#[test]
+fn argon2_password_hash_accepts_correct_password() {
+    let hash = hash_password("correct horse battery staple").unwrap();
+
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(verify_password(&hash, "correct horse battery staple"));
+}
+
+#[test]
+fn argon2_password_hash_rejects_wrong_password() {
+    let hash = hash_password("correct horse battery staple").unwrap();
+
+    assert!(!verify_password(&hash, "wrong password"));
+}
+
+#[test]
+fn plain_text_auth_passwords_are_rejected_without_insecure_dev_mode() {
+    assert!(parse_auth_users("admin:plain-password", "root", "ignored", false).is_err());
+    assert!(parse_auth_users("", "admin", "plain-password", false).is_err());
+}
+
+#[test]
+fn plain_text_auth_passwords_are_allowed_only_in_insecure_dev_mode() {
+    let users = parse_auth_users("admin:plain-password", "root", "ignored", true).unwrap();
+
+    assert_eq!(
+        users.get("admin").map(String::as_str),
+        Some("plain-password")
+    );
+    assert!(verify_password(
+        users.get("admin").unwrap(),
+        "plain-password"
+    ));
+}
+
+#[test]
+fn argon2_auth_passwords_are_allowed_without_insecure_dev_mode() {
+    let hash = hash_password("safe-password").unwrap();
+    let users = parse_auth_users(&format!("admin:{hash}"), "root", "ignored", false).unwrap();
+
+    assert!(verify_password(
+        users.get("admin").unwrap(),
+        "safe-password"
+    ));
+}
+
+#[test]
+fn argon2_auth_users_parser_preserves_hash_commas() {
+    let admin_hash = hash_password("admin-password").unwrap();
+    let user_hash = hash_password("user-password").unwrap();
+    let users = parse_auth_users(
+        &format!("admin:{admin_hash},user:{user_hash}"),
+        "root",
+        "ignored",
+        false,
+    )
+    .unwrap();
+
+    assert!(verify_password(
+        users.get("admin").unwrap(),
+        "admin-password"
+    ));
+    assert!(verify_password(users.get("user").unwrap(), "user-password"));
 }
 
 #[test]

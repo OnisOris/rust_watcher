@@ -1,4 +1,6 @@
 use anyhow::Result;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -16,6 +18,7 @@ pub(crate) const DEFAULT_ADMIN_USERNAME: &str = "admin";
 pub(crate) const DEFAULT_ADMIN_PASSWORD: &str = "dev-password";
 pub(crate) const DEFAULT_AUTH_SESSION_TTL_SECONDS: u64 = 24 * 60 * 60;
 pub(crate) const INTERNAL_API_TOKEN_HEADER: &str = "x-rust-watcher-token";
+const ARGON2ID_PREFIX: &str = "$argon2id$";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +50,7 @@ pub(crate) async fn cloud_login(
     let valid = state
         .auth_users
         .get(&request.username)
-        .is_some_and(|password| password == &request.password);
+        .is_some_and(|password| verify_password(password, &request.password));
     if !valid {
         return (StatusCode::UNAUTHORIZED, "invalid username or password").into_response();
     }
@@ -178,13 +181,10 @@ pub(crate) fn parse_auth_users(
     users: &str,
     admin_username: &str,
     admin_password: &str,
+    allow_insecure_dev_auth: bool,
 ) -> Result<HashMap<String, String>> {
     let mut parsed = HashMap::new();
-    for raw_entry in users
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-    {
+    for raw_entry in split_auth_user_entries(users) {
         let Some((username, password)) = raw_entry.split_once(':') else {
             anyhow::bail!("invalid RUST_WATCHER_USERS entry; expected username:password");
         };
@@ -193,12 +193,71 @@ pub(crate) fn parse_auth_users(
         if username.is_empty() || password.is_empty() {
             anyhow::bail!("invalid RUST_WATCHER_USERS entry; username and password are required");
         }
+        validate_stored_password(password, allow_insecure_dev_auth)?;
         parsed.insert(username.to_string(), password.to_string());
     }
     if parsed.is_empty() {
+        validate_stored_password(admin_password, allow_insecure_dev_auth)?;
         parsed.insert(admin_username.to_string(), admin_password.to_string());
     }
     Ok(parsed)
+}
+
+fn split_auth_user_entries(users: &str) -> Vec<&str> {
+    let mut entries = Vec::new();
+    let mut start = 0;
+    for (index, _) in users.match_indices(',') {
+        let next = &users[index + 1..];
+        let next_segment = next.split(',').next().unwrap_or_default();
+        if next_segment.contains(':') {
+            entries.push(users[start..index].trim());
+            start = index + 1;
+        }
+    }
+    let tail = users[start..].trim();
+    if !tail.is_empty() {
+        entries.push(tail);
+    }
+    entries
+}
+
+pub(crate) fn verify_password(stored: &str, supplied: &str) -> bool {
+    if is_argon2id_hash(stored) {
+        let Ok(parsed_hash) = PasswordHash::new(stored) else {
+            return false;
+        };
+        return Argon2::default()
+            .verify_password(supplied.as_bytes(), &parsed_hash)
+            .is_ok();
+    }
+    stored == supplied
+}
+
+pub(crate) fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
+        .map_err(|error| anyhow::anyhow!("failed to generate password salt: {error}"))?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| anyhow::anyhow!("failed to hash password: {error}"))
+}
+
+fn validate_stored_password(stored: &str, allow_insecure_dev_auth: bool) -> Result<()> {
+    if is_argon2id_hash(stored) {
+        PasswordHash::new(stored)
+            .map_err(|error| anyhow::anyhow!("invalid argon2 password hash: {error}"))?;
+        return Ok(());
+    }
+    if allow_insecure_dev_auth {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "plain text cloud passwords are not allowed; use an argon2id hash or set RUST_WATCHER_ALLOW_INSECURE_DEV_AUTH=true for local development"
+    );
+}
+
+fn is_argon2id_hash(stored: &str) -> bool {
+    stored.starts_with(ARGON2ID_PREFIX)
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
