@@ -1,6 +1,7 @@
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path as AxumPath, Query, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{FromRequestParts, Path as AxumPath, Query, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, Request, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use futures_util::{SinkExt, StreamExt};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::auth::{require_cloud_auth, require_internal_api_token};
+use crate::auth::{require_cloud_auth, require_cloud_session_token, require_internal_api_token};
 use crate::errors::ApiError;
 use crate::scheduler::{
     cloud_status_name, is_terminal, parser_analyzer_statuses, requests_rust_analyzer,
@@ -549,9 +550,19 @@ pub(crate) async fn cloud_usage(
 }
 pub(crate) async fn cloud_ws_handler(
     State(state): State<CloudApiState>,
-    ws: WebSocketUpgrade,
+    request: Request<Body>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| cloud_websocket(socket, state))
+    let username = match cloud_ws_username_for_uri(&state, request.uri()) {
+        Ok(username) => username,
+        Err(error) => return error.into_response(),
+    };
+    let (mut parts, _body) = request.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        Err(error) => return error.into_response(),
+    };
+    ws.on_upgrade(move |socket| cloud_websocket(socket, state, username))
+        .into_response()
 }
 pub(crate) async fn create_job(
     State(state): State<CloudApiState>,
@@ -807,11 +818,48 @@ pub(crate) fn cloud_usage_response(state: &CloudApiState, username: &str) -> Clo
             .collect(),
     }
 }
-pub(crate) async fn cloud_websocket(socket: WebSocket, state: CloudApiState) {
+pub(crate) fn cloud_ws_username_for_uri(
+    state: &CloudApiState,
+    uri: &Uri,
+) -> Result<String, ApiError> {
+    let token = uri
+        .query()
+        .and_then(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find(|(key, _)| key == "token")
+                .map(|(_, value)| value.into_owned())
+        })
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| ApiError::Unauthorized("missing session token".into()))?;
+    require_cloud_session_token(state, &token)
+}
+pub(crate) fn cloud_event_visible_to_user(
+    state: &CloudApiState,
+    event: &CloudEvent,
+    username: &str,
+) -> bool {
+    if let Some(workspace_id) = event.workspace_id.as_deref() {
+        return state
+            .get_workspace_for_user(workspace_id, username)
+            .is_some();
+    }
+    if let Some(job_id) = event.job_id.as_deref() {
+        return state
+            .get_job(job_id)
+            .is_some_and(|job| state.can_access_job(&job, username));
+    }
+    matches!(event.event_type.as_str(), "heartbeat" | "connected")
+}
+pub(crate) async fn cloud_websocket(socket: WebSocket, state: CloudApiState, username: String) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.ws_tx.subscribe();
+    let forward_state = state.clone();
     let forward = tokio::spawn(async move {
         while let Ok(event) = rx.recv().await {
+            if !cloud_event_visible_to_user(&forward_state, &event, &username) {
+                continue;
+            }
             if let Ok(text) = serde_json::to_string(&event) {
                 if sender.send(Message::Text(text.into())).await.is_err() {
                     break;

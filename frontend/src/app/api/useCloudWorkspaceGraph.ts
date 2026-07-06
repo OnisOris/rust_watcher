@@ -114,9 +114,10 @@ export function useCloudWorkspaceGraph(
   }, [enabled, refreshSnapshot, workspaceId])
 
   useEffect(() => {
-    if (!enabled || !workspaceId) return
+    if (!enabled || !workspaceId || !sessionToken) return
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(`${protocol}//${window.location.host}/api/cloud/ws`)
+    const query = new URLSearchParams({ token: sessionToken })
+    const socket = new WebSocket(`${protocol}//${window.location.host}/api/cloud/ws?${query.toString()}`)
     socket.onmessage = event => {
       const payload = JSON.parse(event.data) as CloudEvent
       if (payload.workspaceId && payload.workspaceId !== workspaceId) return
@@ -135,7 +136,7 @@ export function useCloudWorkspaceGraph(
       }
     }
     return () => socket.close()
-  }, [enabled, refreshSnapshot, workspaceId])
+  }, [enabled, refreshSnapshot, sessionToken, workspaceId])
 
   const selectedNode = useMemo(
     () => selectedNodeId ? nodes.find(node => node.id === selectedNodeId) ?? null : null,

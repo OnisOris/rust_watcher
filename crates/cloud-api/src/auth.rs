@@ -90,6 +90,12 @@ pub(crate) fn require_cloud_auth(
     headers: &HeaderMap,
 ) -> Result<String, ApiError> {
     let token = bearer_token(headers)?;
+    require_cloud_session_token(state, token)
+}
+pub(crate) fn require_cloud_session_token(
+    state: &CloudApiState,
+    token: &str,
+) -> Result<String, ApiError> {
     session_owner_for_token(state, token)
 }
 pub(crate) fn agent_owner_for_token(state: &CloudApiState, token: &str) -> Option<String> {

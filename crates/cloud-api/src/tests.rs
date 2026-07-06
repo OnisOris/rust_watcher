@@ -1,5 +1,6 @@
+use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use graph_core::{
@@ -19,14 +20,14 @@ use crate::auth::{
 use crate::errors::ApiError;
 use crate::ide::SaveWorkspaceFileRequest;
 use crate::jobs::{
-    cancel_job, cloud_analyze_workspace, cloud_usage_response, create_job, get_job_usage,
-    usage_summary, CloudAnalyzeWorkspaceRequest,
+    cancel_job, cloud_analyze_workspace, cloud_event_visible_to_user, cloud_usage_response,
+    create_job, get_job_usage, usage_summary, CloudAnalyzeWorkspaceRequest,
 };
 use crate::scheduler::{
     requests_rust_analyzer, run_one_queued_job, run_parser_cloud_analysis, JobSchedulerConfig,
 };
 use crate::state::{
-    AuthSession, CloudAnalysisConfig, CloudApiState, CloudLimits, JobRevisionTarget,
+    AuthSession, CloudAnalysisConfig, CloudApiState, CloudEvent, CloudLimits, JobRevisionTarget,
     SelfUpdateConfig,
 };
 use crate::storage::{CloudMetadataStore, PersistedCloudState};
@@ -38,6 +39,7 @@ use graph_core::{
     AnalysisJobSourceKind, AnalyzerProvider, LanguageId, WorkspaceFileEntry,
     WorkspaceSyncPlanRequest,
 };
+use tower::ServiceExt;
 
 fn test_state() -> CloudApiState {
     test_state_with_config(test_analysis_config())
@@ -274,6 +276,147 @@ async fn legacy_internal_endpoint_accepts_internal_token() {
 
     assert_eq!(header_response.status(), StatusCode::OK);
     assert_eq!(bearer_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cloud_websocket_rejects_missing_token() {
+    let state = test_state();
+    let response = crate::routes::router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/cloud/ws")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn cloud_websocket_rejects_invalid_token() {
+    let state = test_state();
+    let response = crate::routes::router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/cloud/ws?token=invalid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn cloud_websocket_valid_token_reaches_upgrade_path() {
+    let state = test_state();
+    let token = create_auth_session(&state, "admin".into());
+    let response = crate::routes::router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/cloud/ws?token={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn cloud_websocket_events_are_scoped_to_owner() {
+    let state = test_state();
+    let admin_workspace = state.create_workspace(CreateWorkspaceRequest {
+        display_name: "admin-demo".into(),
+        owner_username: Some("admin".into()),
+        source: None,
+    });
+    let user_workspace = state.create_workspace(CreateWorkspaceRequest {
+        display_name: "user-demo".into(),
+        owner_username: Some("user".into()),
+        source: None,
+    });
+    let mut admin_job = terminal_job(AnalysisJobStatus::Queued);
+    admin_job.id = "admin-job".into();
+    state
+        .jobs
+        .write()
+        .insert(admin_job.id.clone(), admin_job.clone());
+    state.job_revision_targets.write().insert(
+        admin_job.id.clone(),
+        stored_job_target(&admin_workspace.id, "revision"),
+    );
+
+    let admin_workspace_event = CloudEvent {
+        event_type: "snapshotReady".into(),
+        job_id: None,
+        workspace_id: Some(admin_workspace.id.clone()),
+        status: None,
+        progress: None,
+        message: None,
+    };
+    let user_workspace_event = CloudEvent {
+        event_type: "snapshotReady".into(),
+        job_id: None,
+        workspace_id: Some(user_workspace.id),
+        status: None,
+        progress: None,
+        message: None,
+    };
+    let admin_job_event = CloudEvent {
+        event_type: "jobStatus".into(),
+        job_id: Some(admin_job.id),
+        workspace_id: None,
+        status: None,
+        progress: None,
+        message: None,
+    };
+    let unsafe_global_event = CloudEvent {
+        event_type: "jobStatus".into(),
+        job_id: None,
+        workspace_id: None,
+        status: None,
+        progress: None,
+        message: Some("not scoped".into()),
+    };
+
+    assert!(cloud_event_visible_to_user(
+        &state,
+        &admin_workspace_event,
+        "admin"
+    ));
+    assert!(!cloud_event_visible_to_user(
+        &state,
+        &admin_workspace_event,
+        "user"
+    ));
+    assert!(!cloud_event_visible_to_user(
+        &state,
+        &user_workspace_event,
+        "admin"
+    ));
+    assert!(cloud_event_visible_to_user(
+        &state,
+        &admin_job_event,
+        "admin"
+    ));
+    assert!(!cloud_event_visible_to_user(
+        &state,
+        &admin_job_event,
+        "user"
+    ));
+    assert!(!cloud_event_visible_to_user(
+        &state,
+        &unsafe_global_event,
+        "admin"
+    ));
 }
 
 #[test]
