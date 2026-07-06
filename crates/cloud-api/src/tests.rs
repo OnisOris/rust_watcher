@@ -31,8 +31,8 @@ use crate::state::{
 };
 use crate::storage::{CloudMetadataStore, PersistedCloudState};
 use crate::workspaces::{
-    materialize_revision, materialized_child_path, sha256_content_hash, timestamp,
-    CreateWorkspaceRequest,
+    materialize_revision, materialized_child_path, requested_analyzers_for_workspace_files,
+    sha256_content_hash, timestamp, CreateWorkspaceRequest,
 };
 use graph_core::{
     AnalysisJobSourceKind, AnalyzerProvider, LanguageId, WorkspaceFileEntry,
@@ -391,6 +391,64 @@ fn file_entry_at(path: &str, content: &[u8]) -> WorkspaceFileEntry {
     }
 }
 
+#[test]
+fn requested_analyzers_include_parser_baseline() {
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[file_entry_at("README.md", b"# demo")]),
+        vec![AnalyzerEngine::Parser]
+    );
+}
+
+#[test]
+fn requested_analyzers_select_rust_from_manifest_or_sources() {
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[file_entry_at("src/lib.rs", b"")]),
+        vec![AnalyzerEngine::Parser, AnalyzerEngine::RustAnalyzer]
+    );
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[file_entry_at("crates/app/Cargo.toml", b"")]),
+        vec![AnalyzerEngine::Parser, AnalyzerEngine::RustAnalyzer]
+    );
+}
+
+#[test]
+fn requested_analyzers_select_python_typescript_and_qml() {
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[file_entry_at("app/main.py", b"")]),
+        vec![AnalyzerEngine::Parser, AnalyzerEngine::Ty]
+    );
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[file_entry_at("frontend/package.json", b"{}")]),
+        vec![
+            AnalyzerEngine::Parser,
+            AnalyzerEngine::TypeScriptLanguageServer
+        ]
+    );
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[file_entry_at("ui/App.qml", b"")]),
+        vec![AnalyzerEngine::Parser, AnalyzerEngine::QmlLanguageServer]
+    );
+}
+
+#[test]
+fn requested_analyzers_keep_stable_mixed_order() {
+    assert_eq!(
+        requested_analyzers_for_workspace_files(&[
+            file_entry_at("src/main.rs", b""),
+            file_entry_at("scripts/main.py", b""),
+            file_entry_at("web/app.tsx", b""),
+            file_entry_at("qml/Main.qml", b""),
+        ]),
+        vec![
+            AnalyzerEngine::Parser,
+            AnalyzerEngine::RustAnalyzer,
+            AnalyzerEngine::Ty,
+            AnalyzerEngine::TypeScriptLanguageServer,
+            AnalyzerEngine::QmlLanguageServer,
+        ]
+    );
+}
+
 fn terminal_job(status: AnalysisJobStatus) -> AnalysisJob {
     AnalysisJob {
         id: Uuid::new_v4().to_string(),
@@ -684,6 +742,88 @@ async fn cloud_workspace_analyze_without_body_queues_full_job() {
         .next()
         .expect("queued analysis job");
     assert_eq!(job.analysis_mode, AnalysisMode::Full);
+    assert_eq!(
+        job.requested_analyzers,
+        vec![AnalyzerEngine::Parser, AnalyzerEngine::RustAnalyzer]
+    );
+}
+
+#[tokio::test]
+async fn optional_cloud_analyzers_fallback_without_failing_job() {
+    let state = test_state();
+    let workspace = state.create_workspace(workspace_request());
+    let files = [
+        ("scripts/main.py", b"print('hi')\n".as_slice()),
+        (
+            "frontend/app.tsx",
+            b"export const App = () => null;\n".as_slice(),
+        ),
+        ("qml/Main.qml", b"import QtQuick\nItem {}\n".as_slice()),
+    ];
+    let entries = files
+        .iter()
+        .map(|(path, content)| {
+            let entry = file_entry_at(path, content);
+            state
+                .upload_blob(&workspace.id, &entry.content_hash, content)
+                .unwrap();
+            entry
+        })
+        .collect::<Vec<_>>();
+    state
+        .create_revision(
+            &workspace.id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: None,
+                files: entries,
+            },
+        )
+        .unwrap();
+    let token = create_auth_session(&state, "admin".into());
+
+    let response = cloud_analyze_workspace(
+        State(state.clone()),
+        auth_headers(&token),
+        AxumPath(workspace.id),
+        None,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job = state
+        .list_jobs()
+        .into_iter()
+        .next()
+        .expect("queued analysis job");
+    assert_eq!(
+        job.requested_analyzers,
+        vec![
+            AnalyzerEngine::Parser,
+            AnalyzerEngine::Ty,
+            AnalyzerEngine::TypeScriptLanguageServer,
+            AnalyzerEngine::QmlLanguageServer,
+        ]
+    );
+
+    run_parser_cloud_analysis(state.clone(), job.id.clone()).await;
+
+    let completed = state.get_job(&job.id).unwrap();
+    assert_eq!(completed.status, AnalysisJobStatus::Completed);
+    for analyzer in [
+        AnalyzerEngine::Ty,
+        AnalyzerEngine::TypeScriptLanguageServer,
+        AnalyzerEngine::QmlLanguageServer,
+    ] {
+        let status = completed
+            .analyzer_statuses
+            .iter()
+            .find(|status| status.engine == analyzer)
+            .expect("optional analyzer status");
+        assert_eq!(status.provider, AnalyzerProvider::Cloud);
+        assert_eq!(status.status, AnalyzerStatus::Fallback);
+        assert!(!status.billable);
+    }
 }
 
 #[tokio::test]

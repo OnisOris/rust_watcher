@@ -549,11 +549,37 @@ pub(crate) fn requested_analyzers_for_collected_files(
 pub(crate) fn requested_analyzers_for_workspace_files(
     files: &[WorkspaceFileEntry],
 ) -> Vec<AnalyzerEngine> {
-    if files.iter().any(|file| file.path == "Cargo.toml") {
-        vec![AnalyzerEngine::RustAnalyzer]
-    } else {
-        Vec::new()
+    let mut analyzers = vec![AnalyzerEngine::Parser];
+    let has_path = |predicate: fn(&str) -> bool| files.iter().any(|file| predicate(&file.path));
+    let has_file_name = |name: &str| {
+        files.iter().any(|file| {
+            Path::new(&file.path)
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                == Some(name)
+        })
+    };
+    if has_file_name("Cargo.toml") || has_path(|path| path.ends_with(".rs")) {
+        analyzers.push(AnalyzerEngine::RustAnalyzer);
     }
+    if has_path(|path| path.ends_with(".py")) {
+        analyzers.push(AnalyzerEngine::Ty);
+    }
+    if has_file_name("package.json")
+        || has_file_name("tsconfig.json")
+        || has_path(|path| {
+            path.ends_with(".ts")
+                || path.ends_with(".tsx")
+                || path.ends_with(".js")
+                || path.ends_with(".jsx")
+        })
+    {
+        analyzers.push(AnalyzerEngine::TypeScriptLanguageServer);
+    }
+    if has_path(|path| path.ends_with(".qml")) {
+        analyzers.push(AnalyzerEngine::QmlLanguageServer);
+    }
+    analyzers
 }
 pub(crate) fn validate_content_hash(content_hash: &str) -> Result<(), ApiError> {
     let Some(hex) = content_hash.strip_prefix("sha256:") else {

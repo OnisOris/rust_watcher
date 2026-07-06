@@ -30,6 +30,10 @@ cargo build
 ## Analyzer Setup
 
 Rust Code Command Center works with parser fallbacks, but external analyzers unlock richer semantic data.
+Cloud analysis always runs the parser baseline and requests language analyzers from uploaded workspace
+files: Rust for `Cargo.toml` or `.rs`, Python `ty` for `.py`, TypeScript language server for
+`.ts`/`.tsx`/`.js`/`.jsx` or `package.json`/`tsconfig.json`, and `qmlls` for `.qml`. Missing optional
+cloud analyzers report fallback status instead of failing the job.
 
 Rust:
 

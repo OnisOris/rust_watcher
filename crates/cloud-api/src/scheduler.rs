@@ -272,6 +272,7 @@ pub(crate) async fn execute_cloud_analysis_job(
             &job_id,
             cloud_analyzer_statuses(
                 &snapshot,
+                &[AnalyzerEngine::Parser, AnalyzerEngine::RustAnalyzer],
                 Some(rust_analyzer_status(
                     AnalyzerStatus::Starting,
                     Some("Starting cloud rust-analyzer".into()),
@@ -324,11 +325,19 @@ pub(crate) async fn execute_cloud_analysis_job(
     );
     snapshot.status.app_state = AppState::Normal;
     snapshot.status.analyzer_status = AnalyzerStatus::Ready;
-    snapshot.status.analyzers = if rust_analyzer_requested {
-        cloud_analyzer_statuses(&snapshot, rust_analyzer_final_status.clone())
-    } else {
-        parser_analyzer_statuses(&snapshot)
-    };
+    let optional_semantic_requested = requested_analyzers.iter().any(|analyzer| {
+        matches!(
+            analyzer,
+            AnalyzerEngine::Ty
+                | AnalyzerEngine::TypeScriptLanguageServer
+                | AnalyzerEngine::QmlLanguageServer
+        )
+    });
+    snapshot.status.analyzers = cloud_analyzer_statuses(
+        &snapshot,
+        &requested_analyzers,
+        rust_analyzer_final_status.clone(),
+    );
     snapshot.status.message = Some(if rust_analyzer_requested {
         match rust_analyzer_final_status
             .as_ref()
@@ -338,6 +347,8 @@ pub(crate) async fn execute_cloud_analysis_job(
             AnalyzerStatus::Ready => "Cloud rust-analyzer analysis completed".into(),
             _ => "Cloud parser analysis completed; rust-analyzer used fallback".into(),
         }
+    } else if optional_semantic_requested {
+        "Cloud parser analysis completed; optional semantic analyzers used fallback".into()
     } else {
         "Cloud parser analysis completed".into()
     });
@@ -488,6 +499,7 @@ pub(crate) async fn enrich_with_cloud_rust_analyzer(
         job_id,
         cloud_analyzer_statuses(
             snapshot,
+            &[AnalyzerEngine::Parser, AnalyzerEngine::RustAnalyzer],
             Some(rust_analyzer_status(
                 AnalyzerStatus::Indexing,
                 Some(format!("Indexing {} Rust files", rust_files.len())),
@@ -535,6 +547,7 @@ pub(crate) async fn enrich_with_cloud_rust_analyzer(
         job_id,
         cloud_analyzer_statuses(
             snapshot,
+            &[AnalyzerEngine::Parser, AnalyzerEngine::RustAnalyzer],
             Some(rust_analyzer_status(
                 AnalyzerStatus::Ready,
                 Some(message),
@@ -566,10 +579,11 @@ pub(crate) fn rust_file_count(index: Option<&ProjectIndex>) -> u32 {
         .unwrap_or_default()
 }
 pub(crate) fn parser_analyzer_statuses(snapshot: &GraphSnapshot) -> Vec<AnalyzerServiceStatus> {
-    cloud_analyzer_statuses(snapshot, None)
+    cloud_analyzer_statuses(snapshot, &[AnalyzerEngine::Parser], None)
 }
 pub(crate) fn cloud_analyzer_statuses(
     snapshot: &GraphSnapshot,
+    requested_analyzers: &[AnalyzerEngine],
     rust_analyzer: Option<AnalyzerServiceStatus>,
 ) -> Vec<AnalyzerServiceStatus> {
     let mut statuses = vec![AnalyzerServiceStatus {
@@ -590,7 +604,68 @@ pub(crate) fn cloud_analyzer_statuses(
     if let Some(rust_analyzer) = rust_analyzer {
         statuses.push(rust_analyzer);
     }
+    for analyzer in requested_analyzers {
+        if let Some(status) = optional_cloud_analyzer_fallback_status(*analyzer, snapshot) {
+            statuses.push(status);
+        }
+    }
     statuses
+}
+fn optional_cloud_analyzer_fallback_status(
+    analyzer: AnalyzerEngine,
+    snapshot: &GraphSnapshot,
+) -> Option<AnalyzerServiceStatus> {
+    let (id, kind, label, file_count, message) = match analyzer {
+        AnalyzerEngine::Ty => (
+            "ty",
+            AnalyzerKind::Python,
+            "ty",
+            files_with_extensions(snapshot, &["py"]),
+            "Cloud ty analyzer is not available in this worker; Python parser fallback used",
+        ),
+        AnalyzerEngine::TypeScriptLanguageServer => (
+            "typescript-language-server",
+            AnalyzerKind::TypeScript,
+            "typescript-language-server",
+            files_with_extensions(snapshot, &["ts", "tsx", "js", "jsx"]),
+            "Cloud TypeScript language server is not available in this worker; TypeScript parser fallback used",
+        ),
+        AnalyzerEngine::QmlLanguageServer => (
+            "qmlls",
+            AnalyzerKind::Qml,
+            "qmlls",
+            files_with_extensions(snapshot, &["qml"]),
+            "Cloud qmlls analyzer is not available in this worker; QML parser fallback used",
+        ),
+        _ => return None,
+    };
+    Some(AnalyzerServiceStatus {
+        id: id.into(),
+        kind,
+        engine: analyzer,
+        label: label.into(),
+        status: AnalyzerStatus::Fallback,
+        mode: Some("cloud".into()),
+        message: Some(message.into()),
+        capabilities: vec![AnalyzerCapability::Symbols],
+        files_indexed: file_count,
+        last_updated: Some(timestamp()),
+        provider: AnalyzerProvider::Cloud,
+        billable: false,
+        credits_used: None,
+    })
+}
+fn files_with_extensions(snapshot: &GraphSnapshot, extensions: &[&str]) -> u32 {
+    snapshot
+        .files
+        .iter()
+        .filter(|file| {
+            Path::new(file.path.as_str())
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extensions.contains(&extension))
+        })
+        .count() as u32
 }
 pub(crate) fn rust_analyzer_status(
     status: AnalyzerStatus,
