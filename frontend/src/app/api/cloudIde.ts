@@ -54,9 +54,19 @@ export interface CloudAnalyzeResponse {
   progress?: number
 }
 
+export class CloudIdeHttpError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'CloudIdeHttpError'
+    this.status = status
+  }
+}
+
 async function responseError(response: Response, fallback: string) {
   const message = await response.text()
-  return new Error(message.trim() || `${fallback} failed with HTTP ${response.status}`)
+  return new CloudIdeHttpError(message.trim() || `${fallback} failed with HTTP ${response.status}`, response.status)
 }
 
 export async function loadWorkspaceFiles(workspaceId: string, sessionToken: string) {

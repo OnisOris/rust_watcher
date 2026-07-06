@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, CSSProperties } from 'react'
 import Editor from '@monaco-editor/react'
-import { AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, File, Folder, Play, RefreshCw, Save } from 'lucide-react'
-import { analyzeWorkspace, loadWorkspaceFileContent, loadWorkspaceFiles, loadWorkspaceRevisionDiff, saveWorkspaceFileContent } from '../api/cloudIde'
+import { AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Clipboard, File, Folder, GitCompare, Play, RefreshCw, Save } from 'lucide-react'
+import { analyzeWorkspace, CloudIdeHttpError, loadWorkspaceFileContent, loadWorkspaceFiles, loadWorkspaceRevisionDiff, saveWorkspaceFileContent } from '../api/cloudIde'
 import type { WorkspaceFileEntry, WorkspaceRevisionDiffResponse, WorkspaceRevisionFileDiffEntry } from '../api/cloudIde'
 import { CloudShellNav, type CloudShellTab } from './CloudShellNav'
 
@@ -26,6 +26,14 @@ interface FileTreeNode {
   file?: WorkspaceFileEntry
 }
 
+interface SaveConflictState {
+  path: string
+  baseRevision: string
+  latestRevision: string | null
+  localContent: string
+  latestContent: string | null
+}
+
 export function BrowserIdeView({ workspaceId, sessionToken, username, theme, initialPath, initialLine, onTabChange, onBackToGraph }: BrowserIdeViewProps) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([])
   const [revisionId, setRevisionId] = useState<string | null>(null)
@@ -41,8 +49,10 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
   const [analyzing, setAnalyzing] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [conflict, setConflict] = useState<SaveConflictState | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const loadSeq = useRef(0)
+  const suppressNextContentLoad = useRef(false)
   const editorRef = useRef<Parameters<NonNullable<ComponentProps<typeof Editor>['onMount']>>[0] | null>(null)
 
   const dirty = content !== savedContent
@@ -80,6 +90,11 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
     if (!selectedPath) {
       setContent('')
       setSavedContent('')
+      setConflict(null)
+      return
+    }
+    if (suppressNextContentLoad.current) {
+      suppressNextContentLoad.current = false
       return
     }
     const seq = ++loadSeq.current
@@ -91,6 +106,7 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
         setRevisionId(payload.revisionId)
         setContent(payload.content)
         setSavedContent(payload.content)
+        setConflict(null)
         setMessage(`${payload.file.path} loaded`)
         if (initialLine) {
           window.setTimeout(() => {
@@ -112,6 +128,7 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
   const selectFile = useCallback((path: string) => {
     if (path === selectedPath) return
     if (dirty && !window.confirm('Discard unsaved changes?')) return
+    setConflict(null)
     setSelectedPath(path)
   }, [dirty, selectedPath])
 
@@ -124,6 +141,7 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
       const response = await saveWorkspaceFileContent(workspaceId, selectedPath, content, baseRevisionId, sessionToken)
       setRevisionId(response.revisionId)
       setSavedContent(content)
+      setConflict(null)
       setFiles(current => current.map(file => file.path === selectedPath ? response.file : file))
       setMessage(`Saved ${selectedPath}`)
       setSidePanel('changes')
@@ -137,11 +155,83 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
         setLoadingChanges(false)
       }
     } catch (error) {
-      setError(error instanceof Error ? error.message : 'File failed to save.')
+      if (error instanceof CloudIdeHttpError && error.status === 409) {
+        setConflict({
+          path: selectedPath,
+          baseRevision: baseRevisionId,
+          latestRevision: null,
+          localContent: content,
+          latestContent: null,
+        })
+        setError(null)
+        setMessage(null)
+      } else {
+        setError(error instanceof Error ? error.message : 'File failed to save.')
+      }
     } finally {
       setSaving(false)
     }
   }, [content, dirty, revisionId, saving, selectedPath, sessionToken, workspaceId])
+
+  const reloadLatestForConflict = useCallback(async () => {
+    if (!conflict || !selectedPath) return
+    setLoadingContent(true)
+    setError(null)
+    try {
+      const filesPayload = await loadWorkspaceFiles(workspaceId, sessionToken)
+      const latestRevision = filesPayload.revisionId
+      const latestPayload = await loadWorkspaceFileContent(workspaceId, conflict.path, sessionToken, latestRevision)
+      if (latestRevision !== revisionId) suppressNextContentLoad.current = true
+      setFiles(filesPayload.files)
+      setRevisionId(latestRevision)
+      setSavedContent(latestPayload.content)
+      setConflict(current => current && current.path === conflict.path ? {
+        ...current,
+        latestRevision,
+        latestContent: latestPayload.content,
+        localContent: content,
+      } : current)
+      setMessage('Latest revision loaded. Local edits are still in the editor.')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Latest file failed to load.')
+    } finally {
+      setLoadingContent(false)
+    }
+  }, [conflict, content, revisionId, selectedPath, sessionToken, workspaceId])
+
+  const copyConflictLocalChanges = useCallback(async () => {
+    if (!conflict) return
+    try {
+      await navigator.clipboard.writeText(conflict.localContent)
+      setMessage('Local changes copied.')
+    } catch {
+      setError('Clipboard is unavailable. Select the editor content and copy it manually.')
+    }
+  }, [conflict])
+
+  const openConflictDiff = useCallback(async () => {
+    if (!conflict?.latestRevision) return
+    setLoadingChanges(true)
+    setError(null)
+    try {
+      const diff = await loadWorkspaceRevisionDiff(workspaceId, conflict.baseRevision, sessionToken, conflict.latestRevision)
+      setChanges(diff)
+      setSidePanel('changes')
+      setMessage('Latest revision diff opened.')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Conflict diff failed to load.')
+    } finally {
+      setLoadingChanges(false)
+    }
+  }, [conflict, sessionToken, workspaceId])
+
+  const useLatestConflictContent = useCallback(() => {
+    if (!conflict?.latestContent) return
+    setContent(conflict.latestContent)
+    setSavedContent(conflict.latestContent)
+    setConflict(null)
+    setMessage('Editor replaced with latest revision.')
+  }, [conflict])
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -318,6 +408,67 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
             </div>
           )}
 
+          {conflict && conflict.path === selectedPath && (
+            <div
+              className="shrink-0 flex flex-wrap items-center justify-between gap-3 px-4 py-2"
+              style={{
+                minHeight: 54,
+                background: 'rgba(217,119,6,0.10)',
+                borderBottom: '1px solid var(--cc-border)',
+                color: 'var(--cc-text)',
+                fontSize: 12,
+              }}
+            >
+              <div className="min-w-0 flex items-start gap-2">
+                <AlertTriangle size={15} color="#D97706" style={{ marginTop: 2, flexShrink: 0 }} />
+                <div className="min-w-0">
+                  <div style={{ fontWeight: 780 }}>This file changed in a newer revision.</div>
+                  <div style={{ marginTop: 2, color: 'var(--cc-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    Local edits are still in the editor. Base {conflict.baseRevision.slice(0, 8)}
+                    {conflict.latestRevision ? ` · latest ${conflict.latestRevision.slice(0, 8)}` : ''}
+                  </div>
+                </div>
+              </div>
+              <div className="shrink-0 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => void reloadLatestForConflict()}
+                  disabled={loadingContent}
+                  className="flex items-center gap-1.5"
+                  style={secondaryButtonStyle}
+                >
+                  <RefreshCw size={13} />
+                  Reload latest
+                </button>
+                <button
+                  onClick={() => void copyConflictLocalChanges()}
+                  className="flex items-center gap-1.5"
+                  style={secondaryButtonStyle}
+                >
+                  <Clipboard size={13} />
+                  Copy local
+                </button>
+                <button
+                  onClick={() => void openConflictDiff()}
+                  disabled={!conflict.latestRevision || loadingChanges}
+                  className="flex items-center gap-1.5"
+                  style={secondaryButtonStyle}
+                >
+                  <GitCompare size={13} />
+                  Diff
+                </button>
+                {conflict.latestContent !== null && (
+                  <button
+                    onClick={useLatestConflictContent}
+                    className="flex items-center gap-1.5"
+                    style={secondaryButtonStyle}
+                  >
+                    Use latest
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 min-h-0 relative" style={{ background: theme === 'dark' ? '#1e1e1e' : '#ffffff' }}>
             {selectedPath ? (
               <Editor
@@ -337,7 +488,11 @@ export function BrowserIdeView({ workspaceId, sessionToken, username, theme, ini
                   renderWhitespace: 'selection',
                   fixedOverflowWidgets: true,
                 }}
-                onChange={value => setContent(value ?? '')}
+                onChange={value => {
+                  const nextContent = value ?? ''
+                  setContent(nextContent)
+                  setConflict(current => current && current.path === selectedPath ? { ...current, localContent: nextContent } : current)
+                }}
                 onMount={editor => {
                   editorRef.current = editor
                   if (initialLine) {
