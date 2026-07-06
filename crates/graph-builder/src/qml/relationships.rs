@@ -8,7 +8,10 @@ use graph_core::{
 use super::api_calls::build_endpoint_route_index;
 use super::imports::{resolve_qml_component, resolve_qml_import};
 use super::{QmlFile, QmlImport, QmlRelationshipFact, QmlSymbol};
-use crate::{file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence};
+use crate::{
+    edge_evidence_at, file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence,
+    push_unique_edge_with_evidence,
+};
 
 pub(super) fn enrich_qml_relationships(
     snapshot: &mut GraphSnapshot,
@@ -176,13 +179,27 @@ pub(super) fn collect_qml_relationship_edges(
                     let key = route_key(method, path).key;
                     if let Some(endpoint_ids) = endpoint_by_route.get(&key) {
                         for endpoint_id in endpoint_ids {
-                            push_unique_edge_with_confidence(
+                            push_unique_edge_with_evidence(
                                 &mut edges,
                                 &existing_edges,
                                 EdgeType::ApiCall,
                                 source_id,
                                 endpoint_id,
                                 EdgeConfidence::Semantic,
+                                edge_evidence_at(
+                                    &file.relative_path,
+                                    source_line_for_symbol(
+                                        symbols_by_file,
+                                        &file.relative_path,
+                                        source_id,
+                                    ),
+                                    format!("{method} {path}"),
+                                    "qmlls",
+                                    format!(
+                                        "QML API call matched backend route `{}`",
+                                        route_key(method, path).key
+                                    ),
+                                ),
                             );
                             push_unique_data_flow_edge(
                                 &mut edges,
@@ -202,4 +219,18 @@ pub(super) fn collect_qml_relationship_edges(
     }
 
     edges
+}
+
+fn source_line_for_symbol(
+    symbols_by_file: &HashMap<String, Vec<QmlSymbol>>,
+    file: &str,
+    source_id: &str,
+) -> u32 {
+    symbols_by_file
+        .get(file)
+        .into_iter()
+        .flatten()
+        .find(|symbol| symbol.id == source_id)
+        .map(|symbol| symbol.line)
+        .unwrap_or(1)
 }

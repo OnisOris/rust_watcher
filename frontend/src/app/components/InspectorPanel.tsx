@@ -101,6 +101,9 @@ function NodePanel(props: InspectorPanelProps & { node: GraphNode }) {
   const language = inferNodeLanguage(node)
   const incoming = props.edges.filter(edge => edge.target === node.id)
   const outgoing = props.edges.filter(edge => edge.source === node.id)
+  const edgeEvidence = [...outgoing, ...incoming]
+    .filter(edge => Boolean(edge.evidence))
+    .slice(0, 5)
   const related = [...incoming.map(edge => edge.source), ...outgoing.map(edge => edge.target)]
     .map(id => props.nodes.find(item => item.id === id))
     .filter((item): item is GraphNode => Boolean(item))
@@ -142,6 +145,24 @@ function NodePanel(props: InspectorPanelProps & { node: GraphNode }) {
             {!related.length && <Text>No direct relations in current view.</Text>}
           </div>
         </Card>
+
+        {!!edgeEvidence.length && (
+          <Card>
+            <SectionTitle>Why this edge exists</SectionTitle>
+            <div className="space-y-1.5">
+              {edgeEvidence.map(edge => (
+                <div key={edge.id} className="rounded-lg px-2 py-2" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+                  <div className="flex items-center gap-1.5">
+                    <Badge color={edge.source === node.id ? '#0EA5E9' : '#64748B'}>{edge.source === node.id ? 'Outgoing' : 'Incoming'}</Badge>
+                    <span className="truncate" style={{ fontSize: 10, color: 'var(--cc-text)', fontWeight: 750 }}>{edge.type}</span>
+                    {edge.confidence && <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--cc-text-faint)' }}>{edge.confidence}</span>}
+                  </div>
+                  <Text>{edge.evidence}</Text>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
 
         <Card>
           <SectionTitle>Actions</SectionTitle>

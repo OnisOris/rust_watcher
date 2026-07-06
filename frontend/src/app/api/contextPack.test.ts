@@ -14,7 +14,14 @@ function pack(): ContextPack {
     warnings: ['Detached source included.'],
     createdAt: '1',
     nodes: [{ id: 'n1', type: 'Function', label: 'handler', language: 'rust', file: 'src/main.rs', line: 10, x: 0, y: 0, vx: 0, vy: 0 }],
-    edges: [{ id: 'e1', source: 'caller', target: 'n1', type: 'Calls', confidence: 'Semantic' }],
+    edges: [{
+      id: 'e1',
+      source: 'caller',
+      target: 'n1',
+      type: 'Calls',
+      confidence: 'Semantic',
+      evidence: 'source file/range: src/main.rs:L10; matched text or symbol: `handler()`; analyzer engine: parser; confidence reason: Rust call match',
+    }],
     diagnostics: [{ id: 'd1', language: 'rust', file: 'src/main.rs', severity: 'Warning', message: 'careful', relatedNodeIds: ['n1'] }],
     snippets: [{
       id: 's1',
@@ -46,5 +53,6 @@ describe('context pack helpers', () => {
     expect(markdown).toContain('src/main.rs:L8-L11')
     expect(markdown).toContain('Warning: src/main.rs')
     expect(markdown).toContain('Calls: caller -> n1 [Semantic]')
+    expect(markdown).toContain('Evidence: `source file/range: src/main.rs:L10')
   })
 })

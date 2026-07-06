@@ -1,7 +1,7 @@
 use crate::analyzer_paths::resolve_ty;
 use anyhow::Result;
 use clap::ValueEnum;
-use graph_builder::push_unique_edge_with_confidence;
+use graph_builder::{edge_evidence_at, edge_evidence_range, push_unique_edge_with_evidence};
 use graph_core::{
     DiscoveredSymbol, EdgeConfidence, EdgeType, GraphSnapshot, LanguageId, NodeType,
     PythonAnalyzerStatus, SymbolIndex, SymbolKindName, Visibility,
@@ -232,13 +232,14 @@ pub async fn enrich_python_semantic_calls(
         .map(|symbol| {
             (
                 symbol.node_id.clone(),
+                symbol.file.clone(),
                 project_root.join(&symbol.file),
                 symbol.selection_range.start,
             )
         })
         .collect::<Vec<_>>();
 
-    for (source_id, file, position) in callable_symbols {
+    for (source_id, source_file, file, position) in callable_symbols {
         let items = match timeout(
             Duration::from_secs(2),
             ty.prepare_call_hierarchy(&file, position.line, position.character),
@@ -255,13 +256,28 @@ pub async fn enrich_python_semantic_calls(
             };
             for call in outgoing {
                 if let Some(target) = target_symbol_for_call(&symbol_index, &call) {
-                    push_unique_edge_with_confidence(
+                    push_unique_edge_with_evidence(
                         &mut snapshot.edges,
                         &HashSet::new(),
                         EdgeType::Calls,
                         &source_id,
                         &target.node_id,
                         EdgeConfidence::Semantic,
+                        semantic_call_evidence(
+                            &source_file,
+                            call.from_ranges.first().map(|range| {
+                                (
+                                    (range.start.line + 1, range.start.character + 1),
+                                    (range.end.line + 1, range.end.character + 1),
+                                )
+                            }),
+                            &call.to.name,
+                            "ty",
+                            format!(
+                                "ty call hierarchy resolved outgoing call to `{}`",
+                                target.label
+                            ),
+                        ),
                     );
                 }
             }
@@ -293,13 +309,14 @@ pub async fn enrich_python_semantic_calls_for_files(
         .map(|symbol| {
             (
                 symbol.node_id.clone(),
+                symbol.file.clone(),
                 project_root.join(&symbol.file),
                 symbol.selection_range.start,
             )
         })
         .collect::<Vec<_>>();
 
-    for (source_id, file, position) in callable_symbols {
+    for (source_id, source_file, file, position) in callable_symbols {
         let items = match timeout(
             Duration::from_secs(2),
             ty.prepare_call_hierarchy(&file, position.line, position.character),
@@ -316,17 +333,58 @@ pub async fn enrich_python_semantic_calls_for_files(
             };
             for call in outgoing {
                 if let Some(target) = target_symbol_for_call(&symbol_index, &call) {
-                    push_unique_edge_with_confidence(
+                    push_unique_edge_with_evidence(
                         &mut snapshot.edges,
                         &HashSet::new(),
                         EdgeType::Calls,
                         &source_id,
                         &target.node_id,
                         EdgeConfidence::Semantic,
+                        semantic_call_evidence(
+                            &source_file,
+                            call.from_ranges.first().map(|range| {
+                                (
+                                    (range.start.line + 1, range.start.character + 1),
+                                    (range.end.line + 1, range.end.character + 1),
+                                )
+                            }),
+                            &call.to.name,
+                            "ty",
+                            format!(
+                                "ty call hierarchy resolved outgoing call to `{}`",
+                                target.label
+                            ),
+                        ),
                     );
                 }
             }
         }
+    }
+}
+
+fn semantic_call_evidence(
+    source_file: &str,
+    source_range: Option<((u32, u32), (u32, u32))>,
+    matched_symbol: &str,
+    analyzer_engine: &str,
+    confidence_reason: impl AsRef<str>,
+) -> String {
+    if let Some(range) = source_range {
+        edge_evidence_range(
+            source_file,
+            range,
+            matched_symbol,
+            analyzer_engine,
+            confidence_reason,
+        )
+    } else {
+        edge_evidence_at(
+            source_file,
+            1,
+            matched_symbol,
+            analyzer_engine,
+            confidence_reason,
+        )
     }
 }
 

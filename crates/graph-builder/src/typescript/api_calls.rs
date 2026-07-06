@@ -3,7 +3,7 @@ use graph_core::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::push_unique_edge_with_confidence;
+use crate::push_unique_edge_with_evidence;
 
 pub(super) fn propagate_ts_api_call_edges(snapshot: &mut GraphSnapshot) {
     let existing_edges = snapshot
@@ -15,7 +15,13 @@ pub(super) fn propagate_ts_api_call_edges(snapshot: &mut GraphSnapshot) {
         .edges
         .iter()
         .filter(|edge| edge.edge_type == EdgeType::ApiCall)
-        .map(|edge| (edge.source.clone(), edge.target.clone()))
+        .map(|edge| {
+            (
+                edge.source.clone(),
+                edge.target.clone(),
+                edge.evidence.clone(),
+            )
+        })
         .collect::<Vec<_>>();
     let call_edges = snapshot
         .edges
@@ -25,15 +31,34 @@ pub(super) fn propagate_ts_api_call_edges(snapshot: &mut GraphSnapshot) {
         .collect::<Vec<_>>();
     let mut new_edges = Vec::new();
     for call in call_edges {
-        for (api_source, endpoint) in &api_by_source {
+        for (api_source, endpoint, api_evidence) in &api_by_source {
             if call.target == *api_source {
-                push_unique_edge_with_confidence(
+                let propagated = match (call.evidence.as_deref(), api_evidence.as_deref()) {
+                    (Some(call_evidence), Some(api_evidence)) => format!(
+                        "{call_evidence}; propagated via call edge; upstream API evidence: {api_evidence}"
+                    ),
+                    (Some(call_evidence), None) => {
+                        format!("{call_evidence}; propagated because called symbol performs API request")
+                    }
+                    (None, Some(api_evidence)) => format!(
+                        "{api_evidence}; propagated because caller invokes symbol `{}`",
+                        call.target
+                    ),
+                    (None, None) => {
+                        format!(
+                            "source file/range: unknown; matched text or symbol: `{}`; analyzer engine: parser; confidence reason: propagated because caller invokes a symbol that already matched this endpoint",
+                            call.target
+                        )
+                    }
+                };
+                push_unique_edge_with_evidence(
                     &mut new_edges,
                     &existing_edges,
                     EdgeType::ApiCall,
                     &call.source,
                     endpoint,
                     EdgeConfidence::Heuristic,
+                    propagated,
                 );
             }
         }

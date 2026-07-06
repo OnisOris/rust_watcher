@@ -6,7 +6,10 @@ use tree_sitter::Node;
 
 use super::parser::{node_text, py_range};
 use super::{PyFile, PySymbol};
-use crate::{file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence};
+use crate::{
+    edge_evidence_range, file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence,
+    push_unique_edge_with_evidence,
+};
 
 pub(super) fn collect_py_endpoint_nodes_and_edges(
     node: Node<'_>,
@@ -120,13 +123,41 @@ fn add_endpoint_for_decorated_definition(
             EdgeConfidence::Exact,
         );
         if let Some(handler_id) = handler_id.as_deref() {
-            push_unique_edge_with_confidence(
+            let decorator_text = decorators_from_node(node, source)
+                .into_iter()
+                .find(|decorator| {
+                    parse_route_decorator(decorator.clone()).is_some_and(
+                        |(decorator_method, decorator_path)| {
+                            decorator_method == method && decorator_path == path
+                        },
+                    )
+                })
+                .unwrap_or_else(|| node_text(node, source));
+            push_unique_edge_with_evidence(
                 edges,
                 existing_edges,
                 EdgeType::EndpointHandler,
                 &endpoint_id,
                 handler_id,
                 EdgeConfidence::Exact,
+                edge_evidence_range(
+                    &file.relative_path,
+                    (
+                        (
+                            node.start_position().row as u32 + 1,
+                            node.start_position().column as u32 + 1,
+                        ),
+                        (
+                            node.end_position().row as u32 + 1,
+                            node.end_position().column as u32 + 1,
+                        ),
+                    ),
+                    decorator_text,
+                    "ty",
+                    format!(
+                        "Python route decorator maps {method} {path} to handler `{function_name}`"
+                    ),
+                ),
             );
             push_unique_data_flow_edge(
                 edges,

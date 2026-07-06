@@ -1,8 +1,8 @@
 use anyhow::Result;
 use graph_builder::{
-    build_fallback_graph, build_language_graph, enrich_api_routes_for_files, enrich_file_symbols,
-    enrich_syntax_relationships_for_files, mark_rust_source_reachability,
-    push_unique_edge_with_confidence, python, qml, typescript,
+    build_fallback_graph, build_language_graph, edge_evidence_at, edge_evidence_range,
+    enrich_api_routes_for_files, enrich_file_symbols, enrich_syntax_relationships_for_files,
+    mark_rust_source_reachability, push_unique_edge_with_evidence, python, qml, typescript,
 };
 use graph_core::{
     AnalysisEventType, AnalyzerStatus, AppState, DiagnosticRecord, EdgeConfidence, EdgeType,
@@ -1029,13 +1029,14 @@ async fn enrich_semantic_call_edges(
         .map(|symbol| {
             (
                 symbol.node_id.clone(),
+                symbol.file.clone(),
                 project_root.join(&symbol.file),
                 symbol.selection_range.start,
             )
         })
         .collect::<Vec<_>>();
 
-    for (source_id, file, position) in callable_symbols {
+    for (source_id, source_file, file, position) in callable_symbols {
         let items = match timeout(
             Duration::from_secs(2),
             analyzer.prepare_call_hierarchy(&file, position.line, position.character),
@@ -1075,10 +1076,20 @@ async fn enrich_semantic_call_edges(
                 insert_semantic_call_edge(
                     snapshot,
                     &symbol_index,
-                    &source_id,
-                    &target_path,
-                    call.to.selection_range.start.line,
-                    call.to.selection_range.start.character,
+                    SemanticCallEdgeInput {
+                        source_id: &source_id,
+                        source_file: &source_file,
+                        target_path: &target_path,
+                        target_line: call.to.selection_range.start.line,
+                        target_character: call.to.selection_range.start.character,
+                        matched_symbol: call.to.name.as_str(),
+                        source_range: call.from_ranges.first().map(|range| {
+                            (
+                                (range.start.line + 1, range.start.character + 1),
+                                (range.end.line + 1, range.end.character + 1),
+                            )
+                        }),
+                    },
                 );
             }
         }
@@ -1109,13 +1120,14 @@ async fn enrich_semantic_call_edges_for_files(
         .map(|symbol| {
             (
                 symbol.node_id.clone(),
+                symbol.file.clone(),
                 project_root.join(&symbol.file),
                 symbol.selection_range.start,
             )
         })
         .collect::<Vec<_>>();
 
-    for (source_id, file, position) in callable_symbols {
+    for (source_id, source_file, file, position) in callable_symbols {
         let items = match timeout(
             Duration::from_secs(2),
             analyzer.prepare_call_hierarchy(&file, position.line, position.character),
@@ -1141,36 +1153,93 @@ async fn enrich_semantic_call_edges_for_files(
                 insert_semantic_call_edge(
                     snapshot,
                     &symbol_index,
-                    &source_id,
-                    &target_path,
-                    call.to.selection_range.start.line,
-                    call.to.selection_range.start.character,
+                    SemanticCallEdgeInput {
+                        source_id: &source_id,
+                        source_file: &source_file,
+                        target_path: &target_path,
+                        target_line: call.to.selection_range.start.line,
+                        target_character: call.to.selection_range.start.character,
+                        matched_symbol: call.to.name.as_str(),
+                        source_range: call.from_ranges.first().map(|range| {
+                            (
+                                (range.start.line + 1, range.start.character + 1),
+                                (range.end.line + 1, range.end.character + 1),
+                            )
+                        }),
+                    },
                 );
             }
         }
     }
 }
 
+struct SemanticCallEdgeInput<'a> {
+    source_id: &'a str,
+    source_file: &'a str,
+    target_path: &'a Path,
+    target_line: u32,
+    target_character: u32,
+    matched_symbol: &'a str,
+    source_range: Option<((u32, u32), (u32, u32))>,
+}
+
 fn insert_semantic_call_edge(
     snapshot: &mut GraphSnapshot,
     symbol_index: &SymbolIndex,
-    source_id: &str,
-    target_path: &Path,
-    line: u32,
-    character: u32,
+    input: SemanticCallEdgeInput<'_>,
 ) -> bool {
-    let Some(target) = symbol_index.find_by_uri_path_position(target_path, line, character) else {
+    let Some(target) = symbol_index.find_by_uri_path_position(
+        input.target_path,
+        input.target_line,
+        input.target_character,
+    ) else {
         return false;
     };
-    push_unique_edge_with_confidence(
+    push_unique_edge_with_evidence(
         &mut snapshot.edges,
         &HashSet::new(),
         EdgeType::Calls,
-        source_id,
+        input.source_id,
         &target.node_id,
         EdgeConfidence::Semantic,
+        semantic_call_evidence(
+            input.source_file,
+            input.source_range,
+            input.matched_symbol,
+            "rust-analyzer",
+            format!(
+                "rust-analyzer call hierarchy resolved outgoing call to `{}`",
+                target.label
+            ),
+        ),
     );
     true
+}
+
+fn semantic_call_evidence(
+    source_file: &str,
+    source_range: Option<((u32, u32), (u32, u32))>,
+    matched_symbol: &str,
+    analyzer_engine: &str,
+    confidence_reason: impl AsRef<str>,
+) -> String {
+    if let Some(range) = source_range {
+        edge_evidence_range(
+            source_file,
+            range,
+            matched_symbol,
+            analyzer_engine,
+            confidence_reason,
+        )
+    } else {
+        edge_evidence_at(
+            source_file,
+            1,
+            matched_symbol,
+            analyzer_engine,
+            confidence_reason,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1349,10 +1418,15 @@ mod tests {
         assert!(insert_semantic_call_edge(
             &mut snapshot,
             &symbol_index,
-            &source.id,
-            Path::new("/tmp/project/src/main.rs"),
-            4,
-            0,
+            SemanticCallEdgeInput {
+                source_id: &source.id,
+                source_file: "src/main.rs",
+                target_path: Path::new("/tmp/project/src/main.rs"),
+                target_line: 4,
+                target_character: 0,
+                matched_symbol: "target",
+                source_range: Some(((4, 5), (4, 13))),
+            },
         ));
         let edge = snapshot
             .edges
@@ -1360,6 +1434,11 @@ mod tests {
             .find(|edge| edge.source == source.id && edge.target == target.id)
             .unwrap();
         assert_eq!(edge.confidence, EdgeConfidence::Semantic);
+        assert!(edge.evidence.as_deref().is_some_and(|evidence| {
+            evidence.contains("src/main.rs:L4:C5-L4:C13")
+                && evidence.contains("analyzer engine: rust-analyzer")
+                && evidence.contains("target")
+        }));
     }
 
     #[test]

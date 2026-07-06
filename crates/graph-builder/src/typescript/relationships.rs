@@ -9,8 +9,9 @@ use super::imports::add_ts_import_edges;
 use super::parser::{node_text, parse_ts_tree};
 use super::{TsFile, TsSymbol};
 use crate::{
-    brace_delta, contains_call, edge_with_confidence, file_id, push_unique_data_flow_edge,
-    push_unique_edge_with_confidence,
+    brace_delta, contains_call, edge_evidence_at, edge_evidence_range, edge_with_confidence,
+    file_id, push_unique_data_flow_edge, push_unique_edge_with_confidence,
+    push_unique_edge_with_evidence,
 };
 
 pub(super) fn enrich_ts_relationships(
@@ -116,12 +117,20 @@ pub(super) fn enrich_ts_relationships(
                 for (endpoint_id, confidence) in
                     endpoint_routes.matches(&api_call, EdgeConfidence::SyntaxFallback)
                 {
-                    snapshot.edges.push(edge_with_confidence(
+                    let mut edge = edge_with_confidence(
                         EdgeType::ApiCall,
                         source_id,
                         &endpoint_id,
                         confidence,
+                    );
+                    edge.evidence = Some(edge_evidence_at(
+                        &file.relative_path,
+                        line_no,
+                        line,
+                        "parser",
+                        api_call_match_reason(&api_call, confidence),
                     ));
+                    snapshot.edges.push(edge);
                 }
             }
 
@@ -262,13 +271,29 @@ fn collect_ts_ast_relationship_edges(
                 for (endpoint_id, confidence) in
                     endpoint_routes.matches(&api_call, EdgeConfidence::Semantic)
                 {
-                    push_unique_edge_with_confidence(
+                    push_unique_edge_with_evidence(
                         edges,
                         existing_edges,
                         EdgeType::ApiCall,
                         source_id,
                         &endpoint_id,
                         confidence,
+                        edge_evidence_range(
+                            &file.relative_path,
+                            (
+                                (
+                                    node.start_position().row as u32 + 1,
+                                    node.start_position().column as u32 + 1,
+                                ),
+                                (
+                                    node.end_position().row as u32 + 1,
+                                    node.end_position().column as u32 + 1,
+                                ),
+                            ),
+                            &call_text,
+                            "typescript-language-server",
+                            api_call_match_reason(&api_call, confidence),
+                        ),
                     );
                     push_unique_data_flow_edge(
                         edges,
@@ -374,6 +399,30 @@ fn last_ts_identifier(callee: &str) -> String {
         .unwrap_or_default()
         .trim_start_matches('$')
         .to_string()
+}
+
+fn api_call_match_reason(
+    api_call: &super::api_calls::ApiCallTarget,
+    confidence: EdgeConfidence,
+) -> String {
+    match (api_call.method.as_deref(), confidence) {
+        (Some(method), EdgeConfidence::Semantic | EdgeConfidence::SyntaxFallback) => {
+            format!(
+                "frontend API call matched backend route `{method} {}`",
+                api_call.path
+            )
+        }
+        (Some(method), _) => {
+            format!(
+                "frontend API call `{method} {}` used route/path fallback",
+                api_call.path
+            )
+        }
+        (None, _) => format!(
+            "frontend API call path `{}` matched backend route by path fallback",
+            api_call.path
+        ),
+    }
 }
 
 fn contains_jsx_tag(line: &str, name: &str) -> bool {

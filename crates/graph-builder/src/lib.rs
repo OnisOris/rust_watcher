@@ -531,7 +531,14 @@ fn enrich_syntax_relationships(snapshot: &mut GraphSnapshot, files: &[IndexedFil
 
             if !is_function_declaration {
                 if let Some(source_id) = &current_fn {
-                    add_function_relationships(&node_index, &mut new_edges, source_id, line);
+                    add_function_relationships(
+                        &node_index,
+                        &mut new_edges,
+                        source_id,
+                        file,
+                        line_idx as u32 + 1,
+                        line,
+                    );
                 }
             }
 
@@ -619,7 +626,23 @@ fn enrich_api_routes(snapshot: &mut GraphSnapshot, files: &[IndexedFile]) -> usi
                 });
                 new_edges.push(edge(EdgeType::Contains, &file_node_id, &id));
                 if let Some(handler_node) = node_index.best_route_handler(&handler, file) {
-                    new_edges.push(edge(EdgeType::EndpointHandler, &id, &handler_node.id));
+                    new_edges.push(edge_with_confidence_and_evidence(
+                        EdgeType::EndpointHandler,
+                        &id,
+                        &handler_node.id,
+                        EdgeConfidence::Exact,
+                        Some(edge_evidence_at(
+                            &file.relative_path,
+                            line_no,
+                            raw_line.trim(),
+                            "parser",
+                            format!(
+                                "route declaration maps {} {} to handler `{handler}`",
+                                method.to_ascii_uppercase(),
+                                path
+                            ),
+                        )),
+                    ));
                     push_unique_data_flow_edge(
                         &mut new_edges,
                         &existing_edge_ids,
@@ -1030,6 +1053,8 @@ fn add_function_relationships(
     index: &SyntaxNodeIndex,
     edges: &mut Vec<GraphEdge>,
     source_id: &str,
+    file: &IndexedFile,
+    line_no: u32,
     line: &str,
 ) {
     let Some(source_node) = index.node(source_id) else {
@@ -1042,12 +1067,23 @@ fn add_function_relationships(
         if contains_call(line, &target.label)
             && function_call_candidate_allowed(index, source_node, target)
         {
-            push_unique_edge(
+            push_unique_edge_with_evidence(
                 edges,
                 &HashSet::new(),
                 EdgeType::Calls,
                 source_id,
                 &target.id,
+                EdgeConfidence::SyntaxFallback,
+                edge_evidence_at(
+                    &file.relative_path,
+                    line_no,
+                    line,
+                    "parser",
+                    format!(
+                        "line-based Rust parser matched call expression for function `{}`",
+                        target.label
+                    ),
+                ),
             );
         }
     }
@@ -1055,12 +1091,23 @@ fn add_function_relationships(
     for target in index.symbols_of_type(NodeType::Method) {
         let method_name = target.label.rsplit("::").next().unwrap_or(&target.label);
         if method_call_matches(index, source_node, target, method_name, line) {
-            push_unique_edge(
+            push_unique_edge_with_evidence(
                 edges,
                 &HashSet::new(),
                 EdgeType::Calls,
                 source_id,
                 &target.id,
+                EdgeConfidence::SyntaxFallback,
+                edge_evidence_at(
+                    &file.relative_path,
+                    line_no,
+                    line,
+                    "parser",
+                    format!(
+                        "line-based Rust parser matched method call `{method_name}` for `{}`",
+                        target.label
+                    ),
+                ),
             );
         }
     }
@@ -1129,9 +1176,52 @@ pub fn push_unique_edge_with_confidence(
     target: &str,
     confidence: EdgeConfidence,
 ) {
+    push_unique_edge_with_optional_evidence(
+        edges,
+        existing_edges,
+        edge_type,
+        source,
+        target,
+        confidence,
+        None,
+    );
+}
+
+pub fn push_unique_edge_with_evidence(
+    edges: &mut Vec<GraphEdge>,
+    existing_edges: &HashSet<String>,
+    edge_type: EdgeType,
+    source: &str,
+    target: &str,
+    confidence: EdgeConfidence,
+    evidence: impl Into<String>,
+) {
+    push_unique_edge_with_optional_evidence(
+        edges,
+        existing_edges,
+        edge_type,
+        source,
+        target,
+        confidence,
+        Some(evidence.into()),
+    );
+}
+
+fn push_unique_edge_with_optional_evidence(
+    edges: &mut Vec<GraphEdge>,
+    existing_edges: &HashSet<String>,
+    edge_type: EdgeType,
+    source: &str,
+    target: &str,
+    confidence: EdgeConfidence,
+    evidence: Option<String>,
+) {
     let id = edge_id(edge_type, source, target);
     if let Some(edge) = edges.iter_mut().find(|edge| edge.id == id) {
         edge.confidence = strongest_confidence(edge.confidence, confidence);
+        if edge.evidence.is_none() {
+            edge.evidence = evidence.filter(|evidence| !evidence.is_empty());
+        }
         return;
     }
     if existing_edges.contains(&id) {
@@ -1146,7 +1236,7 @@ pub fn push_unique_edge_with_confidence(
         label: None,
         description: None,
         data_flow_kind: None,
-        evidence: None,
+        evidence: evidence.filter(|evidence| !evidence.is_empty()),
     });
 }
 
@@ -1615,6 +1705,16 @@ fn edge_with_confidence(
     target: &str,
     confidence: EdgeConfidence,
 ) -> GraphEdge {
+    edge_with_confidence_and_evidence(edge_type, source, target, confidence, None)
+}
+
+fn edge_with_confidence_and_evidence(
+    edge_type: EdgeType,
+    source: &str,
+    target: &str,
+    confidence: EdgeConfidence,
+    evidence: Option<String>,
+) -> GraphEdge {
     GraphEdge {
         id: edge_id(edge_type, source, target),
         source: source.to_string(),
@@ -1624,7 +1724,61 @@ fn edge_with_confidence(
         label: None,
         description: None,
         data_flow_kind: None,
-        evidence: None,
+        evidence: evidence.filter(|evidence| !evidence.is_empty()),
+    }
+}
+
+pub fn edge_evidence_at(
+    file: &str,
+    line: u32,
+    matched_text: impl AsRef<str>,
+    analyzer_engine: &str,
+    confidence_reason: impl AsRef<str>,
+) -> String {
+    edge_evidence(
+        format!("{file}:L{line}"),
+        matched_text.as_ref(),
+        analyzer_engine,
+        confidence_reason.as_ref(),
+    )
+}
+
+pub fn edge_evidence_range(
+    file: &str,
+    range: ((u32, u32), (u32, u32)),
+    matched_text: impl AsRef<str>,
+    analyzer_engine: &str,
+    confidence_reason: impl AsRef<str>,
+) -> String {
+    let ((start_line, start_character), (end_line, end_character)) = range;
+    edge_evidence(
+        format!("{file}:L{start_line}:C{start_character}-L{end_line}:C{end_character}"),
+        matched_text.as_ref(),
+        analyzer_engine,
+        confidence_reason.as_ref(),
+    )
+}
+
+fn edge_evidence(
+    source_range: String,
+    matched_text: &str,
+    analyzer_engine: &str,
+    confidence_reason: &str,
+) -> String {
+    format!(
+        "source file/range: {source_range}; matched text or symbol: `{}`; analyzer engine: {analyzer_engine}; confidence reason: {}",
+        compact_evidence_text(matched_text),
+        compact_evidence_text(confidence_reason)
+    )
+}
+
+fn compact_evidence_text(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_LEN: usize = 220;
+    if compact.len() <= MAX_LEN {
+        compact
+    } else {
+        format!("{}...", compact.chars().take(MAX_LEN).collect::<String>())
     }
 }
 
@@ -2156,10 +2310,35 @@ export function App() {
                 && edge.source == component.id
                 && edge.target == endpoint.id
         }));
-        assert!(snapshot.edges.iter().any(|edge| {
-            edge.edge_type == EdgeType::EndpointHandler
-                && edge.source == endpoint.id
-                && edge.target == handler.id
+        let api_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.edge_type == EdgeType::ApiCall
+                    && edge.source == component.id
+                    && edge.target == endpoint.id
+            })
+            .expect("frontend API call edge");
+        assert!(api_edge.evidence.as_deref().is_some_and(|evidence| {
+            evidence.contains("frontend/src/App.tsx")
+                && evidence.contains("fetch(\"/api/health\")")
+                && evidence.contains("analyzer engine: typescript-language-server")
+                && evidence.contains("matched backend route `GET /api/health`")
+        }));
+        let handler_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.edge_type == EdgeType::EndpointHandler
+                    && edge.source == endpoint.id
+                    && edge.target == handler.id
+            })
+            .expect("endpoint handler edge");
+        assert!(handler_edge.evidence.as_deref().is_some_and(|evidence| {
+            evidence.contains("src/main.rs")
+                && evidence.contains("app.route")
+                && evidence.contains("analyzer engine: parser")
+                && evidence.contains("maps GET /api/health to handler `health`")
         }));
         assert!(snapshot.edges.iter().any(|edge| {
             edge.edge_type == EdgeType::DataFlow
@@ -2181,6 +2360,54 @@ export function App() {
             .edges
             .iter()
             .any(|edge| edge.edge_type == EdgeType::EndpointHandler));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rust_call_edges_include_parser_evidence() {
+        let root =
+            std::env::temp_dir().join(format!("rust-watcher-call-evidence-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"call_evidence_demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn service() {}\nfn handler() {\n    service();\n}\n",
+        )
+        .unwrap();
+
+        let index = project_indexer::index_project(&root).unwrap();
+        let snapshot = build_fallback_graph(&index, test_status());
+        let handler = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "handler")
+            .unwrap();
+        let service = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.node_type == NodeType::Function && node.label == "service")
+            .unwrap();
+        let call_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.edge_type == EdgeType::Calls
+                    && edge.source == handler.id
+                    && edge.target == service.id
+            })
+            .expect("Rust call edge");
+
+        assert!(call_edge.evidence.as_deref().is_some_and(|evidence| {
+            evidence.contains("source file/range: src/main.rs:L3")
+                && evidence.contains("matched text or symbol: `service();`")
+                && evidence.contains("analyzer engine: parser")
+                && evidence.contains("matched call expression for function `service`")
+        }));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2566,6 +2793,22 @@ export type UserId = User['id']
                 && edge.source == get_users.id
                 && edge.target == endpoint.id
                 && edge.confidence == EdgeConfidence::Semantic
+        }));
+        let api_edge = snapshot
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.edge_type == EdgeType::ApiCall
+                    && edge.source == get_users.id
+                    && edge.target == endpoint.id
+                    && edge.confidence == EdgeConfidence::Semantic
+            })
+            .expect("direct TS API route edge");
+        assert!(api_edge.evidence.as_deref().is_some_and(|evidence| {
+            evidence.contains("frontend/src/api.ts")
+                && evidence.contains("fetch('/api/users')")
+                && evidence.contains("analyzer engine: typescript-language-server")
+                && evidence.contains("matched backend route `GET /api/users`")
         }));
         assert!(snapshot.edges.iter().any(|edge| {
             edge.edge_type == EdgeType::ApiCall
