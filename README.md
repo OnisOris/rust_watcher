@@ -37,6 +37,10 @@ files: Rust for `Cargo.toml` or `.rs`, Python `ty` for `.py`, TypeScript languag
 `.ts`/`.tsx`/`.js`/`.jsx` or `package.json`/`tsconfig.json`, and `qmlls` for `.qml`. Missing optional
 cloud analyzers report fallback status instead of failing the job.
 
+The cloud analyze API accepts `incremental=true` for workspace revisions, but true incremental graph
+updates are not implemented yet. Incremental requests currently compute changed files and then report
+`analysisMode: "fallback-full"` with a `fallbackReason` while running a full analysis.
+
 Rust:
 
 - Required for semantic Rust symbols, diagnostics, call hierarchy, references, definitions, and type definitions: `rust-analyzer`

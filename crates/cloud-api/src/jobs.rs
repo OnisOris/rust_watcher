@@ -18,7 +18,7 @@ use crate::auth::{require_cloud_auth, require_cloud_session_token, require_inter
 use crate::errors::ApiError;
 use crate::scheduler::{
     cloud_status_name, is_terminal, parser_analyzer_statuses, requests_rust_analyzer,
-    rust_analyzer_status,
+    rust_analyzer_status, INCREMENTAL_FALLBACK_REASON,
 };
 use crate::state::{CloudApiState, CloudEvent, JobRevisionTarget};
 use crate::workspaces::{
@@ -61,6 +61,8 @@ pub(crate) struct CloudJobResponse {
     pub(crate) message: Option<String>,
     pub(crate) progress: Option<f32>,
     pub(crate) analysis_mode: AnalysisMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fallback_reason: Option<String>,
     pub(crate) created_at: Option<String>,
     pub(crate) updated_at: Option<String>,
     pub(crate) credits_estimated: Option<u32>,
@@ -690,6 +692,8 @@ pub(crate) fn cloud_job_response(state: &CloudApiState, job: AnalysisJob) -> Clo
         message: job.error.clone().or(job.message),
         progress: job.progress.map(|progress| f32::from(progress) / 100.0),
         analysis_mode: job.analysis_mode,
+        fallback_reason: (job.analysis_mode == AnalysisMode::FallbackFull)
+            .then(|| INCREMENTAL_FALLBACK_REASON.to_string()),
         created_at: job.created_at,
         updated_at,
         credits_estimated: job.credits_estimated,

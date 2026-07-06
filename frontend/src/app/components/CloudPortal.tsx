@@ -27,6 +27,8 @@ interface CloudJob {
   message?: string
   progress?: number
   creditsUsed?: number
+  analysisMode?: 'full' | 'incremental' | 'fallback-full'
+  fallbackReason?: string
 }
 
 type CloudJobStatus = 'creating' | 'queued' | 'importing' | 'indexing' | 'analyzing' | 'buildingGraph' | 'completed' | 'failed' | 'cancelled'
@@ -262,7 +264,9 @@ export function CloudPortal({ sessionToken, username, activeTab, graphEnabled = 
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 740 }}>{job.jobId === 'creating' ? 'Preparing analysis' : `Job ${job.jobId.slice(0, 8)}`}</div>
-                      <div style={{ fontSize: 12, color: statusColor(job.status), marginTop: 4 }}>{job.message ?? statusLabel(job.status)}</div>
+                      <div style={{ fontSize: 12, color: statusColor(job.status), marginTop: 4 }}>
+                        {job.analysisMode === 'fallback-full' ? `Fallback full: ${job.fallbackReason ?? job.message ?? statusLabel(job.status)}` : job.message ?? statusLabel(job.status)}
+                      </div>
                     </div>
                     {job.status === 'completed' && job.workspaceId && (
                       <button onClick={() => onWorkspaceReady(job.workspaceId!)} style={{ ...primaryButtonStyle, marginTop: 0 }}>Open graph</button>
@@ -364,6 +368,8 @@ function normalizeCloudJob(payload: any): CloudJob {
     message: payload.message ?? statusLabel(status),
     progress,
     creditsUsed: payload.creditsUsed,
+    analysisMode: payload.analysisMode,
+    fallbackReason: payload.fallbackReason,
   }
 }
 

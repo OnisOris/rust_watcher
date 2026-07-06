@@ -24,6 +24,9 @@ use crate::state::{
 };
 use crate::workspaces::{materialize_revision, timestamp};
 
+pub(crate) const INCREMENTAL_FALLBACK_REASON: &str =
+    "Incremental cloud analysis is not implemented yet; falling back to full analysis";
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JobSchedulerConfig {
     pub(crate) max_concurrent_jobs: usize,
@@ -238,7 +241,7 @@ pub(crate) async fn execute_cloud_analysis_job(
         match analysis_mode {
             AnalysisMode::Full => "Preparing cloud analysis",
             AnalysisMode::Incremental => "Preparing incremental cloud analysis",
-            AnalysisMode::FallbackFull => "Preparing full cloud analysis fallback",
+            AnalysisMode::FallbackFull => INCREMENTAL_FALLBACK_REASON,
         },
         Some(10),
     );

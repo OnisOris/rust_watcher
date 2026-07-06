@@ -20,11 +20,12 @@ use crate::auth::{
 use crate::errors::ApiError;
 use crate::ide::SaveWorkspaceFileRequest;
 use crate::jobs::{
-    cancel_job, cloud_analyze_workspace, cloud_event_visible_to_user, cloud_usage_response,
-    create_job, get_job_usage, usage_summary, CloudAnalyzeWorkspaceRequest,
+    cancel_job, cloud_analyze_workspace, cloud_event_visible_to_user, cloud_job_response,
+    cloud_usage_response, create_job, get_job_usage, usage_summary, CloudAnalyzeWorkspaceRequest,
 };
 use crate::scheduler::{
     requests_rust_analyzer, run_one_queued_job, run_parser_cloud_analysis, JobSchedulerConfig,
+    INCREMENTAL_FALLBACK_REASON,
 };
 use crate::state::{
     AuthSession, CloudAnalysisConfig, CloudApiState, CloudEvent, CloudLimits, JobRevisionTarget,
@@ -1082,6 +1083,12 @@ async fn incremental_workspace_analysis_falls_back_to_full_when_fast_path_unavai
 
     let completed = state.get_job(&job.id).unwrap();
     assert_eq!(completed.analysis_mode, AnalysisMode::FallbackFull);
+    let completed_response = cloud_job_response(&state, completed);
+    assert_eq!(completed_response.analysis_mode, AnalysisMode::FallbackFull);
+    assert_eq!(
+        completed_response.fallback_reason.as_deref(),
+        Some(INCREMENTAL_FALLBACK_REASON)
+    );
     assert_eq!(
         state
             .get_job_revision_target(&job.id)
