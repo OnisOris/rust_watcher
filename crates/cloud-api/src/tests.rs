@@ -827,6 +827,69 @@ async fn optional_cloud_analyzers_fallback_without_failing_job() {
 }
 
 #[tokio::test]
+async fn parser_analysis_cache_reuses_unchanged_file_between_revisions() {
+    let state = test_state();
+    let workspace = state.create_workspace(workspace_request());
+    let content = b"def value():\n    return 1\n";
+    let file = file_entry_at("app/main.py", content);
+    state
+        .upload_blob(&workspace.id, &file.content_hash, content)
+        .unwrap();
+    let first_revision = state
+        .create_revision(
+            &workspace.id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: None,
+                files: vec![file.clone()],
+            },
+        )
+        .unwrap()
+        .revision;
+    let first_job = state
+        .create_job(workspace_job_request(&workspace, &first_revision))
+        .unwrap();
+
+    run_parser_cloud_analysis(state.clone(), first_job.id.clone()).await;
+
+    assert_eq!(
+        state.file_analysis_cache.read().last_metrics,
+        crate::state::FileAnalysisCacheMetrics {
+            hits: 0,
+            misses: 1,
+            reused_files: 0,
+        }
+    );
+    let second_revision = state
+        .create_revision(
+            &workspace.id,
+            CreateWorkspaceRevisionRequest {
+                base_revision: Some(first_revision.id),
+                files: vec![file],
+            },
+        )
+        .unwrap()
+        .revision;
+    let second_job = state
+        .create_job(workspace_job_request(&workspace, &second_revision))
+        .unwrap();
+
+    run_parser_cloud_analysis(state.clone(), second_job.id.clone()).await;
+
+    assert_eq!(
+        state.file_analysis_cache.read().last_metrics,
+        crate::state::FileAnalysisCacheMetrics {
+            hits: 1,
+            misses: 0,
+            reused_files: 1,
+        }
+    );
+    assert_eq!(
+        state.get_job(&second_job.id).unwrap().status,
+        AnalysisJobStatus::Completed
+    );
+}
+
+#[tokio::test]
 async fn incremental_workspace_analysis_falls_back_to_full_when_fast_path_unavailable() {
     let state = test_state();
     let (workspace, base_revision) = create_rust_revision(&state);

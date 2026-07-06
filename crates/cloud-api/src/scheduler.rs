@@ -2,7 +2,7 @@ use anyhow::Result;
 use graph_core::{
     estimate_cloud_analysis_credits, AnalysisJob, AnalysisJobStatus, AnalysisMode,
     AnalyzerCapability, AnalyzerEngine, AnalyzerKind, AnalyzerProvider, AnalyzerServiceStatus,
-    AnalyzerStatus, AppState, AppStatus, CloudAnalysisUsage, GraphSnapshot,
+    AnalyzerStatus, AppState, AppStatus, CloudAnalysisUsage, GraphSnapshot, WorkspaceRevision,
 };
 use parking_lot::RwLock;
 use project_indexer::ProjectIndex;
@@ -13,11 +13,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::errors::ApiError;
 use crate::jobs::AnalysisQueueStatusResponse;
-use crate::state::{CloudAnalysisResult, CloudApiState, JobRevisionTarget};
+use crate::state::{
+    CachedParserSnapshot, CloudAnalysisResult, CloudApiState, FileAnalysisCacheEntry,
+    FileAnalysisCacheKey, FileAnalysisCacheMetrics, JobRevisionTarget, ParserSnapshotCacheFileKey,
+    ParserSnapshotCacheKey,
+};
 use crate::workspaces::{materialize_revision, timestamp};
 
 #[derive(Debug, Clone, Copy)]
@@ -249,7 +253,8 @@ pub(crate) async fn execute_cloud_analysis_job(
         Some(35),
     );
     let graph_build_start = Instant::now();
-    let (mut snapshot, project_index) = build_initial_snapshot(&project_root);
+    let (mut snapshot, project_index) =
+        build_cached_initial_snapshot(&state, &job_id, &project_root, &revision);
     let rust_analyzer_requested = requested_analyzers.contains(&AnalyzerEngine::RustAnalyzer);
     if rust_analyzer_requested
         && state.analysis_config.rust_analyzer.is_absolute()
@@ -464,6 +469,118 @@ pub(crate) fn build_initial_snapshot(project_root: &Path) -> (GraphSnapshot, Opt
         graph_builder::build_language_graph(project_root, status),
         None,
     )
+}
+const PARSER_ANALYSIS_CACHE_VERSION: &str = "cloud-parser-v1";
+
+pub(crate) fn build_cached_initial_snapshot(
+    state: &CloudApiState,
+    job_id: &str,
+    project_root: &Path,
+    revision: &WorkspaceRevision,
+) -> (GraphSnapshot, Option<ProjectIndex>) {
+    let snapshot_key = parser_snapshot_cache_key(revision);
+    let total_files = snapshot_key.files.len();
+    let mut metrics = {
+        let cache = state.file_analysis_cache.read();
+        let hits = snapshot_key
+            .files
+            .iter()
+            .filter(|file| {
+                cache
+                    .entries
+                    .get(&file.key)
+                    .is_some_and(|entry| entry.last_path == file.path)
+            })
+            .count();
+        FileAnalysisCacheMetrics {
+            hits,
+            misses: total_files.saturating_sub(hits),
+            reused_files: 0,
+        }
+    };
+    let cached_snapshot = {
+        let cache = state.file_analysis_cache.read();
+        cache
+            .parser_snapshots
+            .get(&snapshot_key)
+            .map(|cached| cached.snapshot.clone())
+    };
+    if let Some(mut snapshot) = cached_snapshot {
+        metrics.reused_files = total_files;
+        state.file_analysis_cache.write().last_metrics = metrics.clone();
+        refresh_cached_snapshot_status(&mut snapshot, project_root);
+        info!(
+            job_id = %job_id,
+            cache_hits = metrics.hits,
+            cache_misses = metrics.misses,
+            reused_files_count = metrics.reused_files,
+            "cloud parser analysis cache hit"
+        );
+        return (snapshot, index_project_if_available(project_root));
+    }
+
+    info!(
+        job_id = %job_id,
+        cache_hits = metrics.hits,
+        cache_misses = metrics.misses,
+        reused_files_count = metrics.reused_files,
+        "cloud parser analysis cache miss"
+    );
+    let (snapshot, project_index) = build_initial_snapshot(project_root);
+    {
+        let mut cache = state.file_analysis_cache.write();
+        for file in &snapshot_key.files {
+            cache.entries.insert(
+                file.key.clone(),
+                FileAnalysisCacheEntry {
+                    last_path: file.path.clone(),
+                },
+            );
+        }
+        cache.parser_snapshots.insert(
+            snapshot_key,
+            CachedParserSnapshot {
+                snapshot: snapshot.clone(),
+            },
+        );
+        cache.last_metrics = metrics;
+    }
+    (snapshot, project_index)
+}
+
+fn parser_snapshot_cache_key(revision: &WorkspaceRevision) -> ParserSnapshotCacheKey {
+    let mut files = revision
+        .files
+        .iter()
+        .map(|file| ParserSnapshotCacheFileKey {
+            path: file.path.clone(),
+            key: FileAnalysisCacheKey {
+                content_hash: file.content_hash.clone(),
+                language: file.language.as_ref().map(ToString::to_string),
+                analyzer_engine: AnalyzerEngine::Parser,
+                analyzer_config_hash: parser_analyzer_config_hash(),
+            },
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    ParserSnapshotCacheKey { files }
+}
+
+fn parser_analyzer_config_hash() -> String {
+    PARSER_ANALYSIS_CACHE_VERSION.to_string()
+}
+
+fn refresh_cached_snapshot_status(snapshot: &mut GraphSnapshot, project_root: &Path) {
+    snapshot.status.project_path = Some(project_root.display().to_string());
+    snapshot.status.last_updated = Some(timestamp());
+}
+
+fn index_project_if_available(project_root: &Path) -> Option<ProjectIndex> {
+    if project_root.join("Cargo.toml").is_file() {
+        project_indexer::index_project(project_root).ok()
+    } else {
+        None
+    }
 }
 pub(crate) async fn enrich_with_cloud_rust_analyzer(
     state: &CloudApiState,

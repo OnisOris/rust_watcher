@@ -1,7 +1,7 @@
 use anyhow::Result;
 use graph_core::{
-    AnalysisJob, CloudAnalysisUsage, CloudWorkspace, GraphSnapshot, WorkspaceFileEntry,
-    WorkspaceRevision,
+    AnalysisJob, AnalyzerEngine, CloudAnalysisUsage, CloudWorkspace, GraphSnapshot,
+    WorkspaceFileEntry, WorkspaceRevision,
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,7 @@ pub(crate) struct CloudApiState {
     pub(crate) ws_tx: broadcast::Sender<CloudEvent>,
     pub(crate) scheduler: JobScheduler,
     pub(crate) store: Arc<CloudMetadataStore>,
+    pub(crate) file_analysis_cache: Arc<RwLock<FileAnalysisCache>>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct CloudAnalysisConfig {
@@ -109,6 +110,42 @@ pub(crate) struct CloudAnalysisResult {
     pub snapshot: GraphSnapshot,
     pub created_at: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FileAnalysisCacheKey {
+    pub(crate) content_hash: String,
+    pub(crate) language: Option<String>,
+    pub(crate) analyzer_engine: AnalyzerEngine,
+    pub(crate) analyzer_config_hash: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ParserSnapshotCacheFileKey {
+    pub(crate) path: String,
+    pub(crate) key: FileAnalysisCacheKey,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ParserSnapshotCacheKey {
+    pub(crate) files: Vec<ParserSnapshotCacheFileKey>,
+}
+#[derive(Debug, Clone)]
+pub(crate) struct FileAnalysisCacheEntry {
+    pub(crate) last_path: String,
+}
+#[derive(Debug, Clone)]
+pub(crate) struct CachedParserSnapshot {
+    pub(crate) snapshot: GraphSnapshot,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FileAnalysisCacheMetrics {
+    pub(crate) hits: usize,
+    pub(crate) misses: usize,
+    pub(crate) reused_files: usize,
+}
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileAnalysisCache {
+    pub(crate) entries: HashMap<FileAnalysisCacheKey, FileAnalysisCacheEntry>,
+    pub(crate) parser_snapshots: HashMap<ParserSnapshotCacheKey, CachedParserSnapshot>,
+    pub(crate) last_metrics: FileAnalysisCacheMetrics,
+}
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(crate) struct StoredBlob {
@@ -165,6 +202,7 @@ impl CloudApiState {
             ws_tx: broadcast::channel(128).0,
             scheduler: JobScheduler::new(scheduler_config),
             store: Arc::new(store),
+            file_analysis_cache: Arc::new(RwLock::new(FileAnalysisCache::default())),
         };
         state.requeue_persisted_jobs();
         Ok(state)
