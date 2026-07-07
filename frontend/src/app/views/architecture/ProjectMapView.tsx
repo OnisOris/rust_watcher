@@ -1,15 +1,20 @@
-import { Network } from 'lucide-react'
+import { Flame, Grid2X2, Network } from 'lucide-react'
 import { useMemo } from 'react'
 import type { GraphNode } from '../../types'
-import type { AggregatedProjectEdge, ProjectGroup, ProjectMapModel } from './architectureTypes'
+import type { AggregatedProjectEdge, ProjectGroup, ProjectMapGrouping, ProjectMapModel } from './architectureTypes'
 import { DiagramCanvas } from './DiagramCanvas'
 
 interface ProjectMapViewProps {
   model: ProjectMapModel
   nodes: GraphNode[]
   selectedNodeId: string | null
+  grouping: ProjectMapGrouping
+  onGroupingChange: (grouping: ProjectMapGrouping) => void
   onSelectGroup: (groupId: string) => void
   onSelectNode: (nodeId: string | null) => void
+  onOpenRawGraph?: () => void
+  onOpenMatrix?: () => void
+  onOpenHotspots?: () => void
 }
 
 const GROUP_COLORS: Record<string, { bg: string; border: string; text: string; accent: string }> = {
@@ -32,11 +37,30 @@ const GROUP_SLOTS: Record<string, { row: number; column: number }> = {
   unknown: { row: 2, column: 2 },
 }
 
-export function ProjectMapView({ model, nodes, selectedNodeId, onSelectGroup, onSelectNode }: ProjectMapViewProps) {
+const GROUPING_OPTIONS: Array<{ id: ProjectMapGrouping; label: string }> = [
+  { id: 'architecture', label: 'Architecture' },
+  { id: 'language', label: 'Language' },
+  { id: 'directory', label: 'Directory' },
+  { id: 'module', label: 'Module' },
+  { id: 'runtime', label: 'Runtime' },
+]
+
+export function ProjectMapView({
+  model,
+  nodes,
+  selectedNodeId,
+  grouping,
+  onGroupingChange,
+  onSelectGroup,
+  onSelectNode,
+  onOpenRawGraph,
+  onOpenMatrix,
+  onOpenHotspots,
+}: ProjectMapViewProps) {
   const byId = useMemo(() => new Map(nodes.map(node => [node.id, node])), [nodes])
-  const positionedGroups = model.groups.filter(group => GROUP_SLOTS[group.id])
+  const positionedGroups = model.groups
   const positionedIds = new Set(positionedGroups.map(group => group.id))
-  const layouts = useMemo(() => buildGroupLayouts(positionedGroups, byId), [positionedGroups, byId])
+  const layouts = useMemo(() => buildGroupLayouts(positionedGroups, byId, model.grouping), [positionedGroups, byId, model.grouping])
   const canvas = useMemo(() => ({
     width: Math.max(1320, Math.max(...layouts.map(layout => layout.x + layout.w), 0) + 96),
     height: Math.max(900, Math.max(...layouts.map(layout => layout.y + layout.h), 0) + 96),
@@ -63,6 +87,23 @@ export function ProjectMapView({ model, nodes, selectedNodeId, onSelectGroup, on
         <span style={{ fontSize: 11, color: 'var(--cc-text-subtle)' }}>
           {nodes.length} nodes grouped into {model.groups.length} areas · {model.edges.length} cross-area links
         </span>
+        <span
+          className="arch-badge"
+          title="Shows project-level containers/components and aggregated relationships. Use Module and Neighborhood views for code-level details."
+        >
+          C4-inspired architecture map
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          {GROUPING_OPTIONS.map(option => (
+            <button
+              key={option.id}
+              className={`arch-segment ${grouping === option.id ? 'arch-segment-active' : ''}`}
+              onClick={() => onGroupingChange(option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <DiagramCanvas width={canvas.width} height={canvas.height} initialZoom={0.92}>
@@ -84,7 +125,15 @@ export function ProjectMapView({ model, nodes, selectedNodeId, onSelectGroup, on
               const isSelected = group.nodeIds.includes(selectedNodeId ?? '')
               const hiddenSymbolCount = Math.max(0, layout.symbols.length - layout.visibleSymbols.length)
               return (
-                <g key={group.id} role="button" tabIndex={0} data-no-pan="true" onClick={() => onSelectGroup(group.id)} style={{ cursor: 'pointer' }}>
+                <g
+                  key={group.id}
+                  role="button"
+                  tabIndex={0}
+                  data-no-pan="true"
+                  onClick={() => onSelectGroup(group.id)}
+                  onDoubleClick={() => onOpenRawGraph?.()}
+                  style={{ cursor: 'pointer' }}
+                >
                   <rect
                     x={layout.x}
                     y={layout.y}
@@ -101,6 +150,11 @@ export function ProjectMapView({ model, nodes, selectedNodeId, onSelectGroup, on
                       <div className="arch-map-card-meta">
                         {group.fileCount} files · {group.symbolCount} symbols · {group.incomingCount} in · {group.outgoingCount} out
                       </div>
+                      {!!Object.keys(group.languageBreakdown ?? {}).length && (
+                        <div className="arch-map-card-meta">
+                          {formatLanguageBreakdown(group.languageBreakdown)}
+                        </div>
+                      )}
                       {!!layout.children.length && (
                         <>
                           <div className="arch-map-section-label">Top directories/files</div>
@@ -109,6 +163,18 @@ export function ProjectMapView({ model, nodes, selectedNodeId, onSelectGroup, on
                               <div key={child.id} className="arch-map-chip">
                                 <span style={{ color: color.text }}>{child.label}</span>
                                 <span>{child.fileCount || child.symbolCount}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                      {!!layout.topFiles.length && (
+                        <>
+                          <div className="arch-map-section-label">{model.autoExpanded ? 'Inside this area' : 'Top files'}</div>
+                          <div className="arch-map-symbol-grid">
+                            {layout.topFiles.map(file => (
+                              <div key={file} className="arch-map-symbol" title={file}>
+                                <span>{shortPath(file)}</span>
                               </div>
                             ))}
                           </div>
@@ -133,6 +199,11 @@ export function ProjectMapView({ model, nodes, selectedNodeId, onSelectGroup, on
                           </div>
                         </>
                       )}
+                      <div className="flex gap-1 mt-2">
+                        <button className="arch-action" title="Open as Raw Graph" onClick={event => { event.stopPropagation(); onOpenRawGraph?.() }}><Network size={12} /></button>
+                        <button className="arch-action" title="Open Matrix for this group" onClick={event => { event.stopPropagation(); onOpenMatrix?.() }}><Grid2X2 size={12} /></button>
+                        <button className="arch-action" title="Open Hotspots for this group" onClick={event => { event.stopPropagation(); onOpenHotspots?.() }}><Flame size={12} /></button>
+                      </div>
                       {hiddenSymbolCount > 0 && (
                         <div className="arch-map-more">{hiddenSymbolCount} more symbols available in Module view</div>
                       )}
@@ -243,12 +314,12 @@ function ProjectEdge({ edge, index, layouts }: { edge: AggregatedProjectEdge; in
   const points = routeEdge(source, target, index)
   const path = points.map((point, pointIndex) => `${pointIndex === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
   const width = Math.min(8, 1 + Math.log(edge.count + 1))
-  const dominantType = Object.entries(edge.edgeTypes).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]?.[0] ?? 'deps'
-  const label = `${edge.count} ${dominantType}`
+  const label = formatEdgeLabel(edge)
   const labelWidth = Math.max(76, label.length * 6 + 18)
   const labelPoint = labelPointFor(points)
   return (
     <g>
+      <title>{edgeTooltip(edge, source.group.label, target.group.label)}</title>
       <path d={path} fill="none" stroke="var(--cc-text-subtle)" strokeWidth={width} opacity="0.38" markerEnd="url(#arch-arrow)" />
       <rect x={labelPoint.x - labelWidth / 2} y={labelPoint.y - 13} width={labelWidth} height="22" rx="6" fill="var(--cc-overlay)" stroke="var(--cc-border)" />
       <text x={labelPoint.x} y={labelPoint.y + 4} fill="var(--cc-text-muted)" fontSize="10" textAnchor="middle">
@@ -258,41 +329,101 @@ function ProjectEdge({ edge, index, layouts }: { edge: AggregatedProjectEdge; in
   )
 }
 
+function formatEdgeLabel(edge: AggregatedProjectEdge) {
+  const entries = Object.entries(edge.edgeTypes)
+    .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+    .sort((a, b) => b[1] - a[1])
+  if (!entries.length) return `${edge.count} relationships`
+  if (entries.length === 1) return `${edge.count} ${edgeTypeLabel(entries[0][0])}`
+  if (entries.length === 2) return entries.map(([type, count]) => `${count} ${edgeTypeLabel(type)}`).join(' · ')
+  const apiDataCount = (edge.edgeTypes.ApiCall ?? 0) + (edge.edgeTypes.DataFlow ?? 0)
+  if (apiDataCount === edge.count && apiDataCount > 0) return `${edge.count} API/Data`
+  return `${edge.count} relationships`
+}
+
+function edgeTooltip(edge: AggregatedProjectEdge, sourceLabel: string, targetLabel: string) {
+  const lines = [`${sourceLabel} -> ${targetLabel}`, `${edge.count} relationships`, '']
+  for (const [type, count] of Object.entries(edge.edgeTypes).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))) {
+    lines.push(`${type}: ${count}`)
+  }
+  if (edge.examples?.length) {
+    lines.push('', 'Top edges:')
+    for (const example of edge.examples.slice(0, 4)) {
+      lines.push(`- ${example.sourceLabel} -> ${example.targetLabel}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function edgeTypeLabel(type: string) {
+  if (type === 'ApiCall') return 'ApiCall'
+  if (type === 'DataFlow') return 'DataFlow'
+  if (type === 'TypeReference') return 'TypeRef'
+  return type
+}
+
+function formatLanguageBreakdown(breakdown?: Record<string, number>) {
+  return Object.entries(breakdown ?? {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 4)
+    .map(([language, count]) => `${language}: ${count}`)
+    .join(' · ')
+}
+
+function shortPath(path: string) {
+  const parts = path.split('/').filter(Boolean)
+  if (parts.length <= 2) return path
+  return parts.slice(-2).join('/')
+}
+
 interface GroupLayout extends Rect {
   group: ProjectGroup
   children: ProjectGroup[]
+  topFiles: string[]
   symbols: GraphNode[]
   visibleSymbols: GraphNode[]
 }
 
-function buildGroupLayouts(groups: ProjectGroup[], byId: Map<string, GraphNode>): GroupLayout[] {
+function buildGroupLayouts(groups: ProjectGroup[], byId: Map<string, GraphNode>, grouping: ProjectMapGrouping): GroupLayout[] {
   const roughLayouts = groups.map(group => {
     const children = group.children ?? []
+    const topFiles = (group.topFiles ?? []).slice(0, group.children?.length ? 4 : 6)
     const symbols = group.nodeIds
       .map(id => byId.get(id))
       .filter((node): node is GraphNode => Boolean(node))
       .filter(node => node.type !== 'File')
       .sort((a, b) => (b.connections ?? 0) - (a.connections ?? 0) || a.label.localeCompare(b.label))
-    const visibleSymbols = symbols.slice(0, 8)
-    const longestChild = Math.max(0, ...children.map(child => child.label.length))
+    const keySymbolIds = new Set(group.keySymbols ?? [])
+    const visibleSymbols = (keySymbolIds.size
+      ? symbols.filter(node => keySymbolIds.has(node.id))
+      : symbols).slice(0, 8)
+    const longestChild = Math.max(0, ...children.map(child => child.label.length), ...topFiles.map(file => shortPath(file).length))
     const longestSymbol = Math.max(0, ...visibleSymbols.map(node => node.label.length))
     const width = clamp(Math.max(longestChild, longestSymbol) * 8 + 210, minWidthFor(group), maxWidthFor(group))
     const chipColumns = width >= 390 ? 2 : 1
     const childRows = Math.ceil(children.length / chipColumns)
+    const fileRows = Math.ceil(topFiles.length / 2)
     const symbolRows = Math.ceil(visibleSymbols.length / 2)
     const height = 82
       + (children.length ? 24 + childRows * 34 : 0)
+      + (topFiles.length ? 24 + fileRows * 24 : 0)
       + (visibleSymbols.length ? 26 + symbolRows * 24 : 0)
+      + 34
       + (symbols.length > visibleSymbols.length ? 26 : 8)
     return {
       group,
       children,
+      topFiles,
       symbols,
       visibleSymbols,
       w: width,
       h: Math.max(minHeightFor(group), height),
     }
   })
+
+  if (grouping !== 'architecture' || roughLayouts.some(layout => !GROUP_SLOTS[layout.group.id])) {
+    return layoutInGrid(roughLayouts)
+  }
 
   const byIdLayout = new Map(roughLayouts.map(layout => [layout.group.id, layout]))
   const columnWidths = [0, 0, 0]
@@ -321,6 +452,36 @@ function buildGroupLayouts(groups: ProjectGroup[], byId: Map<string, GraphNode>)
       ...layout,
       x: columnX[slot.column] + Math.max(0, (columnWidths[slot.column] - layout.w) / 2),
       y: rowY[slot.row] + Math.max(0, (rowHeights[slot.row] - layout.h) / 2),
+    }
+  })
+}
+
+function layoutInGrid(layouts: Array<Omit<GroupLayout, 'x' | 'y'>>) {
+  const columns = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(layouts.length))))
+  const gapX = 130
+  const gapY = 110
+  const columnWidths = Array.from({ length: columns }, (_, column) =>
+    Math.max(280, ...layouts.filter((_, index) => index % columns === column).map(layout => layout.w)),
+  )
+  const rowCount = Math.ceil(layouts.length / columns)
+  const rowHeights = Array.from({ length: rowCount }, (_, row) =>
+    Math.max(160, ...layouts.slice(row * columns, row * columns + columns).map(layout => layout.h)),
+  )
+  const xOffsets = columnWidths.reduce<number[]>((offsets, width, index) => {
+    offsets[index] = index === 0 ? 80 : offsets[index - 1] + columnWidths[index - 1] + gapX
+    return offsets
+  }, [])
+  const yOffsets = rowHeights.reduce<number[]>((offsets, height, index) => {
+    offsets[index] = index === 0 ? 86 : offsets[index - 1] + rowHeights[index - 1] + gapY
+    return offsets
+  }, [])
+  return layouts.map((layout, index) => {
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    return {
+      ...layout,
+      x: xOffsets[column] + Math.max(0, (columnWidths[column] - layout.w) / 2),
+      y: yOffsets[row] + Math.max(0, (rowHeights[row] - layout.h) / 2),
     }
   })
 }

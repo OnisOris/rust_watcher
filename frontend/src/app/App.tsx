@@ -15,6 +15,11 @@ import { BrowserIdeView } from './components/BrowserIdeView'
 import { useBackendGraph } from './api/useBackendGraph'
 import { useCloudWorkspaceGraph } from './api/useCloudWorkspaceGraph'
 import { CLOUD_SESSION_STORAGE_KEY, CLOUD_USERNAME_STORAGE_KEY } from './api/cloudAuth'
+import { buildApiEndpointGroups } from './api/apiDataFlow'
+import { buildCallFlowPaths } from './api/callFlow'
+import { buildDependencyMatrixModel } from './api/dependencyMatrix'
+import { buildProjectMapModel } from './api/graphAggregation'
+import { buildHotspotIssues } from './api/hotspots'
 import {
   applyCollapsedGroups,
   applyDepthFilter,
@@ -27,7 +32,7 @@ import { applySavedViewState, normalizeSavedView, serializableFilters } from './
 import { deriveTraceHighlights, type TraceHighlights } from './api/trace'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import { formatUpdatedLabel } from './utils/time'
-import { ArchitectureWorkspace } from './views/architecture/ArchitectureWorkspace'
+import { ArchitectureWorkspace, shouldUseReadableDefault } from './views/architecture/ArchitectureWorkspace'
 import type { GraphViewMode } from './views/architecture/architectureTypes'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView, TraceExplanation } from './types'
 
@@ -50,6 +55,16 @@ const DEFAULT_FILTERS: GraphFilters = {
 
 const DEFAULT_COLLAPSED_GROUPS = new Set(['module:detached-rust-files'])
 const CLOUD_MODE = import.meta.env.VITE_RUST_WATCHER_MODE === 'cloud'
+const VALID_ARCHITECTURE_VIEWS: GraphViewMode[] = [
+  'project-map',
+  'dependency-matrix',
+  'hotspots',
+  'module-drilldown',
+  'local-neighborhood',
+  'call-flow',
+  'api-data-flow',
+  'raw-graph',
+]
 
 type GraphLens = 'all' | 'architecture' | 'api' | 'route'
 
@@ -93,6 +108,16 @@ function isCloudShellTab(value: string | null): value is CloudShellTab {
   return value === 'workspaces' || value === 'new' || value === 'graph' || value === 'account' || value === 'ide'
 }
 
+function isArchitectureViewMode(value: string | null): value is GraphViewMode {
+  return Boolean(value && VALID_ARCHITECTURE_VIEWS.includes(value as GraphViewMode))
+}
+
+function initialArchitectureViewMode(): GraphViewMode {
+  const params = new URLSearchParams(window.location.search)
+  const view = params.get('view')
+  return isArchitectureViewMode(view) ? view : 'project-map'
+}
+
 export default function App() {
   const urlParams = new URLSearchParams(window.location.search)
   const cloudMode = CLOUD_MODE || urlParams.get('mode') === 'cloud'
@@ -103,8 +128,9 @@ export default function App() {
   const [cloudUsername, setCloudUsername] = useState<string | null>(initialCloudUsername)
   const [cloudPortalTab, setCloudPortalTab] = useState<CloudShellTab>(initialCloudTab)
   const [mode, setMode] = useState<GraphMode>('Macro')
-  const [architectureViewMode, setArchitectureViewMode] = useState<GraphViewMode>('project-map')
+  const [architectureViewMode, setArchitectureViewMode] = useState<GraphViewMode>(initialArchitectureViewMode)
   const [architectureBackStack, setArchitectureBackStack] = useState<GraphViewMode[]>([])
+  const [rawDenseWarningDismissed, setRawDenseWarningDismissed] = useState(false)
   const [theme, setTheme] = useState<ThemeMode>(initialTheme)
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS)
   const [timelineCollapsed, setTimelineCollapsed] = useState(true)
@@ -198,6 +224,32 @@ export default function App() {
   const inspectorGraph = architectureViewMode === 'raw-graph'
     ? { nodes: visibleGraphNodes, edges: visibleGraphEdges, totalNodes: graphNodes.length, totalEdges: edges.length }
     : { nodes: graphNodes, edges, totalNodes: graphNodes.length, totalEdges: edges.length }
+  const architectureGraph = useMemo(
+    () => applyArchitectureBasicFilters(graphNodes, edges, filters),
+    [graphNodes, edges, filters],
+  )
+  const viewCounts = useMemo((): Partial<Record<GraphViewMode, number>> => {
+    const projectMap = buildProjectMapModel(architectureGraph.nodes, architectureGraph.edges, {
+      grouping: 'architecture',
+      includeTests: filters.showTests,
+      includeExternal: filters.showExternal,
+      includeGenerated: true,
+    })
+    const matrix = buildDependencyMatrixModel(architectureGraph.nodes, architectureGraph.edges, {
+      includeTests: filters.showTests,
+      includeExternal: filters.showExternal,
+      includeGenerated: true,
+      includeTypeRefs: filters.edgeTypes.has('TypeReference'),
+    })
+    return {
+      'project-map': projectMap.groups.length,
+      'dependency-matrix': matrix.cells.length,
+      hotspots: buildHotspotIssues(architectureGraph.nodes, architectureGraph.edges).length,
+      'call-flow': buildCallFlowPaths(architectureGraph.nodes, architectureGraph.edges).length,
+      'api-data-flow': buildApiEndpointGroups(architectureGraph.nodes, architectureGraph.edges).length,
+    }
+  }, [architectureGraph, filters.edgeTypes, filters.showExternal, filters.showTests])
+  const rawGraphIsDense = shouldUseReadableDefault(graphNodes, edges)
 
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -294,52 +346,37 @@ export default function App() {
     }
   }, [collapsedGroups, filters, loadSavedViews, selectedNodeId])
 
-  // keyboard shortcuts
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        setSearchOpen(prev => !prev)
-        return
-      }
+    const next = new URL(window.location.href)
+    if (next.searchParams.get('view') === architectureViewMode) return
+    next.searchParams.set('view', architectureViewMode)
+    window.history.replaceState(null, '', next)
+  }, [architectureViewMode])
 
-      if (e.metaKey || e.ctrlKey || e.altKey || isEditableTarget(e.target)) {
-        return
-      }
-
-      const depthByKey: Record<string, GraphFilters['depth']> = {
-        '1': 1,
-        '2': 2,
-        '3': 3,
-        '4': 'full',
-      }
-      const depth = depthByKey[e.key]
-      if (depth) {
-        e.preventDefault()
-        setFilters(current => current.depth === depth ? current : { ...current, depth })
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search)
+      const view = params.get('view')
+      if (isArchitectureViewMode(view)) {
+        setArchitectureViewMode(view)
+        const nextGraphMode = graphModeForArchitectureView(view)
+        if (nextGraphMode) setMode(nextGraphMode)
       }
     }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme
-    document.documentElement.classList.toggle('dark', theme === 'dark')
-    localStorage.setItem('rust-watcher-theme', theme)
-  }, [theme])
-
-  const handleOpenProject = useCallback((path?: string) => {
-    openProject(path)
-  }, [openProject])
-
-  const handleSelectNode = useCallback((id: string | null) => {
-    setSelectedNodeId(id)
-  }, [setSelectedNodeId])
-
-  const handleArchitectureViewModeChange = useCallback((viewMode: GraphViewMode) => {
+  const navigateArchitectureView = useCallback((viewMode: GraphViewMode, options: { push?: boolean } = {}) => {
+    const push = options.push ?? true
     if (viewMode === architectureViewMode) return
-    setArchitectureBackStack(stack => [...stack.slice(-19), architectureViewMode])
+    if (push) {
+      setArchitectureBackStack(stack => {
+        const previous = stack[stack.length - 1]
+        if (previous === architectureViewMode) return stack
+        return [...stack.slice(-19), architectureViewMode]
+      })
+    }
     setArchitectureViewMode(viewMode)
     const nextGraphMode = graphModeForArchitectureView(viewMode)
     if (nextGraphMode) setMode(nextGraphMode)
@@ -355,6 +392,92 @@ export default function App() {
       return stack.slice(0, -1)
     })
   }, [])
+
+  const handleArchitectureViewModeChange = useCallback((viewMode: GraphViewMode) => {
+    navigateArchitectureView(viewMode)
+  }, [navigateArchitectureView])
+
+  // keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        setSearchOpen(prev => !prev)
+        return
+      }
+
+      if (e.metaKey || e.ctrlKey || e.altKey || isEditableTarget(e.target)) {
+        return
+      }
+
+      if (e.key === 'Escape') {
+        if (selectedNodeId) {
+          e.preventDefault()
+          setSelectedNodeId(null)
+          return
+        }
+        if (architectureBackStack.length) {
+          e.preventDefault()
+          handleArchitectureBack()
+        }
+        return
+      }
+
+      const depthByKey: Record<string, GraphFilters['depth']> = {
+        '1': 1,
+        '2': 2,
+        '3': 3,
+        '4': 'full',
+      }
+      const depth = depthByKey[e.key]
+      if (depth) {
+        e.preventDefault()
+        setFilters(current => current.depth === depth ? current : { ...current, depth })
+      }
+
+      const viewByKey: Record<string, GraphViewMode> = {
+        m: 'project-map',
+        x: 'dependency-matrix',
+        h: 'hotspots',
+        n: 'local-neighborhood',
+        c: 'call-flow',
+        a: 'api-data-flow',
+        r: 'raw-graph',
+      }
+      const view = viewByKey[e.key.toLowerCase()]
+      if (view) {
+        e.preventDefault()
+        navigateArchitectureView(view)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [architectureBackStack.length, handleArchitectureBack, navigateArchitectureView, selectedNodeId, setSelectedNodeId])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+    localStorage.setItem('rust-watcher-theme', theme)
+  }, [theme])
+
+  const handleOpenProject = useCallback((path?: string) => {
+    openProject(path)
+  }, [openProject])
+
+  const handleSelectNode = useCallback((id: string | null) => {
+    setSelectedNodeId(id)
+    if (id && architectureViewMode !== 'raw-graph') {
+      navigateArchitectureView('local-neighborhood')
+    }
+  }, [architectureViewMode, navigateArchitectureView, setSelectedNodeId])
+
+  const handleSearchSelectNode = useCallback((id: string) => {
+    setSelectedNodeId(id)
+    if (architectureViewMode !== 'raw-graph') {
+      navigateArchitectureView('local-neighborhood', { push: false })
+    }
+    setSearchOpen(false)
+  }, [architectureViewMode, navigateArchitectureView, setSelectedNodeId])
 
   const handleCloudWorkspaceReady = useCallback((workspaceId: string) => {
     const next = new URL(window.location.href)
@@ -534,6 +657,7 @@ export default function App() {
         onViewModeChange={handleArchitectureViewModeChange}
         canViewBack={architectureBackStack.length > 0}
         onViewBack={handleArchitectureBack}
+        viewCounts={viewCounts}
         onSearchOpen={() => setSearchOpen(true)}
         onSettingsOpen={() => setSettingsOpen(true)}
         onRecenter={() => setRecenterKey(key => key + 1)}
@@ -562,8 +686,8 @@ export default function App() {
         {/* graph area */}
         <div className="relative flex-1 min-w-0 overflow-hidden">
           <ArchitectureWorkspace
-            nodes={graphNodes}
-            edges={edges}
+            nodes={architectureGraph.nodes}
+            edges={architectureGraph.edges}
             rawNodes={visibleGraphNodes}
             rawEdges={visibleGraphEdges}
             files={files}
@@ -609,6 +733,24 @@ export default function App() {
             >
               <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 750 }}>{zeroEdgeHint.title}</div>
               <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', lineHeight: 1.45, marginTop: 4 }}>{zeroEdgeHint.body}</div>
+            </div>
+          )}
+
+          {architectureViewMode === 'raw-graph' && rawGraphIsDense && !rawDenseWarningDismissed && (
+            <div
+              className="absolute left-1/2 top-24 z-30 -translate-x-1/2 rounded-xl px-4 py-3"
+              style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', boxShadow: 'var(--cc-shadow)', maxWidth: 560, backdropFilter: 'blur(12px)' }}
+            >
+              <div style={{ fontSize: 12, color: 'var(--cc-text)', fontWeight: 800 }}>Raw graph is dense.</div>
+              <div style={{ fontSize: 11, color: 'var(--cc-text-subtle)', lineHeight: 1.45, marginTop: 4 }}>
+                Use Map, Matrix, or Neighborhood for readable analysis. Raw Graph remains available for advanced/debug inspection.
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button className="arch-mode-button active" onClick={() => navigateArchitectureView('project-map')}>Map</button>
+                <button className="arch-mode-button" onClick={() => navigateArchitectureView('dependency-matrix')}>Matrix</button>
+                <button className="arch-mode-button" onClick={() => navigateArchitectureView('local-neighborhood')}>Neighborhood</button>
+                <button className="arch-mode-button ml-auto" onClick={() => setRawDenseWarningDismissed(true)}>Show raw graph anyway</button>
+              </div>
             </div>
           )}
 
@@ -711,7 +853,7 @@ export default function App() {
         search={search}
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
-        onSelectNode={(id) => { handleSelectNode(id); setSearchOpen(false) }}
+        onSelectNode={handleSearchSelectNode}
       />
 
       {/* settings modal placeholder */}
@@ -888,6 +1030,49 @@ function applyGraphLens(nodes: GraphNode[], edges: GraphEdge[], lens: GraphLens)
   )
 
   return { nodes: filteredNodes, edges: filteredEdges }
+}
+
+function applyArchitectureBasicFilters(nodes: GraphNode[], edges: GraphEdge[], filters: GraphFilters) {
+  const filteredNodes = nodes.filter(node => {
+    if (!filters.showTests && isTestNode(node)) return false
+    if (!filters.showExternal && (node.type === 'ExternalCrate' || node.reachability === 'External')) return false
+    if (!matchesArchitectureLanguage(node, filters)) return false
+    return true
+  })
+  const nodeIds = new Set(filteredNodes.map(node => node.id))
+  const filteredEdges = edges.filter(edge => {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return false
+    if (edge.type === 'TypeReference' && !filters.edgeTypes.has('TypeReference')) return false
+    return true
+  })
+  return { nodes: filteredNodes, edges: filteredEdges }
+}
+
+function matchesArchitectureLanguage(node: GraphNode, filters: GraphFilters) {
+  const key = architectureLanguageKey(node)
+  return !key || filters.languages.has(key)
+}
+
+function architectureLanguageKey(node: GraphNode) {
+  if (node.type === 'Endpoint') return 'endpoints'
+  if (node.type === 'ExternalCrate' || node.reachability === 'External') return 'external'
+  const language = node.language ?? languageFromPath(node.file)
+  if (language === 'rust' || language === 'typescript' || language === 'python' || language === 'qml') return language
+  return null
+}
+
+function languageFromPath(file?: string | null) {
+  const normalized = (file ?? '').toLowerCase()
+  if (normalized.endsWith('.rs')) return 'rust'
+  if (normalized.endsWith('.ts') || normalized.endsWith('.tsx')) return 'typescript'
+  if (normalized.endsWith('.py')) return 'python'
+  if (normalized.endsWith('.qml')) return 'qml'
+  return null
+}
+
+function isTestNode(node: GraphNode) {
+  const file = (node.file ?? '').toLowerCase()
+  return file.includes('/test/') || file.includes('/tests/') || file.endsWith('.test.ts') || file.endsWith('.spec.ts') || file.endsWith('_test.rs') || node.label.toLowerCase().includes('test')
 }
 
 // ── Indexing screen ─────────────────────────────────────────────────────────

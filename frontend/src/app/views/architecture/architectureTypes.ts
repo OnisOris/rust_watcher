@@ -36,6 +36,8 @@ export type ProjectGroupKind =
   | 'directory'
   | 'unknown'
 
+export type ProjectMapGrouping = 'architecture' | 'language' | 'directory' | 'module' | 'runtime'
+
 export interface ProjectGroup {
   id: string
   label: string
@@ -47,7 +49,19 @@ export interface ProjectGroup {
   symbolCount: number
   incomingCount: number
   outgoingCount: number
+  languageBreakdown?: Record<string, number>
+  topFiles?: string[]
+  keySymbols?: string[]
   children?: ProjectGroup[]
+}
+
+export interface AggregatedProjectEdgeExample {
+  id: string
+  sourceLabel: string
+  targetLabel: string
+  type: EdgeType
+  sourceFile?: string
+  targetFile?: string
 }
 
 export interface AggregatedProjectEdge {
@@ -57,12 +71,34 @@ export interface AggregatedProjectEdge {
   count: number
   edgeTypes: Partial<Record<EdgeType, number>>
   underlyingEdgeIds: string[]
+  examples?: AggregatedProjectEdgeExample[]
 }
 
 export interface ProjectMapModel {
   groups: ProjectGroup[]
   edges: AggregatedProjectEdge[]
   nodeToGroup: Map<string, string>
+  grouping: ProjectMapGrouping
+  autoExpanded: boolean
+}
+
+export type DependencyMatrixLevel = 'area' | 'module' | 'directory' | 'file'
+
+export type DependencyMatrixBadge =
+  | 'cycle'
+  | 'strong'
+  | 'unexpected'
+  | 'violation'
+  | 'external'
+  | 'type-only'
+
+export interface DependencyMatrixEdgeExample {
+  id: string
+  sourceLabel: string
+  targetLabel: string
+  type: EdgeType
+  sourceFile?: string
+  targetFile?: string
 }
 
 export interface DependencyMatrixCell {
@@ -71,14 +107,22 @@ export interface DependencyMatrixCell {
   count: number
   edgeTypes: Partial<Record<EdgeType, number>>
   underlyingEdgeIds: string[]
+  files: string[]
+  examples: DependencyMatrixEdgeExample[]
+  badges: DependencyMatrixBadge[]
 }
 
 export interface DependencyMatrixModel {
   groups: ProjectGroup[]
   cells: DependencyMatrixCell[]
+  level: DependencyMatrixLevel
+  totalGroups: number
+  truncated: boolean
+  suggestedLevel?: DependencyMatrixLevel
 }
 
 export type HotspotSeverity = 'critical' | 'warning' | 'info' | 'noise'
+export type HotspotConfidence = 'high' | 'medium' | 'low'
 
 export type HotspotKind =
   | 'god-module'
@@ -100,7 +144,10 @@ export interface HotspotIssue {
   description: string
   severity: HotspotSeverity
   kind: HotspotKind
+  confidence?: HotspotConfidence
   connections: number
+  files?: string[]
+  modules?: string[]
   suggestion?: string
 }
 
@@ -119,21 +166,58 @@ export interface ApiDataFlowRow {
   underlyingEdgeIds: string[]
 }
 
+export interface ApiEndpointParticipant {
+  nodeId: string
+  label: string
+  file?: string
+  type?: string
+  language?: string
+}
+
+export interface ApiEndpointGroup {
+  id: string
+  routeKey: string
+  method?: string
+  path: string
+  status: 'ok' | 'no-handler' | 'no-caller' | 'unused' | 'unresolved'
+  callers: ApiEndpointParticipant[]
+  handlers: ApiEndpointParticipant[]
+  dataTypes: ApiEndpointParticipant[]
+  endpointNodeIds: string[]
+  underlyingEdgeIds: string[]
+  edgeTypeCounts: Partial<Record<EdgeType, number>>
+}
+
+export interface LocalNeighborhoodGroup {
+  label: string
+  edgeType: EdgeType | 'related-api' | 'related-type' | 'related-test'
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
 export interface LocalNeighborhoodModel {
   centerNode: GraphNode | null
   incomingNodes: GraphNode[]
   outgoingNodes: GraphNode[]
+  incomingGroups: LocalNeighborhoodGroup[]
+  outgoingGroups: LocalNeighborhoodGroup[]
   relatedApiNodes: GraphNode[]
   relatedTypeNodes: GraphNode[]
   relatedTestNodes: GraphNode[]
   visibleNodes: GraphNode[]
   visibleEdges: GraphEdge[]
+  incomingCountByType: Partial<Record<EdgeType, number>>
+  outgoingCountByType: Partial<Record<EdgeType, number>>
+  isDense: boolean
+  denseNodeLimit?: number
 }
 
 export interface CallFlowStep {
   id: string
   label: string
   node?: GraphNode
+  file?: string
+  isPlaceholder?: boolean
   role:
     | 'frontend'
     | 'state'
@@ -148,7 +232,24 @@ export interface CallFlowStep {
 export interface CallFlowPath {
   id: string
   label: string
+  routeKey: string
+  method?: string
+  path?: string
+  source: 'heuristic' | 'trace'
   steps: CallFlowStep[]
+  edgeIds: string[]
+  edgeTypes: Partial<Record<EdgeType, number>>
+  files: string[]
+  traceWarning?: string
+}
+
+export interface CallFlowGroup {
+  id: string
+  routeKey: string
+  method?: string
+  path?: string
+  paths: CallFlowPath[]
+  callerLabels: string[]
   edgeIds: string[]
 }
 
