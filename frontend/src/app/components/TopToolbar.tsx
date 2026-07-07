@@ -1,5 +1,12 @@
 import type { ReactNode } from 'react'
 import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  Code2,
+  FolderTree,
+  Grid2X2,
+  Network,
   Search,
   RefreshCw,
   Minimize2,
@@ -11,10 +18,12 @@ import {
   SlidersHorizontal,
   Wifi,
   FolderOpen,
+  Table2,
 } from 'lucide-react'
 import type { AnalyzerServiceStatus, AnalyzerStatus, GraphMode, AppState, ThemeMode } from '../types'
 import { exportGraphCanvasAsSvg } from '../api/exportGraphSvg'
 import { AnalyzerStatusSummary } from './AnalyzerStatusSummary'
+import type { GraphViewMode } from '../views/architecture/architectureTypes'
 
 interface TopToolbarProps {
   appState: AppState
@@ -26,6 +35,11 @@ interface TopToolbarProps {
   filesCount?: number
   mode: GraphMode
   onModeChange: (mode: GraphMode) => void
+  viewMode?: GraphViewMode
+  onViewModeChange?: (mode: GraphViewMode) => void
+  canViewBack?: boolean
+  onViewBack?: () => void
+  viewCounts?: Partial<Record<GraphViewMode, number>>
   onSearchOpen: () => void
   onSettingsOpen: () => void
   onRecenter: () => void
@@ -33,6 +47,7 @@ interface TopToolbarProps {
   onThemeToggle: () => void
   onCloudHome?: () => void
   onClarityToggle: () => void
+  showClarity?: boolean
   clarityOpen: boolean
   clarityActive: boolean
   theme: ThemeMode
@@ -45,6 +60,17 @@ const MODES: { key: GraphMode; label: string; hint: string }[] = [
   { key: 'CallFlow', label: 'Call Flow', hint: 'Function calls, renders and endpoint-to-handler chains.' },
   { key: 'DataFlow', label: 'API/Data Flow', hint: 'API requests, responses, hook results, state updates and model usage.' },
   { key: 'Traits', label: 'Types & Impl', hint: 'Traits, impls, interfaces, DTOs, models and type references.' },
+]
+
+const ARCHITECTURE_VIEWS: Array<{ key: GraphViewMode; label: string; hint: string; icon: ReactNode; graphMode?: GraphMode }> = [
+  { key: 'project-map', label: 'Map', hint: 'Grouped project-level architecture map.', icon: <Grid2X2 size={13} />, graphMode: 'Macro' },
+  { key: 'dependency-matrix', label: 'Matrix', hint: 'Cross-module dependency heatmap.', icon: <Table2 size={13} />, graphMode: 'Macro' },
+  { key: 'hotspots', label: 'Hotspots', hint: 'Architecture issues and noise candidates.', icon: <AlertTriangle size={13} />, graphMode: 'Macro' },
+  { key: 'module-drilldown', label: 'Module', hint: 'Drill into one module or area.', icon: <FolderTree size={13} />, graphMode: 'Meso' },
+  { key: 'local-neighborhood', label: 'Neighborhood', hint: 'Readable incoming/outgoing view around selected code.', icon: <Network size={13} />, graphMode: 'Micro' },
+  { key: 'call-flow', label: 'Call Flow', hint: 'Left-to-right call flow.', icon: <Activity size={13} />, graphMode: 'CallFlow' },
+  { key: 'api-data-flow', label: 'API/Data', hint: 'API endpoints and data flow table.', icon: <Code2 size={13} />, graphMode: 'DataFlow' },
+  { key: 'raw-graph', label: 'Raw', hint: 'Force-directed graph with graph-specific filters.', icon: <Network size={13} /> },
 ]
 
 const STATUS_CONFIG: Record<AnalyzerStatus | AppState, { label: string; color: string; dot: string; pulse: boolean }> = {
@@ -70,6 +96,11 @@ export function TopToolbar({
   filesCount = 0,
   mode,
   onModeChange,
+  viewMode,
+  onViewModeChange,
+  canViewBack,
+  onViewBack,
+  viewCounts,
   onSearchOpen,
   onSettingsOpen,
   onRecenter,
@@ -77,12 +108,14 @@ export function TopToolbar({
   onThemeToggle,
   onCloudHome,
   onClarityToggle,
+  showClarity = true,
   clarityOpen,
   clarityActive,
   theme,
 }: TopToolbarProps) {
   const status = appState === 'empty' ? STATUS_CONFIG.empty : STATUS_CONFIG[analyzerStatus]
   const modeHint = MODES.find(item => item.key === mode)?.hint
+  const showArchitectureViews = viewMode && onViewModeChange
 
   return (
     <div
@@ -121,29 +154,79 @@ export function TopToolbar({
         filesCount={filesCount}
       />
 
-      <div className="flex items-center gap-0.5 rounded-xl p-1 shrink-0" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
-        {MODES.map(item => (
+      {showArchitectureViews ? (
+        <div className="flex items-center gap-0.5 rounded-xl p-1 shrink-0" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
           <button
-            key={item.key}
-            onClick={() => onModeChange(item.key)}
-            title={item.hint}
-            className="rounded-lg transition-all"
+            onClick={onViewBack}
+            disabled={!canViewBack}
+            title={canViewBack ? 'Back to previous architecture view' : 'No previous architecture view'}
+            className="rounded-lg transition-all flex items-center justify-center"
             style={{
-              padding: '5px 9px',
-              fontSize: 11,
-              lineHeight: 1,
-              fontWeight: mode === item.key ? 750 : 600,
-              color: mode === item.key ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
-              background: mode === item.key ? 'var(--cc-selected-soft)' : 'transparent',
-              border: mode === item.key ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
+              width: 26,
+              height: 26,
+              color: canViewBack ? 'var(--cc-text-subtle)' : 'var(--cc-text-faint)',
+              background: 'transparent',
+              border: '1px solid transparent',
+              cursor: canViewBack ? 'pointer' : 'default',
+              opacity: canViewBack ? 1 : 0.45,
             }}
           >
-            {item.label}
+            <ArrowLeft size={13} />
           </button>
-        ))}
-      </div>
+          {ARCHITECTURE_VIEWS.map(item => (
+            <button
+              key={item.key}
+              onClick={() => {
+                onViewModeChange(item.key)
+                if (item.graphMode) onModeChange(item.graphMode)
+              }}
+              title={item.hint}
+              className="rounded-lg transition-all flex items-center gap-1.5"
+              style={{
+                padding: '5px 8px',
+                fontSize: 11,
+                lineHeight: 1,
+                fontWeight: viewMode === item.key ? 750 : 600,
+                color: viewMode === item.key ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+                background: viewMode === item.key ? 'var(--cc-selected-soft)' : 'transparent',
+                border: viewMode === item.key ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+              {!!viewCounts?.[item.key] && (
+                <span style={{ fontSize: 10, color: 'var(--cc-text-faint)' }}>{viewCounts[item.key]}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-center gap-0.5 rounded-xl p-1 shrink-0" style={{ background: 'var(--cc-surface)', border: '1px solid var(--cc-border)' }}>
+          {MODES.map(item => (
+            <button
+              key={item.key}
+              onClick={() => onModeChange(item.key)}
+              title={item.hint}
+              className="rounded-lg transition-all"
+              style={{
+                padding: '5px 9px',
+                fontSize: 11,
+                lineHeight: 1,
+                fontWeight: mode === item.key ? 750 : 600,
+                color: mode === item.key ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+                background: mode === item.key ? 'var(--cc-selected-soft)' : 'transparent',
+                border: mode === item.key ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <button
         onClick={onSearchOpen}
@@ -172,26 +255,28 @@ export function TopToolbar({
         </span>
       </button>
 
-      <button
-        onClick={onClarityToggle}
-        className="flex items-center gap-1.5 rounded-xl transition-all shrink-0"
-        title={`Graph clarity${modeHint ? ` · ${modeHint}` : ''}`}
-        style={{
-          height: 34,
-          padding: '6px 11px',
-          background: clarityOpen ? 'var(--cc-selected-soft)' : clarityActive ? 'rgba(14,165,233,0.08)' : 'var(--cc-surface)',
-          border: clarityOpen || clarityActive ? '1px solid rgba(14,165,233,0.35)' : '1px solid var(--cc-border)',
-          color: clarityOpen || clarityActive ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
-          cursor: 'pointer',
-          fontSize: 11,
-          fontWeight: clarityOpen ? 750 : 650,
-          whiteSpace: 'nowrap',
-        }}
-      >
-        <SlidersHorizontal size={13} />
-        <span>Clarity</span>
-        {clarityActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--cc-accent)' }} />}
-      </button>
+      {showClarity && (
+        <button
+          onClick={onClarityToggle}
+          className="flex items-center gap-1.5 rounded-xl transition-all shrink-0"
+          title={`Graph clarity${modeHint ? ` · ${modeHint}` : ''}`}
+          style={{
+            height: 34,
+            padding: '6px 11px',
+            background: clarityOpen ? 'var(--cc-selected-soft)' : clarityActive ? 'rgba(14,165,233,0.08)' : 'var(--cc-surface)',
+            border: clarityOpen || clarityActive ? '1px solid rgba(14,165,233,0.35)' : '1px solid var(--cc-border)',
+            color: clarityOpen || clarityActive ? 'var(--cc-accent)' : 'var(--cc-text-subtle)',
+            cursor: 'pointer',
+            fontSize: 11,
+            fontWeight: clarityOpen ? 750 : 650,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <SlidersHorizontal size={13} />
+          <span>Clarity</span>
+          {clarityActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--cc-accent)' }} />}
+        </button>
+      )}
 
       <div className="flex items-center gap-1 shrink-0">
         {onCloudHome && (

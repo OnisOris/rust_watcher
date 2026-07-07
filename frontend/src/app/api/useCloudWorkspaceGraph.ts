@@ -65,7 +65,7 @@ function localSearch(nodes: GraphNode[], query: string): SearchResult[] {
 
 export function useCloudWorkspaceGraph(
   workspaceId: string | null,
-  mode: GraphMode,
+  mode: GraphMode | null,
   options: { enabled?: boolean; sessionToken?: string | null } = {},
 ) {
   const enabled = options.enabled ?? true
@@ -94,7 +94,8 @@ export function useCloudWorkspaceGraph(
   const refreshSnapshot = useCallback(async () => {
     if (!enabled || !workspaceId) return
     const seq = ++snapshotSeq.current
-    const response = await cloudFetch(`/api/cloud/workspaces/${encodeURIComponent(workspaceId)}/snapshot?mode=${encodeURIComponent(mode)}`, {}, sessionToken)
+    const query = mode ? `?mode=${encodeURIComponent(mode)}` : ''
+    const response = await cloudFetch(`/api/cloud/workspaces/${encodeURIComponent(workspaceId)}/snapshot${query}`, {}, sessionToken)
     if (response.status === 202) {
       setStatus(current => ({ ...current, appState: 'indexing', analyzerStatus: 'Indexing', message: 'Cloud analysis is still running.' }))
       return

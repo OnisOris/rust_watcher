@@ -7,6 +7,7 @@ interface FilterBarProps {
   filters: GraphFilters
   graphMode: GraphMode
   onFiltersChange: (f: GraphFilters) => void
+  placement?: 'floating' | 'inline'
   savedViews?: SavedView[]
   onApplyView?: (view: SavedView) => void
   onSaveView?: () => void
@@ -38,7 +39,7 @@ const LANGUAGE_FILTERS: Array<{ id: LanguageFilter; label: string; color: string
   { id: 'external', label: 'External', color: '#7D8795' },
 ]
 
-export function FilterBar({ filters, graphMode, onFiltersChange, savedViews = [], onApplyView, onSaveView, onUnpinAll }: FilterBarProps) {
+export function FilterBar({ filters, graphMode, onFiltersChange, placement = 'floating', savedViews = [], onApplyView, onSaveView, onUnpinAll }: FilterBarProps) {
   const [expanded, setExpanded] = useState(false)
   const depthOptions = depthOptionsForMode(graphMode)
 
@@ -70,16 +71,21 @@ export function FilterBar({ filters, graphMode, onFiltersChange, savedViews = []
 
   return (
     <div
-      className="absolute top-3 left-1/2 -translate-x-1/2 z-10"
-      style={{ fontFamily: 'Inter, sans-serif', width: 'min(980px, calc(100% - 48px))' }}
+      className={placement === 'floating' ? 'absolute top-3 left-1/2 -translate-x-1/2 z-10' : 'relative z-10'}
+      style={{
+        fontFamily: 'Inter, sans-serif',
+        width: placement === 'floating' ? 'min(980px, calc(100% - 48px))' : '100%',
+      }}
     >
       <div
-        className="rounded-xl"
+        className={placement === 'floating' ? 'rounded-xl' : ''}
         style={{
           background: 'var(--cc-overlay)',
           border: '1px solid var(--cc-border)',
-          boxShadow: 'var(--cc-shadow)',
-          backdropFilter: 'blur(14px)',
+          borderLeft: placement === 'inline' ? 'none' : '1px solid var(--cc-border)',
+          borderRight: placement === 'inline' ? 'none' : '1px solid var(--cc-border)',
+          boxShadow: placement === 'floating' ? 'var(--cc-shadow)' : 'none',
+          backdropFilter: placement === 'floating' ? 'blur(14px)' : 'none',
           overflow: 'hidden',
         }}
       >

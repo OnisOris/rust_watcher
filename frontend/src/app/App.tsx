@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { TopToolbar } from './components/TopToolbar'
 import { ProjectExplorer } from './components/ProjectExplorer'
-import { LiveCodeGraph } from './components/LiveCodeGraph'
 import { InspectorPanel } from './components/InspectorPanel'
 import { AnalysisTimeline } from './components/AnalysisTimeline'
 import { FilterBar } from './components/FilterBar'
@@ -28,6 +27,8 @@ import { applySavedViewState, normalizeSavedView, serializableFilters } from './
 import { deriveTraceHighlights, type TraceHighlights } from './api/trace'
 import { DEFAULT_GRAPH_LAYOUT_SETTINGS } from './types'
 import { formatUpdatedLabel } from './utils/time'
+import { ArchitectureWorkspace } from './views/architecture/ArchitectureWorkspace'
+import type { GraphViewMode } from './views/architecture/architectureTypes'
 import type { GraphMode, GraphFilters, NodeType, EdgeType, ThemeMode, GraphNode, GraphEdge, GraphLayoutSettings, GraphLabelMode, LanguageFilter, SavedView, TraceExplanation } from './types'
 
 const ALL_NODE_TYPES = new Set<NodeType>(['File', 'Module', 'Struct', 'Class', 'Object', 'Enum', 'Trait', 'Impl', 'Function', 'Method', 'Component', 'Hook', 'Interface', 'TypeAlias', 'Property', 'Signal', 'Handler', 'Endpoint', 'Macro', 'ExternalCrate'])
@@ -102,6 +103,8 @@ export default function App() {
   const [cloudUsername, setCloudUsername] = useState<string | null>(initialCloudUsername)
   const [cloudPortalTab, setCloudPortalTab] = useState<CloudShellTab>(initialCloudTab)
   const [mode, setMode] = useState<GraphMode>('Macro')
+  const [architectureViewMode, setArchitectureViewMode] = useState<GraphViewMode>('project-map')
+  const [architectureBackStack, setArchitectureBackStack] = useState<GraphViewMode[]>([])
   const [theme, setTheme] = useState<ThemeMode>(initialTheme)
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS)
   const [timelineCollapsed, setTimelineCollapsed] = useState(true)
@@ -116,8 +119,9 @@ export default function App() {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(DEFAULT_COLLAPSED_GROUPS)
   const [userSavedViews, setUserSavedViews] = useState<SavedView[]>([])
   const [traceHighlights, setTraceHighlights] = useState<TraceHighlights | null>(null)
-  const localGraph = useBackendGraph(mode, { enabled: !cloudMode })
-  const cloudGraph = useCloudWorkspaceGraph(cloudWorkspaceId, mode, { enabled: cloudMode && !!cloudWorkspaceId && !!cloudSessionToken, sessionToken: cloudSessionToken })
+  const snapshotMode = architectureViewMode === 'raw-graph' ? mode : null
+  const localGraph = useBackendGraph(snapshotMode, { enabled: !cloudMode })
+  const cloudGraph = useCloudWorkspaceGraph(cloudWorkspaceId, snapshotMode, { enabled: cloudMode && !!cloudWorkspaceId && !!cloudSessionToken, sessionToken: cloudSessionToken })
   const graph = cloudMode ? cloudGraph : localGraph
   const {
     appState,
@@ -191,6 +195,9 @@ export default function App() {
     : visibleGraphNodes.length > 0 && visibleGraphEdges.length === 0
       ? graphModeEmptyHint(mode)
       : null
+  const inspectorGraph = architectureViewMode === 'raw-graph'
+    ? { nodes: visibleGraphNodes, edges: visibleGraphEdges, totalNodes: graphNodes.length, totalEdges: edges.length }
+    : { nodes: graphNodes, edges, totalNodes: graphNodes.length, totalEdges: edges.length }
 
   const togglePinNode = useCallback((id: string) => {
     const node = graphNodes.find(node => node.id === id)
@@ -329,6 +336,25 @@ export default function App() {
   const handleSelectNode = useCallback((id: string | null) => {
     setSelectedNodeId(id)
   }, [setSelectedNodeId])
+
+  const handleArchitectureViewModeChange = useCallback((viewMode: GraphViewMode) => {
+    if (viewMode === architectureViewMode) return
+    setArchitectureBackStack(stack => [...stack.slice(-19), architectureViewMode])
+    setArchitectureViewMode(viewMode)
+    const nextGraphMode = graphModeForArchitectureView(viewMode)
+    if (nextGraphMode) setMode(nextGraphMode)
+  }, [architectureViewMode])
+
+  const handleArchitectureBack = useCallback(() => {
+    setArchitectureBackStack(stack => {
+      const previous = stack[stack.length - 1]
+      if (!previous) return stack
+      setArchitectureViewMode(previous)
+      const nextGraphMode = graphModeForArchitectureView(previous)
+      if (nextGraphMode) setMode(nextGraphMode)
+      return stack.slice(0, -1)
+    })
+  }, [])
 
   const handleCloudWorkspaceReady = useCallback((workspaceId: string) => {
     const next = new URL(window.location.href)
@@ -504,12 +530,17 @@ export default function App() {
         filesCount={files.length}
         mode={mode}
         onModeChange={setMode}
+        viewMode={architectureViewMode}
+        onViewModeChange={handleArchitectureViewModeChange}
+        canViewBack={architectureBackStack.length > 0}
+        onViewBack={handleArchitectureBack}
         onSearchOpen={() => setSearchOpen(true)}
         onSettingsOpen={() => setSettingsOpen(true)}
         onRecenter={() => setRecenterKey(key => key + 1)}
         onCollapse={() => setGraphLens(current => current === 'architecture' ? 'all' : 'architecture')}
         onThemeToggle={() => setTheme(current => current === 'light' ? 'dark' : 'light')}
         onClarityToggle={() => setClarityOpen(open => !open)}
+        showClarity={architectureViewMode === 'raw-graph'}
         clarityOpen={clarityOpen}
         clarityActive={graphLens !== 'all' || labelMode !== 'auto' || layoutTuned || filters.edgeVisibility !== 'Semantic'}
         theme={theme}
@@ -530,25 +561,48 @@ export default function App() {
 
         {/* graph area */}
         <div className="relative flex-1 min-w-0 overflow-hidden">
-          <LiveCodeGraph
-            nodes={visibleGraphNodes}
-            edges={visibleGraphEdges}
+          <ArchitectureWorkspace
+            nodes={graphNodes}
+            edges={edges}
+            rawNodes={visibleGraphNodes}
+            rawEdges={visibleGraphEdges}
+            files={files}
             filters={filters}
+            viewMode={architectureViewMode}
             selectedNodeId={selectedNodeId}
-            recenterKey={recenterKey}
-            theme={theme}
-            layoutSettings={layoutSettings}
-            graphMode={mode}
-            labelMode={labelMode}
             diagnosticsByNode={diagnosticsByNode}
-            highlightedTraceNodeIds={traceHighlights?.nodeIds}
-            highlightedTraceEdgeIds={traceHighlights?.edgeIds}
+            onViewModeChange={handleArchitectureViewModeChange}
             onSelectNode={handleSelectNode}
-            onUpdateNodes={handleUpdateNodes}
             onOpenNode={handleOpenNodeInEditor}
+            onTraceLoaded={handleTraceLoaded}
+            rawGraphControls={(
+              <>
+                <RawGraphModeTabs mode={mode} onModeChange={setMode} />
+                <FilterBar
+                  filters={filters}
+                  graphMode={mode}
+                  onFiltersChange={setFilters}
+                  placement="inline"
+                  savedViews={[...DEFAULT_VIEWS, ...userSavedViews]}
+                  onApplyView={applySavedView}
+                  onSaveView={saveCurrentView}
+                  onUnpinAll={unpinAll}
+                />
+              </>
+            )}
+            rawGraphProps={{
+              recenterKey,
+              theme,
+              layoutSettings,
+              graphMode: mode,
+              labelMode,
+              highlightedTraceNodeIds: traceHighlights?.nodeIds,
+              highlightedTraceEdgeIds: traceHighlights?.edgeIds,
+              onUpdateNodes: handleUpdateNodes,
+            }}
           />
 
-          {zeroEdgeHint && (
+          {architectureViewMode === 'raw-graph' && zeroEdgeHint && (
             <div
               className="absolute left-1/2 top-24 z-20 -translate-x-1/2 rounded-xl px-4 py-3"
               style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', boxShadow: 'var(--cc-shadow)', maxWidth: 420, backdropFilter: 'blur(12px)' }}
@@ -558,88 +612,80 @@ export default function App() {
             </div>
           )}
 
-          {/* floating filter bar */}
-            <FilterBar
-              filters={filters}
-              graphMode={mode}
-              onFiltersChange={setFilters}
-              savedViews={[...DEFAULT_VIEWS, ...userSavedViews]}
-            onApplyView={applySavedView}
-            onSaveView={saveCurrentView}
-            onUnpinAll={unpinAll}
-          />
-
-          <div
-            className="absolute top-3 right-5 z-20 transition-all duration-200 ease-out"
-            style={{
-              opacity: clarityOpen ? 1 : 0,
-              transform: clarityOpen ? 'translateY(0) scale(1)' : 'translateY(-8px) scale(0.98)',
-              transformOrigin: 'top right',
-              pointerEvents: clarityOpen ? 'auto' : 'none',
-            }}
-          >
-            <DenseGraphSuggestion
-              graphLens={graphLens}
-              totalNodes={graphNodes.length}
-              visibleNodes={visibleGraphNodes.length}
-              totalEdges={edges.length}
-              visibleEdges={visibleGraphEdges.length}
-              labelMode={labelMode}
-              layoutSettings={layoutSettings}
-              onDismiss={() => setClarityOpen(false)}
-              onLensChange={setGraphLens}
-              onLabelModeChange={setLabelMode}
-              onLayoutSettingsChange={setLayoutSettings}
-              onResetLayoutSettings={() => setLayoutSettings(DEFAULT_GRAPH_LAYOUT_SETTINGS)}
-            />
-          </div>
-
-          {/* graph metadata overlay */}
-          <div
-            className="absolute bottom-3 left-3 flex items-center gap-3"
-            style={{ pointerEvents: 'none' }}
-          >
-            <div className="flex items-center gap-2 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>Visible {visibleGraphNodes.length} nodes</span>
-              <span style={{ color: 'var(--cc-border)' }}>·</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{visibleGraphEdges.length} edges</span>
-              <span style={{ color: 'var(--cc-border)' }}>·</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-faint)' }}>Total {graphNodes.length}/{edges.length}</span>
-              {graphLens !== 'all' && (
-                <>
-                  <span style={{ color: 'var(--cc-border)' }}>·</span>
-                  <span style={{ fontSize: 10, color: '#06B6D4' }}>
-                    {graphLens === 'architecture' ? 'Architecture' : graphLens === 'route' ? 'Route Flow' : 'API Bridge'}: {visibleGraphNodes.length}/{visibleGraphEdges.length}
-                  </span>
-                </>
-              )}
-              <span style={{ color: 'var(--cc-border)' }}>·</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>Force graph</span>
-              <span style={{ color: 'var(--cc-border)' }}>·</span>
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{graphModeLabel(mode)}</span>
+          {architectureViewMode === 'raw-graph' && (
+            <div
+              className="absolute top-24 right-5 z-20 transition-all duration-200 ease-out"
+              style={{
+                opacity: clarityOpen ? 1 : 0,
+                transform: clarityOpen ? 'translateY(0) scale(1)' : 'translateY(-8px) scale(0.98)',
+                transformOrigin: 'top right',
+                pointerEvents: clarityOpen ? 'auto' : 'none',
+              }}
+            >
+              <DenseGraphSuggestion
+                graphLens={graphLens}
+                totalNodes={graphNodes.length}
+                visibleNodes={visibleGraphNodes.length}
+                totalEdges={edges.length}
+                visibleEdges={visibleGraphEdges.length}
+                labelMode={labelMode}
+                layoutSettings={layoutSettings}
+                onDismiss={() => setClarityOpen(false)}
+                onLensChange={setGraphLens}
+                onLabelModeChange={setLabelMode}
+                onLayoutSettingsChange={setLayoutSettings}
+                onResetLayoutSettings={() => setLayoutSettings(DEFAULT_GRAPH_LAYOUT_SETTINGS)}
+              />
             </div>
-            <div className="flex items-center gap-1.5 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
-              <div style={{ width: 6, height: 6, borderRadius: '50%', background: analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' ? '#F59E0B' : '#34D399' }} />
-              <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{message ?? 'Live'} · {formatUpdatedLabel(lastUpdated)}</span>
+          )}
+
+          {architectureViewMode === 'raw-graph' && (
+            <div
+              className="absolute bottom-3 left-3 flex items-center gap-3"
+              style={{ pointerEvents: 'none' }}
+            >
+              <div className="flex items-center gap-2 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
+                <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>Visible {visibleGraphNodes.length} nodes</span>
+                <span style={{ color: 'var(--cc-border)' }}>·</span>
+                <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{visibleGraphEdges.length} edges</span>
+                <span style={{ color: 'var(--cc-border)' }}>·</span>
+                <span style={{ fontSize: 10, color: 'var(--cc-text-faint)' }}>Total {graphNodes.length}/{edges.length}</span>
+                {graphLens !== 'all' && (
+                  <>
+                    <span style={{ color: 'var(--cc-border)' }}>·</span>
+                    <span style={{ fontSize: 10, color: '#06B6D4' }}>
+                      {graphLens === 'architecture' ? 'Architecture' : graphLens === 'route' ? 'Route Flow' : 'API Bridge'}: {visibleGraphNodes.length}/{visibleGraphEdges.length}
+                    </span>
+                  </>
+                )}
+                <span style={{ color: 'var(--cc-border)' }}>·</span>
+                <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>Force graph</span>
+                <span style={{ color: 'var(--cc-border)' }}>·</span>
+                <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{graphModeLabel(mode)}</span>
+              </div>
+              <div className="flex items-center gap-1.5 rounded-lg px-3 py-1.5" style={{ background: 'var(--cc-overlay)', border: '1px solid var(--cc-border)', backdropFilter: 'blur(8px)' }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: analyzerStatus === 'Error' ? '#F87171' : analyzerStatus === 'Indexing' ? '#F59E0B' : '#34D399' }} />
+                <span style={{ fontSize: 10, color: 'var(--cc-text-subtle)' }}>{message ?? 'Live'} · {formatUpdatedLabel(lastUpdated)}</span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* right panel */}
         <InspectorPanel
           selectedNode={selectedNode}
-          nodes={visibleGraphNodes}
-          edges={visibleGraphEdges}
+          nodes={inspectorGraph.nodes}
+          edges={inspectorGraph.edges}
           projectName={projectName}
           analyzerStatus={analyzerStatus}
           analyzers={analyzers}
           pythonAnalyzer={pythonAnalyzer}
           appState={appState}
           filesCount={files.length}
-          totalNodes={graphNodes.length}
-          totalEdges={edges.length}
-          visibleNodes={visibleGraphNodes.length}
-          visibleEdges={visibleGraphEdges.length}
+          totalNodes={inspectorGraph.totalNodes}
+          totalEdges={inspectorGraph.totalEdges}
+          visibleNodes={inspectorGraph.nodes.length}
+          visibleEdges={inspectorGraph.edges.length}
           message={message}
           onTogglePin={togglePinNode}
           onToggleCollapse={toggleCollapseGroup}
@@ -688,6 +734,47 @@ export default function App() {
       )}
     </div>
   )
+}
+
+function RawGraphModeTabs({ mode, onModeChange }: { mode: GraphMode; onModeChange: (mode: GraphMode) => void }) {
+  const modes: Array<{ key: GraphMode; label: string }> = [
+    { key: 'Macro', label: 'Architecture' },
+    { key: 'Meso', label: 'Modules' },
+    { key: 'Micro', label: 'Local Symbol' },
+    { key: 'CallFlow', label: 'Call Flow' },
+    { key: 'DataFlow', label: 'API/Data Flow' },
+    { key: 'Traits', label: 'Types & Impl' },
+  ]
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid var(--cc-border)' }}>
+      <span style={{ color: 'var(--cc-text-faint)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase', whiteSpace: 'nowrap', letterSpacing: '0.04em' }}>Graph Mode</span>
+      <div className="flex items-center gap-1 min-w-0 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+        {modes.map(item => (
+          <button
+            key={item.key}
+            className={`arch-nav-button ${mode === item.key ? 'arch-nav-button-active' : ''}`}
+            onClick={() => onModeChange(item.key)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function graphModeForArchitectureView(viewMode: GraphViewMode): GraphMode | undefined {
+  const graphModeForView: Partial<Record<GraphViewMode, GraphMode>> = {
+    'project-map': 'Macro',
+    'dependency-matrix': 'Macro',
+    hotspots: 'Macro',
+    'module-drilldown': 'Meso',
+    'local-neighborhood': 'Micro',
+    'call-flow': 'CallFlow',
+    'api-data-flow': 'DataFlow',
+  }
+  return graphModeForView[viewMode]
 }
 
 function graphModeEmptyHint(mode: GraphMode) {

@@ -157,7 +157,7 @@ function normalizeSnapshot(snapshot: GraphSnapshot): GraphSnapshot {
   return changed ? { ...snapshot, edges, status } : { ...snapshot, status }
 }
 
-export function useBackendGraph(mode: GraphMode, options: { enabled?: boolean } = {}) {
+export function useBackendGraph(mode: GraphMode | null, options: { enabled?: boolean } = {}) {
   const enabled = options.enabled ?? true
   const [appState, setAppState] = useState<AppState>('empty')
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('Starting')
@@ -285,11 +285,12 @@ export function useBackendGraph(mode: GraphMode, options: { enabled?: boolean } 
     applyDevFallbackRef.current = applyDevFallback
   }, [applyDevFallback, applyStatus])
 
-  const refreshSnapshot = useCallback(async (nextMode: GraphMode = mode) => {
+  const refreshSnapshot = useCallback(async (nextMode: GraphMode | null = mode) => {
     if (!enabled) return
     const requestSeq = ++snapshotRequestSeq.current
     try {
-      const response = await fetch(`/api/graph/snapshot?mode=${encodeURIComponent(nextMode)}`)
+      const query = nextMode ? `?mode=${encodeURIComponent(nextMode)}` : ''
+      const response = await fetch(`/api/graph/snapshot${query}`)
       if (!response.ok) throw await responseError(response, 'Loading graph snapshot')
       const snapshot = await response.json()
       if (requestSeq !== snapshotRequestSeq.current) return

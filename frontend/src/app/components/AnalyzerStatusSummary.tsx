@@ -37,17 +37,19 @@ export function AnalyzerStatusSummary({
         : analyzerStatusColor(overallStatus)
 
   return (
-    <div className="hidden lg:flex items-center gap-2 shrink-0 relative" title={message ?? undefined}>
+    <div className="hidden lg:flex items-center gap-2 shrink-0 relative" style={{ width: 360 }} title={message ?? undefined}>
       <button
         type="button"
         onClick={() => setOpen(value => !value)}
         className="flex items-center gap-2 rounded-lg transition-all"
         style={{
           height: 30,
+          width: 174,
           padding: '4px 8px',
           background: open ? 'var(--cc-selected-soft)' : 'transparent',
           border: open ? '1px solid rgba(14,165,233,0.35)' : '1px solid transparent',
           cursor: 'pointer',
+          overflow: 'hidden',
         }}
       >
         <span className="relative" style={{ width: 9, height: 9 }}>
@@ -56,13 +58,13 @@ export function AnalyzerStatusSummary({
             <span className="animate-ping" style={{ position: 'absolute', inset: 0, borderRadius: 999, background: color, opacity: 0.65 }} />
           )}
         </span>
-        <span style={{ color, fontSize: 11, fontWeight: 700 }}>{summary.label}</span>
+        <span style={{ color, fontSize: 11, fontWeight: 700, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary.label}</span>
       </button>
-      <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>
+      <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11, width: 108, whiteSpace: 'nowrap' }}>
         <Clock size={10} className="inline mr-1" />
         {formatUpdatedLabel(lastUpdated)}
       </span>
-      <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11 }}>· {filesCount} files</span>
+      <span style={{ color: 'var(--cc-text-subtle)', fontSize: 11, width: 62, whiteSpace: 'nowrap' }}>· {filesCount} files</span>
 
       {open && (
         <div
