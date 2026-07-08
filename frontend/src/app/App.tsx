@@ -14,7 +14,7 @@ import { CloudShellNav, type CloudShellTab } from './components/CloudShellNav'
 import { BrowserIdeView } from './components/BrowserIdeView'
 import { useBackendGraph } from './api/useBackendGraph'
 import { useCloudWorkspaceGraph } from './api/useCloudWorkspaceGraph'
-import { CLOUD_SESSION_STORAGE_KEY, CLOUD_USERNAME_STORAGE_KEY } from './api/cloudAuth'
+import { CLOUD_SESSION_STORAGE_KEY, CLOUD_USERNAME_STORAGE_KEY, cloudFetch } from './api/cloudAuth'
 import { buildApiEndpointGroups } from './api/apiDataFlow'
 import { buildCallFlowPaths } from './api/callFlow'
 import { buildDependencyMatrixModel } from './api/dependencyMatrix'
@@ -578,6 +578,32 @@ export default function App() {
     setCloudSessionToken(null)
     setCloudUsername(null)
   }, [setSelectedNodeId])
+
+  useEffect(() => {
+    if (!cloudMode || !cloudSessionToken) return
+    let cancelled = false
+    void cloudFetch('/api/cloud/auth/me', {}, cloudSessionToken)
+      .then(async response => {
+        if (cancelled) return
+        if (response.status === 401 || response.status === 403) {
+          handleCloudLogout()
+          return
+        }
+        if (response.ok) {
+          const payload = await response.json().catch(() => null) as { username?: string } | null
+          if (payload?.username && payload.username !== cloudUsername) {
+            localStorage.setItem(CLOUD_USERNAME_STORAGE_KEY, payload.username)
+            setCloudUsername(payload.username)
+          }
+        }
+      })
+      .catch(() => {
+        // Keep the current UI during transient network failures; authenticated API calls will surface errors.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [cloudMode, cloudSessionToken, cloudUsername, handleCloudLogout])
 
   if (cloudMode && !cloudSessionToken) {
     return <CloudLogin onLogin={handleCloudLogin} />

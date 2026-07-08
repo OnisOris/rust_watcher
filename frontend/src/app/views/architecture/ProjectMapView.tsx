@@ -1,6 +1,6 @@
 import { Flame, Grid2X2, Network } from 'lucide-react'
 import { useMemo } from 'react'
-import type { GraphNode } from '../../types'
+import type { EdgeType, GraphNode } from '../../types'
 import type { AggregatedProjectEdge, ProjectGroup, ProjectMapGrouping, ProjectMapModel } from './architectureTypes'
 import { DiagramCanvas } from './DiagramCanvas'
 
@@ -59,13 +59,17 @@ export function ProjectMapView({
 }: ProjectMapViewProps) {
   const byId = useMemo(() => new Map(nodes.map(node => [node.id, node])), [nodes])
   const positionedGroups = model.groups
-  const positionedIds = new Set(positionedGroups.map(group => group.id))
+  const positionedIds = useMemo(() => new Set(positionedGroups.map(group => group.id)), [positionedGroups])
   const layouts = useMemo(() => buildGroupLayouts(positionedGroups, byId, model.grouping), [positionedGroups, byId, model.grouping])
   const canvas = useMemo(() => ({
     width: Math.max(1320, Math.max(...layouts.map(layout => layout.x + layout.w), 0) + 96),
     height: Math.max(900, Math.max(...layouts.map(layout => layout.y + layout.h), 0) + 96),
   }), [layouts])
-  const visibleEdges = model.edges.filter(edge => positionedIds.has(edge.sourceGroupId) && positionedIds.has(edge.targetGroupId)).slice(0, 18)
+  const visibleEdges = useMemo(
+    () => bundleParallelProjectEdges(model.edges.filter(edge => positionedIds.has(edge.sourceGroupId) && positionedIds.has(edge.targetGroupId))).slice(0, 18),
+    [model.edges, positionedIds],
+  )
+  const routedEdges = useMemo(() => routeProjectEdges(visibleEdges, layouts), [visibleEdges, layouts])
 
   if (model.groups.length <= 1) {
     return (
@@ -117,7 +121,7 @@ export function ProjectMapView({
               </pattern>
             </defs>
             <rect width={canvas.width} height={canvas.height} fill="url(#arch-dotgrid)" />
-            {visibleEdges.map((edge, index) => <ProjectEdge key={edge.id} edge={edge} index={index} layouts={layouts} />)}
+            {routedEdges.map(edge => <ProjectEdge key={edge.edge.id} routedEdge={edge} />)}
             {positionedGroups.map(group => {
               const layout = layouts.find(candidate => candidate.group.id === group.id)
               if (!layout) return null
@@ -307,20 +311,16 @@ function SingleAreaProjectMap({
   )
 }
 
-function ProjectEdge({ edge, index, layouts }: { edge: AggregatedProjectEdge; index: number; layouts: GroupLayout[] }) {
-  const source = layouts.find(layout => layout.group.id === edge.sourceGroupId)
-  const target = layouts.find(layout => layout.group.id === edge.targetGroupId)
-  if (!source || !target) return null
-  const points = routeEdge(source, target, index)
+function ProjectEdge({ routedEdge }: { routedEdge: RoutedProjectEdge }) {
+  const { edge, points, labelPoint, sourceLabel, targetLabel } = routedEdge
   const path = points.map((point, pointIndex) => `${pointIndex === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
   const width = Math.min(8, 1 + Math.log(edge.count + 1))
   const label = formatEdgeLabel(edge)
   const labelWidth = Math.max(76, label.length * 6 + 18)
-  const labelPoint = labelPointFor(points)
   return (
     <g>
-      <title>{edgeTooltip(edge, source.group.label, target.group.label)}</title>
-      <path d={path} fill="none" stroke="var(--cc-text-subtle)" strokeWidth={width} opacity="0.38" markerEnd="url(#arch-arrow)" />
+      <title>{edgeTooltip(edge, sourceLabel, targetLabel)}</title>
+      <path d={path} fill="none" stroke="var(--cc-text-subtle)" strokeWidth={width} opacity="0.38" strokeLinecap="round" strokeLinejoin="round" markerEnd="url(#arch-arrow)" />
       <rect x={labelPoint.x - labelWidth / 2} y={labelPoint.y - 13} width={labelWidth} height="22" rx="6" fill="var(--cc-overlay)" stroke="var(--cc-border)" />
       <text x={labelPoint.x} y={labelPoint.y + 4} fill="var(--cc-text-muted)" fontSize="10" textAnchor="middle">
         {label}
@@ -335,10 +335,9 @@ function formatEdgeLabel(edge: AggregatedProjectEdge) {
     .sort((a, b) => b[1] - a[1])
   if (!entries.length) return `${edge.count} relationships`
   if (entries.length === 1) return `${edge.count} ${edgeTypeLabel(entries[0][0])}`
-  if (entries.length === 2) return entries.map(([type, count]) => `${count} ${edgeTypeLabel(type)}`).join(' · ')
   const apiDataCount = (edge.edgeTypes.ApiCall ?? 0) + (edge.edgeTypes.DataFlow ?? 0)
   if (apiDataCount === edge.count && apiDataCount > 0) return `${edge.count} API/Data`
-  return `${edge.count} relationships`
+  return entries.slice(0, 2).map(([type, count]) => `${count} ${edgeTypeLabel(type)}`).join(' · ')
 }
 
 function edgeTooltip(edge: AggregatedProjectEdge, sourceLabel: string, targetLabel: string) {
@@ -382,6 +381,10 @@ interface GroupLayout extends Rect {
   topFiles: string[]
   symbols: GraphNode[]
   visibleSymbols: GraphNode[]
+  width: number
+  height: number
+  centerX: number
+  centerY: number
 }
 
 function buildGroupLayouts(groups: ProjectGroup[], byId: Map<string, GraphNode>, grouping: ProjectMapGrouping): GroupLayout[] {
@@ -448,15 +451,15 @@ function buildGroupLayouts(groups: ProjectGroup[], byId: Map<string, GraphNode>,
 
   return roughLayouts.map(layout => {
     const slot = GROUP_SLOTS[layout.group.id]
-    return {
+    return withLayoutMetadata({
       ...layout,
       x: columnX[slot.column] + Math.max(0, (columnWidths[slot.column] - layout.w) / 2),
       y: rowY[slot.row] + Math.max(0, (rowHeights[slot.row] - layout.h) / 2),
-    }
+    })
   })
 }
 
-function layoutInGrid(layouts: Array<Omit<GroupLayout, 'x' | 'y'>>) {
+function layoutInGrid(layouts: Array<Omit<GroupLayout, 'x' | 'y' | 'width' | 'height' | 'centerX' | 'centerY'>>) {
   const columns = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(layouts.length))))
   const gapX = 130
   const gapY = 110
@@ -478,12 +481,22 @@ function layoutInGrid(layouts: Array<Omit<GroupLayout, 'x' | 'y'>>) {
   return layouts.map((layout, index) => {
     const column = index % columns
     const row = Math.floor(index / columns)
-    return {
+    return withLayoutMetadata({
       ...layout,
       x: xOffsets[column] + Math.max(0, (columnWidths[column] - layout.w) / 2),
       y: yOffsets[row] + Math.max(0, (rowHeights[row] - layout.h) / 2),
-    }
+    })
   })
+}
+
+function withLayoutMetadata<T extends Rect>(layout: T): T & Pick<GroupLayout, 'width' | 'height' | 'centerX' | 'centerY'> {
+  return {
+    ...layout,
+    width: layout.w,
+    height: layout.h,
+    centerX: layout.x + layout.w / 2,
+    centerY: layout.y + layout.h / 2,
+  }
 }
 
 function minWidthFor(group: ProjectGroup) {
@@ -503,52 +516,237 @@ function minHeightFor(group: ProjectGroup) {
   return 160
 }
 
-function routeEdge(source: Rect, target: Rect, index: number) {
-  const sourceCenter = centerOf(source)
-  const targetCenter = centerOf(target)
-  const offset = (index % 5 - 2) * 14
-  const hasVerticalGap = source.y + source.h + 44 < target.y || target.y + target.h + 44 < source.y
-  const hasHorizontalGap = source.x + source.w + 44 < target.x || target.x + target.w + 44 < source.x
-
-  if (hasVerticalGap) {
-    const sourceAbove = sourceCenter.y < targetCenter.y
-    const yLane = sourceAbove
-      ? (source.y + source.h + target.y) / 2 + offset
-      : (target.y + target.h + source.y) / 2 + offset
-    return [
-      { x: clamp(targetCenter.x, source.x + 34, source.x + source.w - 34), y: sourceAbove ? source.y + source.h : source.y },
-      { x: clamp(targetCenter.x, source.x + 34, source.x + source.w - 34), y: yLane },
-      { x: clamp(sourceCenter.x, target.x + 34, target.x + target.w - 34), y: yLane },
-      { x: clamp(sourceCenter.x, target.x + 34, target.x + target.w - 34), y: sourceAbove ? target.y : target.y + target.h },
-    ]
+function bundleParallelProjectEdges(edges: AggregatedProjectEdge[]): AggregatedProjectEdge[] {
+  const buckets = new Map<string, AggregatedProjectEdge>()
+  for (const edge of edges) {
+    const key = `${edge.sourceGroupId}->${edge.targetGroupId}`
+    const existing = buckets.get(key)
+    if (!existing) {
+      buckets.set(key, {
+        ...edge,
+        id: key,
+        edgeTypes: { ...edge.edgeTypes },
+        underlyingEdgeIds: [...edge.underlyingEdgeIds],
+        examples: [...(edge.examples ?? [])],
+      })
+      continue
+    }
+    existing.count += edge.count
+    existing.underlyingEdgeIds = uniqueStrings([...existing.underlyingEdgeIds, ...edge.underlyingEdgeIds])
+    existing.examples = [...(existing.examples ?? []), ...(edge.examples ?? [])].slice(0, 6)
+    for (const [type, count] of Object.entries(edge.edgeTypes)) {
+      const edgeType = type as EdgeType
+      existing.edgeTypes[edgeType] = (existing.edgeTypes[edgeType] ?? 0) + (count ?? 0)
+    }
   }
-
-  if (hasHorizontalGap) {
-    const sourceLeft = sourceCenter.x < targetCenter.x
-    const xLane = sourceLeft
-      ? (source.x + source.w + target.x) / 2 + offset
-      : (target.x + target.w + source.x) / 2 + offset
-    return [
-      { x: sourceLeft ? source.x + source.w : source.x, y: clamp(targetCenter.y, source.y + 34, source.y + source.h - 34) },
-      { x: xLane, y: clamp(targetCenter.y, source.y + 34, source.y + source.h - 34) },
-      { x: xLane, y: clamp(sourceCenter.y, target.y + 34, target.y + target.h - 34) },
-      { x: sourceLeft ? target.x : target.x + target.w, y: clamp(sourceCenter.y, target.y + 34, target.y + target.h - 34) },
-    ]
-  }
-
-  const routeAbove = Math.min(source.y, target.y) > 130
-  const yLane = routeAbove
-    ? Math.min(source.y, target.y) - 52 - index * 10
-    : Math.max(source.y + source.h, target.y + target.h) + 52 + index * 10
-  return [
-    { x: sourceCenter.x, y: routeAbove ? source.y : source.y + source.h },
-    { x: sourceCenter.x, y: yLane },
-    { x: targetCenter.x, y: yLane },
-    { x: targetCenter.x, y: routeAbove ? target.y : target.y + target.h },
-  ]
+  return [...buckets.values()].sort((a, b) => b.count - a.count || a.id.localeCompare(b.id))
 }
 
-function labelPointFor(points: Array<{ x: number; y: number }>) {
+function routeProjectEdges(edges: AggregatedProjectEdge[], layouts: GroupLayout[]): RoutedProjectEdge[] {
+  const layoutById = new Map(layouts.map(layout => [layout.group.id, layout]))
+  const edgePlans = edges
+    .map(edge => {
+      const source = layoutById.get(edge.sourceGroupId)
+      const target = layoutById.get(edge.targetGroupId)
+      if (!source || !target) return null
+      const sides = sidesFor(source, target)
+      return { edge, source, target, ...sides }
+    })
+    .filter((plan): plan is EdgePlan => Boolean(plan))
+
+  const ports = assignPorts(edgePlans)
+  const obstacles = layouts.map(layout => inflateRect(layout, 24))
+  const accepted: RoutedProjectEdge[] = []
+  const occupiedLabels: Rect[] = []
+
+  edgePlans.forEach((plan, index) => {
+    const sourcePort = ports.get(`${plan.edge.id}:source`) ?? sideCenter(plan.source, plan.sourceSide)
+    const targetPort = ports.get(`${plan.edge.id}:target`) ?? sideCenter(plan.target, plan.targetSide)
+    const route = chooseBestRoute(plan, sourcePort, targetPort, obstacles, accepted, index)
+    const label = formatEdgeLabel(plan.edge)
+    const labelSize = { w: Math.max(76, label.length * 6 + 18), h: 22 }
+    const labelPoint = placeLabel(route.points, labelSize, occupiedLabels)
+    occupiedLabels.push({ x: labelPoint.x - labelSize.w / 2, y: labelPoint.y - labelSize.h / 2, w: labelSize.w, h: labelSize.h })
+    accepted.push({
+      edge: plan.edge,
+      points: route.points,
+      labelPoint,
+      sourceLabel: plan.source.group.label,
+      targetLabel: plan.target.group.label,
+    })
+  })
+
+  return accepted
+}
+
+function sidesFor(source: GroupLayout, target: GroupLayout): Pick<EdgePlan, 'sourceSide' | 'targetSide' | 'orientation'> {
+  const dx = target.centerX - source.centerX
+  const dy = target.centerY - source.centerY
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0
+      ? { sourceSide: 'right', targetSide: 'left', orientation: 'horizontal' }
+      : { sourceSide: 'left', targetSide: 'right', orientation: 'horizontal' }
+  }
+  return dy >= 0
+    ? { sourceSide: 'bottom', targetSide: 'top', orientation: 'vertical' }
+    : { sourceSide: 'top', targetSide: 'bottom', orientation: 'vertical' }
+}
+
+function assignPorts(edgePlans: EdgePlan[]) {
+  const incident = new Map<string, Array<{ edgeId: string; role: 'source' | 'target'; opposite: number }>>()
+  for (const plan of edgePlans) {
+    const sourceKey = `${plan.source.group.id}:${plan.sourceSide}`
+    const targetKey = `${plan.target.group.id}:${plan.targetSide}`
+    incident.set(sourceKey, [...(incident.get(sourceKey) ?? []), {
+      edgeId: plan.edge.id,
+      role: 'source',
+      opposite: plan.sourceSide === 'left' || plan.sourceSide === 'right' ? plan.target.centerY : plan.target.centerX,
+    }])
+    incident.set(targetKey, [...(incident.get(targetKey) ?? []), {
+      edgeId: plan.edge.id,
+      role: 'target',
+      opposite: plan.targetSide === 'left' || plan.targetSide === 'right' ? plan.source.centerY : plan.source.centerX,
+    }])
+  }
+
+  const layoutByGroup = new Map(edgePlans.flatMap(plan => [[plan.source.group.id, plan.source], [plan.target.group.id, plan.target]] as Array<[string, GroupLayout]>))
+  const ports = new Map<string, Point>()
+  for (const [key, entries] of incident) {
+    const [groupId, side] = key.split(':') as [string, Side]
+    const rect = layoutByGroup.get(groupId)
+    if (!rect) continue
+    const sorted = entries.slice().sort((a, b) => a.opposite - b.opposite || a.edgeId.localeCompare(b.edgeId))
+    sorted.forEach((entry, index) => {
+      ports.set(`${entry.edgeId}:${entry.role}`, portAt(rect, side, index, sorted.length))
+    })
+  }
+  return ports
+}
+
+function portAt(rect: Rect, side: Side, index: number, count: number): Point {
+  const pad = 34
+  const ratio = (index + 1) / (count + 1)
+  if (side === 'left' || side === 'right') {
+    return { x: side === 'left' ? rect.x : rect.x + rect.w, y: rect.y + pad + (rect.h - pad * 2) * ratio }
+  }
+  return { x: rect.x + pad + (rect.w - pad * 2) * ratio, y: side === 'top' ? rect.y : rect.y + rect.h }
+}
+
+function sideCenter(rect: Rect, side: Side): Point {
+  if (side === 'left') return { x: rect.x, y: rect.y + rect.h / 2 }
+  if (side === 'right') return { x: rect.x + rect.w, y: rect.y + rect.h / 2 }
+  if (side === 'top') return { x: rect.x + rect.w / 2, y: rect.y }
+  return { x: rect.x + rect.w / 2, y: rect.y + rect.h }
+}
+
+function chooseBestRoute(
+  plan: EdgePlan,
+  sourcePort: Point,
+  targetPort: Point,
+  obstacles: Rect[],
+  accepted: RoutedProjectEdge[],
+  index: number,
+) {
+  const candidateObstacles = obstacles.filter(rect =>
+    !pointInRect({ x: plan.source.centerX, y: plan.source.centerY }, rect)
+    && !pointInRect({ x: plan.target.centerX, y: plan.target.centerY }, rect),
+  )
+  const candidateRoutes = candidateRoutePoints(plan, sourcePort, targetPort, index)
+  return candidateRoutes
+    .map(points => ({ points: simplifyRoute(points), score: routeScore(points, candidateObstacles, accepted) }))
+    .sort((a, b) => a.score - b.score || routeLength(a.points) - routeLength(b.points))[0]
+    ?? { points: [sourcePort, targetPort], score: 0 }
+}
+
+function candidateRoutePoints(plan: EdgePlan, sourcePort: Point, targetPort: Point, index: number) {
+  const laneOffset = (index % 7 - 3) * 16
+  const minX = Math.min(plan.source.x, plan.target.x)
+  const maxX = Math.max(plan.source.x + plan.source.w, plan.target.x + plan.target.w)
+  const minY = Math.min(plan.source.y, plan.target.y)
+  const maxY = Math.max(plan.source.y + plan.source.h, plan.target.y + plan.target.h)
+
+  if (plan.orientation === 'horizontal') {
+    const between = (sourcePort.x + targetPort.x) / 2
+    const candidates = uniqueNumbers([
+      between + laneOffset,
+      between - laneOffset,
+      minX - 64 - Math.abs(laneOffset),
+      maxX + 64 + Math.abs(laneOffset),
+      plan.sourceSide === 'right' ? plan.source.x + plan.source.w + 72 + laneOffset : plan.source.x - 72 + laneOffset,
+      plan.targetSide === 'left' ? plan.target.x - 72 - laneOffset : plan.target.x + plan.target.w + 72 - laneOffset,
+    ])
+    return candidates.map(midX => [
+      sourcePort,
+      { x: midX, y: sourcePort.y },
+      { x: midX, y: targetPort.y },
+      targetPort,
+    ])
+  }
+
+  const between = (sourcePort.y + targetPort.y) / 2
+  const candidates = uniqueNumbers([
+    between + laneOffset,
+    between - laneOffset,
+    minY - 64 - Math.abs(laneOffset),
+    maxY + 64 + Math.abs(laneOffset),
+    plan.sourceSide === 'bottom' ? plan.source.y + plan.source.h + 72 + laneOffset : plan.source.y - 72 + laneOffset,
+    plan.targetSide === 'top' ? plan.target.y - 72 - laneOffset : plan.target.y + plan.target.h + 72 - laneOffset,
+  ])
+  return candidates.map(midY => [
+    sourcePort,
+    { x: sourcePort.x, y: midY },
+    { x: targetPort.x, y: midY },
+    targetPort,
+  ])
+}
+
+function routeScore(points: Point[], obstacles: Rect[], accepted: RoutedProjectEdge[]) {
+  const segments = segmentsFor(points)
+  const obstacleIntersections = segments.reduce((count, segment) =>
+    count + obstacles.filter(rect => segmentIntersectsRect(segment, rect)).length, 0)
+  const existingEdgeCrossings = accepted.reduce((count, route) =>
+    count + segmentsCrossingCount(segments, segmentsFor(route.points)), 0)
+  const laneOverlap = accepted.reduce((count, route) => count + overlappingSegmentCount(segments, segmentsFor(route.points)), 0)
+  return routeLength(points)
+    + bendCount(points) * 80
+    + obstacleIntersections * 10000
+    + existingEdgeCrossings * 2000
+    + laneOverlap * 300
+}
+
+function simplifyRoute(points: Point[]) {
+  const result: Point[] = []
+  for (const point of points) {
+    const previous = result[result.length - 1]
+    if (previous && previous.x === point.x && previous.y === point.y) continue
+    result.push(point)
+  }
+  return result.filter((point, index) => {
+    const previous = result[index - 1]
+    const next = result[index + 1]
+    if (!previous || !next) return true
+    return !((previous.x === point.x && point.x === next.x) || (previous.y === point.y && point.y === next.y))
+  })
+}
+
+function placeLabel(points: Point[], labelSize: { w: number; h: number }, occupiedLabels: Rect[]) {
+  const base = labelPointFor(points)
+  const offsets = [
+    { x: 0, y: 0 },
+    { x: 0, y: -14 },
+    { x: 0, y: 14 },
+    { x: 14, y: 0 },
+    { x: -14, y: 0 },
+    { x: 14, y: -14 },
+    { x: -14, y: 14 },
+  ]
+  return offsets
+    .map(offset => ({ x: base.x + offset.x, y: base.y + offset.y }))
+    .find(point => !occupiedLabels.some(rect => rectsOverlap({ x: point.x - labelSize.w / 2, y: point.y - labelSize.h / 2, w: labelSize.w, h: labelSize.h }, rect)))
+    ?? { x: base.x, y: base.y + occupiedLabels.length * 12 }
+}
+
+function labelPointFor(points: Point[]) {
   let best = { x: points[0].x, y: points[0].y }
   let bestLength = -1
   for (let index = 1; index < points.length; index += 1) {
@@ -563,10 +761,151 @@ function labelPointFor(points: Array<{ x: number; y: number }>) {
   return best
 }
 
-type Rect = { x: number; y: number; w: number; h: number }
+function segmentsFor(points: Point[]): Segment[] {
+  const segments: Segment[] = []
+  for (let index = 1; index < points.length; index += 1) {
+    segments.push({ a: points[index - 1], b: points[index] })
+  }
+  return segments
+}
 
-function centerOf(rect: Rect) {
-  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 }
+function routeLength(points: Point[]) {
+  return segmentsFor(points).reduce((sum, segment) => sum + segmentLength(segment), 0)
+}
+
+function bendCount(points: Point[]) {
+  let bends = 0
+  for (let index = 2; index < points.length; index += 1) {
+    const previous = points[index - 2]
+    const current = points[index - 1]
+    const next = points[index]
+    const directionA = previous.x === current.x ? 'v' : 'h'
+    const directionB = current.x === next.x ? 'v' : 'h'
+    if (directionA !== directionB) bends += 1
+  }
+  return bends
+}
+
+function segmentLength(segment: Segment) {
+  return Math.abs(segment.a.x - segment.b.x) + Math.abs(segment.a.y - segment.b.y)
+}
+
+function segmentIntersectsRect(segment: Segment, rect: Rect) {
+  if (pointInRect(segment.a, rect) || pointInRect(segment.b, rect)) return true
+  const left = rect.x
+  const right = rect.x + rect.w
+  const top = rect.y
+  const bottom = rect.y + rect.h
+  if (segment.a.x === segment.b.x) {
+    const x = segment.a.x
+    const [y1, y2] = sortedPair(segment.a.y, segment.b.y)
+    return x >= left && x <= right && y2 >= top && y1 <= bottom
+  }
+  if (segment.a.y === segment.b.y) {
+    const y = segment.a.y
+    const [x1, x2] = sortedPair(segment.a.x, segment.b.x)
+    return y >= top && y <= bottom && x2 >= left && x1 <= right
+  }
+  return false
+}
+
+function segmentsCrossingCount(segments: Segment[], existing: Segment[]) {
+  let count = 0
+  for (const segment of segments) {
+    for (const other of existing) {
+      if (segmentsCross(segment, other)) count += 1
+    }
+  }
+  return count
+}
+
+function overlappingSegmentCount(segments: Segment[], existing: Segment[]) {
+  let count = 0
+  for (const segment of segments) {
+    for (const other of existing) {
+      if (segmentsOverlap(segment, other)) count += 1
+    }
+  }
+  return count
+}
+
+function segmentsCross(a: Segment, b: Segment) {
+  const aVertical = a.a.x === a.b.x
+  const bVertical = b.a.x === b.b.x
+  if (aVertical === bVertical) return false
+  const vertical = aVertical ? a : b
+  const horizontal = aVertical ? b : a
+  const [vy1, vy2] = sortedPair(vertical.a.y, vertical.b.y)
+  const [hx1, hx2] = sortedPair(horizontal.a.x, horizontal.b.x)
+  const x = vertical.a.x
+  const y = horizontal.a.y
+  return x > hx1 && x < hx2 && y > vy1 && y < vy2
+}
+
+function segmentsOverlap(a: Segment, b: Segment) {
+  if (a.a.x === a.b.x && b.a.x === b.b.x && a.a.x === b.a.x) {
+    const [a1, a2] = sortedPair(a.a.y, a.b.y)
+    const [b1, b2] = sortedPair(b.a.y, b.b.y)
+    return Math.min(a2, b2) - Math.max(a1, b1) > 8
+  }
+  if (a.a.y === a.b.y && b.a.y === b.b.y && a.a.y === b.a.y) {
+    const [a1, a2] = sortedPair(a.a.x, a.b.x)
+    const [b1, b2] = sortedPair(b.a.x, b.b.x)
+    return Math.min(a2, b2) - Math.max(a1, b1) > 8
+  }
+  return false
+}
+
+function inflateRect(rect: Rect, padding: number): Rect {
+  return {
+    x: rect.x - padding,
+    y: rect.y - padding,
+    w: rect.w + padding * 2,
+    h: rect.h + padding * 2,
+  }
+}
+
+function rectsOverlap(a: Rect, b: Rect) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+function pointInRect(point: Point, rect: Rect) {
+  return point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)]
+}
+
+function uniqueNumbers(values: number[]) {
+  return [...new Set(values.map(value => Math.round(value)))]
+}
+
+function sortedPair(a: number, b: number): [number, number] {
+  return a <= b ? [a, b] : [b, a]
+}
+
+type Rect = { x: number; y: number; w: number; h: number }
+type Point = { x: number; y: number }
+type Segment = { a: Point; b: Point }
+type Side = 'left' | 'right' | 'top' | 'bottom'
+type RouteOrientation = 'horizontal' | 'vertical'
+
+interface EdgePlan {
+  edge: AggregatedProjectEdge
+  source: GroupLayout
+  target: GroupLayout
+  sourceSide: Side
+  targetSide: Side
+  orientation: RouteOrientation
+}
+
+interface RoutedProjectEdge {
+  edge: AggregatedProjectEdge
+  points: Point[]
+  labelPoint: Point
+  sourceLabel: string
+  targetLabel: string
 }
 
 function clamp(value: number, min: number, max: number) {
