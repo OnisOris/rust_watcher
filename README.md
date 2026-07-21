@@ -32,6 +32,8 @@ cargo build
 Cloud deployment and secure auth setup are documented in [docs/cloud.md](docs/cloud.md).
 The planned path to production, including stage-by-stage acceptance criteria, is documented in the
 [production roadmap](docs/roadmap.md).
+The versioned data boundary and deterministic hash input are documented in the
+[canonical graph schema](docs/canonical-graph.md).
 
 ## Analyzer Setup
 
