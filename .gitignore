@@ -30,3 +30,7 @@ Thumbs.db
 .parcel-cache/
 .turbo/
 coverage/
+
+# Local UI review artifacts
+/tmp/cloud-ui-review/
+/tmp/cloud-ui-review.zip
