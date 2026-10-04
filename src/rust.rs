@@ -91,7 +91,6 @@ impl RustAnalyzer {
         let files = self.project.rust_files.clone();
         let mut result = Vec::new();
         for file in files {
-            self.open(&file).await?;
             let response: Option<DocumentSymbolResponse> = self
                 .client
                 .request(
@@ -122,7 +121,6 @@ impl RustAnalyzer {
     }
 
     pub async fn references(&mut self, symbol: &Symbol) -> Result<Vec<Location>> {
-        self.open(&symbol.file).await?;
         let values: Option<Vec<LspLocation>> = self.client.request(
             "textDocument/references",
             json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start), "context": {"includeDeclaration": true}}),
@@ -131,7 +129,6 @@ impl RustAnalyzer {
     }
 
     pub async fn definition(&mut self, symbol: &Symbol) -> Result<Option<Location>> {
-        self.open(&symbol.file).await?;
         let value: Option<GotoDefinitionResponse> = self.client.request(
             "textDocument/definition",
             json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start)}),
@@ -152,7 +149,6 @@ impl RustAnalyzer {
     }
 
     pub async fn hover(&mut self, symbol: &Symbol) -> Result<Option<String>> {
-        self.open(&symbol.file).await?;
         let hover: Option<Hover> = self.client.request(
             "textDocument/hover",
             json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start)}),
@@ -166,7 +162,6 @@ impl RustAnalyzer {
         depth: u8,
         incoming: bool,
     ) -> Result<Vec<CallNode>> {
-        self.open(&symbol.file).await?;
         let items: Option<Vec<CallHierarchyItem>> = self.client.request(
             "textDocument/prepareCallHierarchy",
             json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start)}),

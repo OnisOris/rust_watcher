@@ -95,21 +95,32 @@ impl LspClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, sender);
-        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if let Err(error) = write_message(&self.input, &message).await {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(error);
+        let params = serde_json::to_value(params)?;
+        for attempt in 0..3 {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let (sender, receiver) = oneshot::channel();
+            self.pending.lock().unwrap().insert(id, sender);
+            let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            if let Err(error) = write_message(&self.input, &message).await {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(error);
+            }
+            let response = timeout(Duration::from_secs(30), receiver)
+                .await
+                .with_context(|| format!("rust-analyzer request timed out: {method}"))?
+                .with_context(|| format!("rust-analyzer stopped during request: {method}"))?;
+            match response {
+                Ok(value) => {
+                    return serde_json::from_value(value)
+                        .with_context(|| format!("invalid rust-analyzer response to {method}"))
+                }
+                Err(error) if error.contains("-32801") && attempt < 2 => {
+                    tokio::time::sleep(Duration::from_millis(150)).await
+                }
+                Err(error) => return Err(anyhow!("rust-analyzer {method}: {error}")),
+            }
         }
-        let value = timeout(Duration::from_secs(30), receiver)
-            .await
-            .with_context(|| format!("rust-analyzer request timed out: {method}"))?
-            .with_context(|| format!("rust-analyzer stopped during request: {method}"))?
-            .map_err(|error| anyhow!("rust-analyzer {method}: {error}"))?;
-        serde_json::from_value(value)
-            .with_context(|| format!("invalid rust-analyzer response to {method}"))
+        unreachable!()
     }
 
     pub async fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<()> {

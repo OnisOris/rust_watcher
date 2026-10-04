@@ -71,8 +71,13 @@ impl Project {
             package.dependencies.sort();
         }
         let mut rust_files = Vec::new();
-        collect_rust_files(&workspace_root, &mut rust_files)?;
+        for package in &packages {
+            if let Some(root) = package.manifest_path.parent() {
+                collect_rust_files(root, root, &mut rust_files)?;
+            }
+        }
         rust_files.sort();
+        rust_files.dedup();
         Ok(Self {
             workspace_root,
             packages,
@@ -101,7 +106,11 @@ pub fn find_manifest(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn collect_rust_files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_rust_files(
+    package_root: &Path,
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<()> {
     for entry in std::fs::read_dir(directory)
         .with_context(|| format!("failed to read {}", directory.display()))?
     {
@@ -110,7 +119,10 @@ fn collect_rust_files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()>
         if path.is_dir() {
             let name = entry.file_name();
             if name != "target" && name != ".git" {
-                collect_rust_files(&path, output)?;
+                if path != package_root && path.join("Cargo.toml").is_file() {
+                    continue;
+                }
+                collect_rust_files(package_root, &path, output)?;
             }
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             output.push(path);
