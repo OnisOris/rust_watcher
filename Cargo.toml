@@ -1,47 +1,22 @@
-[workspace]
-members = [
-  "crates/graph-core",
-  "crates/ra-client",
-  "crates/project-indexer",
-  "crates/graph-builder",
-  "crates/graph-query",
-  "crates/mcp-server",
-  "crates/web-server",
-  "crates/cloud-api",
-  "crates/cloud-client",
-  "crates/local-agent",
-  "example",
-]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "rust_watcher"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "A small semantic CLI for understanding Rust codebases"
 
-[workspace.dependencies]
+[[bin]]
+name = "watcher"
+path = "src/main.rs"
+
+[dependencies]
 anyhow = "1.0"
-argon2 = "0.5"
-axum = { version = "0.8", features = ["multipart", "ws"] }
 cargo_metadata = "0.23"
-clap = { version = "4.5", features = ["derive", "env"] }
-dashmap = "6.1"
-futures-util = "0.3"
-hex = "0.4"
-base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
 lsp-types = "0.97"
-notify = "8.2"
-parking_lot = "0.12"
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
-tokio = { version = "1.40", features = ["full"] }
-tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = "2.5"
-uuid = { version = "1.10", features = ["v4", "serde"] }
-webbrowser = "1.0"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+tokio = { version = "1.40", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3.13"
