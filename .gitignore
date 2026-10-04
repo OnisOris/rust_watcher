@@ -1,5 +1,7 @@
 # Rust build output
 /target/
+**/target/
+/tests/fixtures/**/Cargo.lock
 
 # Frontend dependencies and build output
 /frontend/node_modules/
