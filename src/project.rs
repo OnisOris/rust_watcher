@@ -84,6 +84,25 @@ impl Project {
             rust_files,
         })
     }
+
+    pub fn binary_entrypoints(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<_> = self
+            .packages
+            .iter()
+            .flat_map(|package| &package.targets)
+            .filter(|target| target.kinds.iter().any(|kind| kind == "bin"))
+            .map(|target| {
+                target
+                    .crate_root
+                    .strip_prefix(&self.workspace_root)
+                    .unwrap_or(&target.crate_root)
+                    .to_path_buf()
+            })
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
 }
 
 pub fn find_manifest(path: &Path) -> Result<PathBuf> {

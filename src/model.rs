@@ -25,7 +25,10 @@ pub struct Symbol {
     pub name: String,
     pub kind: String,
     pub file: PathBuf,
+    /// Full semantic extent of the symbol.
     pub range: Range,
+    /// Identifier extent used as the position for LSP requests.
+    pub selection_range: Range,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
 }
@@ -53,6 +56,18 @@ pub struct CallNode {
     pub location: Location,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<CallNode>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cycle: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallTree {
+    pub nodes: Vec<CallNode>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,8 +90,8 @@ pub struct Explanation {
     pub hover: Option<String>,
     pub definition: Option<Location>,
     pub source: String,
-    pub callers: Vec<CallNode>,
-    pub callees: Vec<CallNode>,
+    pub callers: CallTree,
+    pub callees: CallTree,
     pub references: usize,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -86,8 +101,8 @@ pub fn stable_symbol_id(root: &std::path::Path, symbol: &Symbol) -> String {
     format!(
         "{}:{}:{}:{}:{}",
         relative.to_string_lossy().replace('\\', "/"),
-        symbol.range.start.line,
-        symbol.range.start.character,
+        symbol.selection_range.start.line,
+        symbol.selection_range.start.character,
         symbol.kind,
         symbol.name
     )
@@ -106,6 +121,16 @@ mod tests {
                 kind: "function".into(),
                 file: PathBuf::from(base).join("src/lib.rs"),
                 range: Range {
+                    start: Position {
+                        line: 4,
+                        character: 2,
+                    },
+                    end: Position {
+                        line: 4,
+                        character: 5,
+                    },
+                },
+                selection_range: Range {
                     start: Position {
                         line: 4,
                         character: 2,

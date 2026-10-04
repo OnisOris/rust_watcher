@@ -1,7 +1,7 @@
 use crate::lsp::{path_uri, uri_path, LspClient};
 use crate::model::{
-    stable_symbol_id, CallNode, Diagnostic, Explanation, Location, Position, Range, Severity,
-    Symbol,
+    stable_symbol_id, CallNode, CallTree, Diagnostic, Explanation, Location, Position, Range,
+    Severity, Symbol,
 };
 use crate::project::Project;
 use anyhow::{Context, Result};
@@ -17,10 +17,59 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
+const CALL_NODE_BUDGET: usize = 100;
+const CALL_CHILD_LIMIT: usize = 20;
+
+#[derive(Debug)]
+pub enum ResolveError {
+    NotFound {
+        query: String,
+    },
+    Ambiguous {
+        query: String,
+        candidates: Vec<Symbol>,
+    },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { query } => write!(formatter, "symbol not found: {query}"),
+            Self::Ambiguous { query, candidates } => {
+                writeln!(formatter, "Multiple symbols matched \"{query}\":\n")?;
+                for symbol in candidates {
+                    writeln!(
+                        formatter,
+                        "  {:<24} {}:{}",
+                        qualified_name(symbol),
+                        symbol.file.display(),
+                        symbol.selection_range.start.line + 1
+                    )?;
+                }
+                write!(formatter, "\nUse a more specific symbol name.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
 pub struct RustAnalyzer {
     pub project: Project,
     client: LspClient,
     opened: HashSet<PathBuf>,
+}
+
+struct TraversalState {
+    remaining: usize,
+    truncated: bool,
+}
+
+struct NormalizedCall {
+    key: String,
+    name: String,
+    item: CallHierarchyItem,
+    location: Location,
 }
 
 impl RustAnalyzer {
@@ -34,7 +83,7 @@ impl RustAnalyzer {
         })
     }
 
-    async fn open(&mut self, file: &Path) -> Result<()> {
+    async fn open(&mut self, file: &Path) -> Result<bool> {
         let file = if file.is_absolute() {
             file.to_path_buf()
         } else {
@@ -42,8 +91,9 @@ impl RustAnalyzer {
         };
         if self.opened.insert(file.clone()) {
             self.client.open(&file).await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub async fn symbols(&mut self, query: &str) -> Result<Vec<Symbol>> {
@@ -59,9 +109,7 @@ impl RustAnalyzer {
             .into_iter()
             .filter_map(|value| self.normalize_symbol(value).ok())
             .collect();
-        if query.contains("::") || symbols.is_empty() {
-            symbols.extend(self.all_document_symbols().await?);
-        }
+        symbols.extend(self.all_document_symbols().await?);
         let needle = query.to_lowercase();
         symbols.retain(|symbol| {
             symbol
@@ -73,18 +121,38 @@ impl RustAnalyzer {
         symbols.sort_by(|a, b| {
             symbol_score(b, query)
                 .cmp(&symbol_score(a, query))
+                .then(range_size(b.range).cmp(&range_size(a.range)))
                 .then(a.id.cmp(&b.id))
         });
-        symbols.dedup_by(|a, b| a.id == b.id);
+        symbols.dedup_by(|a, b| {
+            a.file == b.file
+                && a.selection_range.start == b.selection_range.start
+                && a.name == b.name
+        });
         Ok(symbols)
     }
 
     pub async fn find_symbol(&mut self, query: &str) -> Result<Symbol> {
-        self.symbols(query)
-            .await?
-            .into_iter()
-            .next()
-            .with_context(|| format!("symbol not found: {query}"))
+        let symbols = self.symbols(query).await?;
+        let leaf = query.rsplit("::").next().unwrap_or(query);
+        let exact: Vec<_> = symbols
+            .iter()
+            .filter(|symbol| symbol.name == leaf || symbol.name == query)
+            .cloned()
+            .collect();
+        let candidates = if exact.is_empty() { symbols } else { exact };
+        match candidates.len() {
+            0 => Err(ResolveError::NotFound {
+                query: query.to_owned(),
+            }
+            .into()),
+            1 => Ok(candidates.into_iter().next().unwrap()),
+            _ => Err(ResolveError::Ambiguous {
+                query: query.to_owned(),
+                candidates,
+            }
+            .into()),
+        }
     }
 
     pub async fn all_document_symbols(&mut self) -> Result<Vec<Symbol>> {
@@ -123,7 +191,7 @@ impl RustAnalyzer {
     pub async fn references(&mut self, symbol: &Symbol) -> Result<Vec<Location>> {
         let values: Option<Vec<LspLocation>> = self.client.request(
             "textDocument/references",
-            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start), "context": {"includeDeclaration": true}}),
+            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.selection_range.start), "context": {"includeDeclaration": true}}),
         ).await?;
         self.normalize_locations(values.unwrap_or_default())
     }
@@ -131,7 +199,7 @@ impl RustAnalyzer {
     pub async fn definition(&mut self, symbol: &Symbol) -> Result<Option<Location>> {
         let value: Option<GotoDefinitionResponse> = self.client.request(
             "textDocument/definition",
-            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start)}),
+            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.selection_range.start)}),
         ).await?;
         let locations = match value {
             Some(GotoDefinitionResponse::Scalar(location)) => vec![location],
@@ -151,27 +219,34 @@ impl RustAnalyzer {
     pub async fn hover(&mut self, symbol: &Symbol) -> Result<Option<String>> {
         let hover: Option<Hover> = self.client.request(
             "textDocument/hover",
-            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start)}),
+            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.selection_range.start)}),
         ).await?;
         Ok(hover.map(|hover| hover_text(hover.contents)))
     }
 
-    pub async fn calls(
-        &mut self,
-        symbol: &Symbol,
-        depth: u8,
-        incoming: bool,
-    ) -> Result<Vec<CallNode>> {
+    pub async fn calls(&mut self, symbol: &Symbol, depth: u8, incoming: bool) -> Result<CallTree> {
         let items: Option<Vec<CallHierarchyItem>> = self.client.request(
             "textDocument/prepareCallHierarchy",
-            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.range.start)}),
+            json!({"textDocument": {"uri": path_uri(&self.absolute(&symbol.file), false)?}, "position": lsp_position(symbol.selection_range.start)}),
         ).await?;
-        let mut result = Vec::new();
+        let mut nodes = Vec::new();
+        let mut traversal = TraversalState {
+            remaining: CALL_NODE_BUDGET,
+            truncated: false,
+        };
         for item in items.unwrap_or_default() {
-            result.extend(self.expand_calls(item, depth, incoming).await?);
+            let mut path = HashSet::from([call_item_key(&item)]);
+            nodes.extend(
+                self.expand_calls(item, depth, incoming, &mut path, &mut traversal)
+                    .await?,
+            );
         }
-        result.sort_by(|a, b| a.name.cmp(&b.name).then(a.location.cmp(&b.location)));
-        Ok(result)
+        nodes.sort_by(|a, b| a.name.cmp(&b.name).then(a.location.cmp(&b.location)));
+        nodes.dedup_by(|a, b| a.name == b.name && a.location == b.location);
+        Ok(CallTree {
+            nodes,
+            truncated: traversal.truncated,
+        })
     }
 
     fn expand_calls<'a>(
@@ -179,6 +254,8 @@ impl RustAnalyzer {
         item: CallHierarchyItem,
         depth: u8,
         incoming: bool,
+        path: &'a mut HashSet<String>,
+        traversal: &'a mut TraversalState,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<CallNode>>> + 'a>> {
         Box::pin(async move {
             if depth == 0 {
@@ -217,34 +294,70 @@ impl RustAnalyzer {
                     })
                     .collect()
             };
+            let mut calls: Vec<_> = pairs
+                .into_iter()
+                .map(|(item, location)| {
+                    let location = self.normalize_location(location)?;
+                    Ok(NormalizedCall {
+                        key: call_item_key(&item),
+                        name: item.name.clone(),
+                        item,
+                        location,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            calls.sort_by(|a, b| a.name.cmp(&b.name).then(a.location.cmp(&b.location)));
+            calls.dedup_by(|a, b| a.name == b.name && a.location == b.location);
+            if calls.len() > CALL_CHILD_LIMIT {
+                traversal.truncated = true;
+                calls.truncate(CALL_CHILD_LIMIT);
+            }
+
             let mut nodes = Vec::new();
-            for (child, location) in pairs.into_iter().take(20) {
-                let normalized = self.normalize_location(location)?;
-                let children = self
-                    .expand_calls(child.clone(), depth - 1, incoming)
-                    .await?;
+            for call in calls {
+                if traversal.remaining == 0 {
+                    traversal.truncated = true;
+                    break;
+                }
+                traversal.remaining -= 1;
+                let cycle = path.contains(&call.key);
+                let children = if cycle || depth == 1 {
+                    Vec::new()
+                } else {
+                    path.insert(call.key.clone());
+                    let children = self
+                        .expand_calls(call.item, depth - 1, incoming, path, traversal)
+                        .await?;
+                    path.remove(&call.key);
+                    children
+                };
                 nodes.push(CallNode {
-                    name: child.name,
-                    location: normalized,
+                    name: call.name,
+                    location: call.location,
                     children,
+                    cycle,
                 });
             }
-            nodes.sort_by(|a, b| a.name.cmp(&b.name).then(a.location.cmp(&b.location)));
-            nodes.dedup_by(|a, b| a.name == b.name && a.location == b.location);
             Ok(nodes)
         })
     }
 
     pub async fn diagnostics(&mut self) -> Result<Vec<Diagnostic>> {
-        let generation = self.client.notification_generation();
+        let generation = self.client.diagnostic_generation();
+        let mut expected = HashSet::new();
+        let mut opened = false;
         for file in self.project.rust_files.clone() {
-            self.open(&file).await?;
+            expected.insert(path_uri(&file, false)?);
+            opened |= self.open(&file).await?;
         }
-        if self.client.notification_generation() == generation {
-            self.client
-                .wait_for_notifications(generation, Duration::from_secs(15))
-                .await?;
-        }
+        let after = if opened {
+            generation
+        } else {
+            generation.saturating_sub(1)
+        };
+        self.client
+            .wait_for_diagnostics(&expected, after, Duration::from_secs(30))
+            .await?;
         let mut diagnostics = Vec::new();
         for (uri, diagnostic) in self.client.diagnostics() {
             let severity = match diagnostic.severity {
@@ -284,7 +397,7 @@ impl RustAnalyzer {
                 diagnostic.file == symbol.file && overlaps(diagnostic.range, symbol.range)
             })
             .collect();
-        let source = source_fragment(&self.absolute(&symbol.file), symbol.range)?;
+        let source = source_fragment(&self.absolute(&symbol.file), symbol.selection_range)?;
         let signature = hover.as_deref().and_then(signature_line).map(str::to_owned);
         Ok(Explanation {
             symbol,
@@ -311,6 +424,7 @@ impl RustAnalyzer {
             kind: kind_name(value.kind).into(),
             file,
             range: range(value.location.range),
+            selection_range: range(value.location.range),
             container: value.container_name,
         };
         symbol.id = stable_symbol_id(&self.project.workspace_root, &symbol);
@@ -332,7 +446,8 @@ impl RustAnalyzer {
             name: name.clone(),
             kind: kind_name(value.kind).into(),
             file: relative,
-            range: range(value.selection_range),
+            range: range(value.range),
+            selection_range: range(value.selection_range),
             container,
         };
         symbol.id = stable_symbol_id(&self.project.workspace_root, &symbol);
@@ -374,14 +489,29 @@ impl RustAnalyzer {
 }
 
 fn qualification_matches(symbol: &Symbol, query: &str) -> bool {
-    let Some((container, _)) = query.rsplit_once("::") else {
+    let Some((qualifier, _)) = query.rsplit_once("::") else {
         return true;
     };
-    symbol
-        .container
-        .as_deref()
-        .is_some_and(|value| value.contains(container))
-        || symbol.name == query
+    symbol.container.as_deref().is_some_and(|container| {
+        let container = normalized_container(container);
+        container == qualifier || container.ends_with(&format!("::{qualifier}"))
+    }) || symbol.name == query
+}
+
+fn normalized_container(container: &str) -> &str {
+    let container = container
+        .trim()
+        .strip_prefix("impl ")
+        .unwrap_or(container.trim());
+    let container = container.rsplit(" for ").next().unwrap_or(container);
+    container.split(['<', ' ']).next().unwrap_or(container)
+}
+
+fn qualified_name(symbol: &Symbol) -> String {
+    match symbol.container.as_deref() {
+        Some(container) => format!("{}::{}", normalized_container(container), symbol.name),
+        None => symbol.name.clone(),
+    }
 }
 
 fn symbol_score(symbol: &Symbol, query: &str) -> u8 {
@@ -389,6 +519,22 @@ fn symbol_score(symbol: &Symbol, query: &str) -> u8 {
     u8::from(symbol.name == query) * 4
         + u8::from(symbol.name == leaf) * 2
         + u8::from(qualification_matches(symbol, query))
+}
+
+fn range_size(range: Range) -> (u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.character.saturating_sub(range.start.character),
+    )
+}
+
+fn call_item_key(item: &CallHierarchyItem) -> String {
+    format!(
+        "{}:{}:{}",
+        item.uri.as_str(),
+        item.selection_range.start.line,
+        item.selection_range.start.character
+    )
 }
 
 fn lsp_position(position: Position) -> Value {
@@ -494,5 +640,38 @@ mod tests {
             signature_line("```rust\nfn add(a: i32) -> i32\n```"),
             Some("fn add(a: i32) -> i32")
         );
+    }
+
+    #[test]
+    fn qualification_is_segment_exact() {
+        let symbol = Symbol {
+            id: "id".into(),
+            name: "run".into(),
+            kind: "method".into(),
+            file: "src/main.rs".into(),
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 2,
+                    character: 1,
+                },
+            },
+            selection_range: Range {
+                start: Position {
+                    line: 0,
+                    character: 3,
+                },
+                end: Position {
+                    line: 0,
+                    character: 6,
+                },
+            },
+            container: Some("impl MyEngine".into()),
+        };
+        assert!(qualification_matches(&symbol, "MyEngine::run"));
+        assert!(!qualification_matches(&symbol, "Engine::run"));
     }
 }

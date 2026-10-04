@@ -16,20 +16,33 @@ use std::path::Path;
 use std::process::Stdio;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
+    if let Err(error) = execute(&cli).await {
+        if json {
+            output::json_error(&error);
+        } else {
+            eprintln!("error: {error:#}");
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) {
+                eprintln!("\nInstall rust-analyzer with:\n    rustup component add rust-analyzer");
+            }
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn execute(cli: &Cli) -> Result<()> {
     if matches!(cli.command, Some(Command::Doctor)) {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
-    let mut analyzer = RustAnalyzer::start(project, Path::new("rust-analyzer"))
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "{error}\n\nInstall rust-analyzer with:\n    rustup component add rust-analyzer"
-            )
-        })?;
-    let result = run(&cli, &mut analyzer).await;
+    let mut analyzer = RustAnalyzer::start(project, Path::new("rust-analyzer")).await?;
+    let result = run(cli, &mut analyzer).await;
     analyzer.shutdown().await;
     result
 }
@@ -39,15 +52,24 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
         None => {
             let symbols = analyzer.all_document_symbols().await?;
             let diagnostics = analyzer.diagnostics().await?;
-            let mut entrypoints: Vec<_> = symbols
-                .iter()
-                .filter(|symbol| symbol.name == "main" && symbol.kind == "function")
-                .map(|symbol| model::Location {
-                    file: symbol.file.clone(),
-                    range: symbol.range,
+            let entrypoints: Vec<_> = analyzer
+                .project
+                .binary_entrypoints()
+                .into_iter()
+                .map(|file| model::Location {
+                    file,
+                    range: model::Range {
+                        start: model::Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: model::Position {
+                            line: 0,
+                            character: 0,
+                        },
+                    },
                 })
                 .collect();
-            entrypoints.sort();
             let summary = ProjectSummary {
                 workspace_root: analyzer.project.workspace_root.clone(),
                 crates: analyzer.project.packages.len(),
@@ -203,9 +225,8 @@ async fn doctor(path: &Path, json: bool) -> Result<()> {
         };
         checks.push(workspace);
     }
-    if json {
-        output::json(&checks)?;
-    } else {
+    let failed = checks.iter().any(|check| !check.ok);
+    if !json {
         for check in &checks {
             println!(
                 "{} {}{}",
@@ -225,8 +246,11 @@ async fn doctor(path: &Path, json: bool) -> Result<()> {
         }
         bail!("rust-analyzer not found");
     }
-    if checks.iter().any(|check| !check.ok) {
+    if failed {
         bail!("one or more doctor checks failed");
+    }
+    if json {
+        output::json(&checks)?;
     }
     Ok(())
 }

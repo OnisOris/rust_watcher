@@ -18,10 +18,13 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 #[derive(Default)]
 struct NotificationState {
     diagnostics: HashMap<String, Vec<lsp_types::Diagnostic>>,
+    diagnostic_generation: u64,
+    last_diagnostic_at: Option<Instant>,
     active_progress: HashSet<String>,
     saw_progress: bool,
-    last_message: Option<Instant>,
-    generation: u64,
+    last_progress_at: Option<Instant>,
+    server_status_seen: bool,
+    server_quiescent: bool,
 }
 
 pub struct LspClient {
@@ -30,6 +33,8 @@ pub struct LspClient {
     pending: Pending,
     state: Arc<Mutex<NotificationState>>,
     changed: Arc<Notify>,
+    reader_error: Arc<Mutex<Option<String>>>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
     next_id: AtomicU64,
 }
 
@@ -38,7 +43,7 @@ impl LspClient {
         let mut child = Command::new(binary)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to start rust-analyzer at {}", binary.display()))?;
@@ -52,15 +57,24 @@ impl LspClient {
             .stdout
             .take()
             .context("rust-analyzer stdout unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("rust-analyzer stderr unavailable")?;
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let state = Arc::new(Mutex::new(NotificationState::default()));
         let changed = Arc::new(Notify::new());
+        let reader_error = Arc::new(Mutex::new(None));
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        spawn_stderr_reader(stderr, stderr_tail.clone());
         spawn_reader(
             output,
             input.clone(),
             pending.clone(),
             state.clone(),
             changed.clone(),
+            reader_error.clone(),
+            stderr_tail.clone(),
         );
 
         let client = Self {
@@ -69,6 +83,8 @@ impl LspClient {
             pending,
             state,
             changed,
+            reader_error,
+            stderr_tail,
             next_id: AtomicU64::new(1),
         };
         let root_uri = path_uri(root, true)?;
@@ -81,7 +97,8 @@ impl LspClient {
                     "workspaceFolders": [{"uri": root_uri, "name": root.file_name().and_then(|name| name.to_str()).unwrap_or("workspace")}],
                     "capabilities": {
                         "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}, "callHierarchy": {}, "hover": {}, "references": {}, "definition": {}, "publishDiagnostics": {}},
-                        "workspace": {"symbol": {}}
+                        "workspace": {"symbol": {}},
+                        "experimental": {"serverStatusNotification": true}
                     }
                 }),
             )
@@ -97,6 +114,9 @@ impl LspClient {
     {
         let params = serde_json::to_value(params)?;
         for attempt in 0..3 {
+            if let Some(error) = self.reader_error.lock().unwrap().clone() {
+                return Err(anyhow!(self.with_stderr(error)));
+            }
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
             let (sender, receiver) = oneshot::channel();
             self.pending.lock().unwrap().insert(id, sender);
@@ -105,10 +125,28 @@ impl LspClient {
                 self.pending.lock().unwrap().remove(&id);
                 return Err(error);
             }
-            let response = timeout(Duration::from_secs(30), receiver)
-                .await
-                .with_context(|| format!("rust-analyzer request timed out: {method}"))?
-                .with_context(|| format!("rust-analyzer stopped during request: {method}"))?;
+            let response = match timeout(Duration::from_secs(30), receiver).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => {
+                    self.pending.lock().unwrap().remove(&id);
+                    let error = self
+                        .reader_error
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| {
+                            format!("rust-analyzer stopped during request: {method}")
+                        });
+                    return Err(anyhow!(self.with_stderr(error)));
+                }
+                Err(_) => {
+                    self.pending.lock().unwrap().remove(&id);
+                    return Err(anyhow!(
+                        self.with_stderr(format!("rust-analyzer request timed out: {method}"))
+                    ));
+                }
+            };
+            self.pending.lock().unwrap().remove(&id);
             match response {
                 Ok(value) => {
                     return serde_json::from_value(value)
@@ -117,7 +155,11 @@ impl LspClient {
                 Err(error) if error.contains("-32801") && attempt < 2 => {
                     tokio::time::sleep(Duration::from_millis(150)).await
                 }
-                Err(error) => return Err(anyhow!("rust-analyzer {method}: {error}")),
+                Err(error) => {
+                    return Err(anyhow!(
+                        self.with_stderr(format!("rust-analyzer {method}: {error}"))
+                    ))
+                }
             }
         }
         unreachable!()
@@ -145,18 +187,23 @@ impl LspClient {
         loop {
             let ready = {
                 let state = self.state.lock().unwrap();
-                let quiet = state
-                    .last_message
+                let progress_quiet = state
+                    .last_progress_at
                     .is_some_and(|time| time.elapsed() >= Duration::from_millis(500));
-                (state.saw_progress && state.active_progress.is_empty() && quiet)
-                    || (!state.saw_progress && started.elapsed() >= Duration::from_secs(3))
+                (state.server_status_seen && state.server_quiescent)
+                    || (!state.server_status_seen
+                        && state.saw_progress
+                        && state.active_progress.is_empty()
+                        && progress_quiet)
             };
             if ready {
                 return Ok(());
             }
             let remaining = maximum
                 .checked_sub(started.elapsed())
-                .context("timed out waiting for rust-analyzer workspace indexing")?;
+                .with_context(|| {
+                    "timed out waiting for rust-analyzer readiness; no quiescent server status or completed progress cycle"
+                })?;
             let _ = timeout(
                 remaining.min(Duration::from_millis(250)),
                 self.changed.notified(),
@@ -186,19 +233,31 @@ impl LspClient {
         result
     }
 
-    pub fn notification_generation(&self) -> u64 {
-        self.state.lock().unwrap().generation
+    pub fn diagnostic_generation(&self) -> u64 {
+        self.state.lock().unwrap().diagnostic_generation
     }
 
-    pub async fn wait_for_notifications(&self, after: u64, maximum: Duration) -> Result<()> {
+    pub async fn wait_for_diagnostics(
+        &self,
+        expected_uris: &HashSet<String>,
+        after: u64,
+        maximum: Duration,
+    ) -> Result<()> {
         let started = Instant::now();
         loop {
             let ready = {
                 let state = self.state.lock().unwrap();
-                state.generation > after
-                    && state.active_progress.is_empty()
+                let analysis_ready = (state.server_status_seen && state.server_quiescent)
+                    || (!state.server_status_seen
+                        && state.saw_progress
+                        && state.active_progress.is_empty());
+                state.diagnostic_generation > after
+                    && expected_uris
+                        .iter()
+                        .all(|uri| state.diagnostics.contains_key(uri))
+                    && analysis_ready
                     && state
-                        .last_message
+                        .last_diagnostic_at
                         .is_some_and(|time| time.elapsed() >= Duration::from_millis(500))
             };
             if ready {
@@ -218,7 +277,27 @@ impl LspClient {
     pub async fn shutdown(&mut self) {
         let _: Result<Value> = self.request("shutdown", Value::Null).await;
         let _ = self.notify("exit", Value::Null).await;
-        let _ = self.child.wait().await;
+        if timeout(Duration::from_secs(2), self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.kill().await;
+            let _ = self.child.wait().await;
+        }
+    }
+
+    fn with_stderr(&self, message: String) -> String {
+        if message.contains("rust-analyzer stderr (tail):") {
+            return message;
+        }
+        let tail = String::from_utf8_lossy(&self.stderr_tail.lock().unwrap())
+            .trim()
+            .to_owned();
+        if tail.is_empty() {
+            message
+        } else {
+            format!("{message}\nrust-analyzer stderr (tail):\n{tail}")
+        }
     }
 }
 
@@ -228,18 +307,22 @@ fn spawn_reader(
     pending: Pending,
     state: Arc<Mutex<NotificationState>>,
     changed: Arc<Notify>,
+    reader_error: Arc<Mutex<Option<String>>>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
 ) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(output);
-        while let Ok(Some(message)) = read_message(&mut reader).await {
-            if let Some(id) = message.get("id").and_then(Value::as_u64) {
+        let terminal_error = loop {
+            let message = match read_message(&mut reader).await {
+                Ok(Some(message)) => message,
+                Ok(None) => break "rust-analyzer stdout closed".to_string(),
+                Err(error) => break format!("rust-analyzer protocol error: {error:#}"),
+            };
+            if message.get("id").is_some() {
                 if message.get("method").is_some() {
-                    let result = server_request_result(&message);
-                    let _ = write_message(
-                        &input,
-                        &json!({"jsonrpc": "2.0", "id": id, "result": result}),
-                    )
-                    .await;
+                    if let Some(response) = server_request_response(&message) {
+                        let _ = write_message(&input, &response).await;
+                    }
                 } else {
                     route_response(message, &pending);
                 }
@@ -251,9 +334,36 @@ fn spawn_reader(
                 );
                 changed.notify_waiters();
             }
-        }
+        };
+        let tail = String::from_utf8_lossy(&stderr_tail.lock().unwrap())
+            .trim()
+            .to_owned();
+        let terminal_error = if tail.is_empty() {
+            terminal_error
+        } else {
+            format!("{terminal_error}\nrust-analyzer stderr (tail):\n{tail}")
+        };
+        *reader_error.lock().unwrap() = Some(terminal_error.clone());
         for (_, sender) in pending.lock().unwrap().drain() {
-            let _ = sender.send(Err("process ended".into()));
+            let _ = sender.send(Err(terminal_error.clone()));
+        }
+    });
+}
+
+fn spawn_stderr_reader(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut buffer = [0_u8; 1024];
+        while let Ok(count) = reader.read(&mut buffer).await {
+            if count == 0 {
+                break;
+            }
+            let mut tail = tail.lock().unwrap();
+            tail.extend_from_slice(&buffer[..count]);
+            if tail.len() > 16 * 1024 {
+                let drain = tail.len() - 16 * 1024;
+                tail.drain(..drain);
+            }
         }
     });
 }
@@ -272,6 +382,11 @@ fn server_request_result(message: &Value) -> Value {
     }
 }
 
+fn server_request_response(message: &Value) -> Option<Value> {
+    let id = message.get("id")?.clone();
+    Some(json!({"jsonrpc": "2.0", "id": id, "result": server_request_result(message)}))
+}
+
 fn route_response(message: Value, pending: &Pending) {
     let Some(id) = message.get("id").and_then(Value::as_u64) else {
         return;
@@ -288,13 +403,13 @@ fn route_response(message: Value, pending: &Pending) {
 
 fn record_notification(method: &str, params: Value, state: &Arc<Mutex<NotificationState>>) {
     let mut state = state.lock().unwrap();
-    state.last_message = Some(Instant::now());
-    state.generation += 1;
     match method {
         "textDocument/publishDiagnostics" => {
             if let Ok(params) =
                 serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params)
             {
+                state.diagnostic_generation += 1;
+                state.last_diagnostic_at = Some(Instant::now());
                 state
                     .diagnostics
                     .insert(params.uri.to_string(), params.diagnostics);
@@ -302,6 +417,7 @@ fn record_notification(method: &str, params: Value, state: &Arc<Mutex<Notificati
         }
         "$/progress" => {
             state.saw_progress = true;
+            state.last_progress_at = Some(Instant::now());
             let token = params
                 .get("token")
                 .map(Value::to_string)
@@ -315,6 +431,13 @@ fn record_notification(method: &str, params: Value, state: &Arc<Mutex<Notificati
                 }
                 _ => {}
             }
+        }
+        "experimental/serverStatus" => {
+            state.server_status_seen = true;
+            state.server_quiescent = params
+                .get("quiescent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         }
         _ => {}
     }
@@ -375,6 +498,7 @@ pub fn uri_path(uri: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn frames_json_rpc_with_byte_length() {
@@ -403,5 +527,57 @@ mod tests {
         );
         assert_eq!(receiver.await.unwrap().unwrap(), json!({"ok": true}));
         assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reads_consecutive_frames_with_multibyte_bodies() {
+        let first = json!({"text": "привет 🦀"});
+        let second = json!({"value": 2});
+        let mut bytes = encode_message(&first).unwrap();
+        bytes.extend(encode_message(&second).unwrap());
+        let (mut writer, reader) = tokio::io::duplex(bytes.len());
+        writer.write_all(&bytes).await.unwrap();
+        drop(writer);
+        let mut reader = BufReader::new(reader);
+        assert_eq!(read_message(&mut reader).await.unwrap(), Some(first));
+        assert_eq!(read_message(&mut reader).await.unwrap(), Some(second));
+        assert_eq!(read_message(&mut reader).await.unwrap(), None);
+    }
+
+    #[test]
+    fn preserves_string_server_request_ids() {
+        let response = server_request_response(&json!({
+            "jsonrpc": "2.0",
+            "id": "abc-123",
+            "method": "workspace/configuration",
+            "params": {"items": []}
+        }))
+        .unwrap();
+        assert_eq!(response["id"], "abc-123");
+    }
+
+    #[test]
+    fn unrelated_notifications_do_not_advance_diagnostics() {
+        let state = Arc::new(Mutex::new(NotificationState::default()));
+        record_notification("window/logMessage", json!({"message": "loading"}), &state);
+        assert_eq!(state.lock().unwrap().diagnostic_generation, 0);
+        record_notification(
+            "experimental/serverStatus",
+            json!({"health": "ok", "quiescent": true}),
+            &state,
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(state.diagnostic_generation, 0);
+        assert!(state.server_quiescent);
+    }
+
+    #[tokio::test]
+    async fn reports_malformed_frame_errors() {
+        let bytes = b"Content-Length: nope\r\n\r\n{}";
+        let (mut writer, reader) = tokio::io::duplex(bytes.len());
+        writer.write_all(bytes).await.unwrap();
+        drop(writer);
+        let error = read_message(&mut BufReader::new(reader)).await.unwrap_err();
+        assert!(error.to_string().contains("invalid digit"));
     }
 }

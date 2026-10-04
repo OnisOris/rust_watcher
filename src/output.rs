@@ -1,10 +1,84 @@
-use crate::model::{CallNode, Diagnostic, Explanation, Location, ProjectSummary, Severity, Symbol};
+use crate::model::{
+    CallNode, CallTree, Diagnostic, Explanation, Location, ProjectSummary, Severity, Symbol,
+};
+use crate::rust::ResolveError;
 use anyhow::Result;
 use serde::Serialize;
 
 pub fn json<T: Serialize>(value: &T) -> Result<()> {
-    println!("{}", serde_json::to_string(value)?);
+    println!(
+        "{}",
+        serde_json::to_string(&SuccessEnvelope {
+            schema_version: 1,
+            ok: true,
+            data: value
+        })?
+    );
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuccessEnvelope<'a, T> {
+    schema_version: u8,
+    ok: bool,
+    data: &'a T,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ErrorEnvelope {
+    schema_version: u8,
+    ok: bool,
+    error: ErrorBody,
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    code: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    candidates: Vec<Symbol>,
+}
+
+pub fn json_error(error: &anyhow::Error) {
+    let (code, candidates) = if let Some(error) = error.downcast_ref::<ResolveError>() {
+        match error {
+            ResolveError::NotFound { .. } => ("symbol_not_found", Vec::new()),
+            ResolveError::Ambiguous { candidates, .. } => ("symbol_ambiguous", candidates.clone()),
+        }
+    } else if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    }) {
+        ("tool_not_found", Vec::new())
+    } else if error
+        .to_string()
+        .contains("timed out waiting for rust-analyzer diagnostics")
+    {
+        ("diagnostics_timeout", Vec::new())
+    } else if error
+        .to_string()
+        .contains("timed out waiting for rust-analyzer readiness")
+    {
+        ("analyzer_timeout", Vec::new())
+    } else {
+        ("operation_failed", Vec::new())
+    };
+    let envelope = ErrorEnvelope {
+        schema_version: 1,
+        ok: false,
+        error: ErrorBody {
+            code,
+            message: format!("{error:#}"),
+            candidates,
+        },
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&envelope).expect("error envelope should serialize")
+    );
 }
 
 pub fn summary(value: &ProjectSummary) {
@@ -35,7 +109,7 @@ pub fn symbols(values: &[Symbol]) {
             symbol.name,
             symbol.kind,
             symbol.file.display(),
-            symbol.range.start.line + 1
+            symbol.selection_range.start.line + 1
         );
         if let Some(container) = &symbol.container {
             println!("  container: {container}");
@@ -75,20 +149,24 @@ pub fn diagnostics(values: &[Diagnostic]) {
     }
 }
 
-pub fn calls(root: &str, values: &[CallNode]) {
+pub fn calls(root: &str, tree: &CallTree) {
     println!("{root}");
-    for (index, node) in values.iter().enumerate() {
-        call_node(node, "", index + 1 == values.len());
+    for (index, node) in tree.nodes.iter().enumerate() {
+        call_node(node, "", index + 1 == tree.nodes.len());
+    }
+    if tree.truncated {
+        println!("… output truncated at the call hierarchy node limit");
     }
 }
 
 fn call_node(node: &CallNode, prefix: &str, last: bool) {
     println!(
-        "{prefix}{} {}  ({}:{})",
+        "{prefix}{} {}  ({}:{}){}",
         if last { "└──" } else { "├──" },
         node.name,
         node.location.file.display(),
-        node.location.range.start.line + 1
+        node.location.range.start.line + 1,
+        if node.cycle { "  [cycle]" } else { "" }
     );
     let next = format!("{prefix}{}", if last { "    " } else { "│   " });
     for (index, child) in node.children.iter().enumerate() {
@@ -102,7 +180,7 @@ pub fn explanation(value: &Explanation) {
         value.symbol.name,
         value.symbol.kind,
         value.symbol.file.display(),
-        value.symbol.range.start.line + 1
+        value.symbol.selection_range.start.line + 1
     );
     if let Some(signature) = &value.signature {
         println!("  signature: {signature}");
@@ -120,20 +198,26 @@ pub fn explanation(value: &Explanation) {
     }
     println!("\nSource\n{}", value.source);
     println!("\nCallers");
-    if value.callers.is_empty() {
+    if value.callers.nodes.is_empty() {
         println!("  (none)");
     } else {
-        for (index, node) in value.callers.iter().enumerate() {
-            call_node(node, "", index + 1 == value.callers.len());
+        for (index, node) in value.callers.nodes.iter().enumerate() {
+            call_node(node, "", index + 1 == value.callers.nodes.len());
         }
     }
+    if value.callers.truncated {
+        println!("  … truncated");
+    }
     println!("\nCallees");
-    if value.callees.is_empty() {
+    if value.callees.nodes.is_empty() {
         println!("  (none)");
     } else {
-        for (index, node) in value.callees.iter().enumerate() {
-            call_node(node, "", index + 1 == value.callees.len());
+        for (index, node) in value.callees.nodes.iter().enumerate() {
+            call_node(node, "", index + 1 == value.callees.nodes.len());
         }
+    }
+    if value.callees.truncated {
+        println!("  … truncated");
     }
     if !value.diagnostics.is_empty() {
         println!("\nDiagnostics");
