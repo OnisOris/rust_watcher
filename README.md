@@ -1,197 +1,125 @@
-# Rust Code Command Center
+# rust_watcher
 
-[![CI](https://github.com/OnisOris/rust_watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/OnisOris/rust_watcher/actions/workflows/ci.yml)
+rust_watcher is a small semantic CLI for understanding Rust codebases.
 
-Local browser app for exploring Rust and React/TypeScript projects as a live code graph.
+It uses cargo metadata and rust-analyzer instead of implementing its own Rust parser or compiler frontend.
 
-![Rust Code Command Center](docs/img.jpg)
+The `watcher` binary discovers a Cargo workspace, starts one rust-analyzer process for the command, communicates with it over LSP on stdin/stdout, and prints compact terminal output or stable JSON. There is no web server, database, daemon, parser fallback, or frontend.
 
-## What It Does
+## Requirements
 
-- Builds an interactive graph of crates, files, modules, symbols, calls, traits, impls, React components, hooks, and API routes.
-- Connects frontend API calls to Rust backend endpoints when both sides are in the same project.
-- Provides graph modes for macro/meso/micro views, call flow, data flow, and trait/impl relationships.
-- Includes depth filters, focus bubbles, graph clarity presets, light/dark themes, and layout tuning.
+- Rust and Cargo
+- rust-analyzer
 
-## Setup
-
-Install and build the frontend:
-
-```bash
-cd frontend
-pnpm install
-pnpm build
-```
-
-Build the Rust workspace:
-
-```bash
-cargo build
-```
-
-Cloud deployment and secure auth setup are documented in [docs/cloud.md](docs/cloud.md).
-The planned path to production, including stage-by-stage acceptance criteria, is documented in the
-[production roadmap](docs/roadmap.md).
-The versioned data boundary and deterministic hash input are documented in the
-[canonical graph schema](docs/canonical-graph.md).
-
-## Analyzer Setup
-
-Rust Code Command Center works with parser fallbacks, but external analyzers unlock richer semantic data.
-Cloud analysis always runs the parser baseline and requests language analyzers from uploaded workspace
-files: Rust for `Cargo.toml` or `.rs`, Python `ty` for `.py`, TypeScript language server for
-`.ts`/`.tsx`/`.js`/`.jsx` or `package.json`/`tsconfig.json`, and `qmlls` for `.qml`. Missing optional
-cloud analyzers report fallback status instead of failing the job.
-
-The cloud analyze API accepts `incremental=true` for workspace revisions, but true incremental graph
-updates are not implemented yet. Incremental requests currently compute changed files and then report
-`analysisMode: "fallback-full"` with a `fallbackReason` while running a full analysis.
-
-Rust:
-
-- Required for semantic Rust symbols, diagnostics, call hierarchy, references, definitions, and type definitions: `rust-analyzer`
-- Install with Rustup:
+Install rust-analyzer through rustup:
 
 ```bash
 rustup component add rust-analyzer
 ```
 
-Package-manager installs are also fine when your platform provides `rust-analyzer`.
-
-Python:
-
-- Optional semantic analyzer: `ty`
-- Install examples:
+Verify the complete local setup:
 
 ```bash
-uv tool install ty
-cargo install ty
+watcher doctor
 ```
 
-Platform/package-manager installs are also fine when available. In `auto` mode, missing `ty` is not fatal; the Python parser fallback remains active.
+## Install
 
-TypeScript/JavaScript:
-
-- Optional semantic analyzers: `typescript` and `typescript-language-server`
-- Preferred local install:
+Build from this checkout:
 
 ```bash
-cd frontend
-pnpm add -D typescript typescript-language-server
+cargo build --release
+install -m 755 target/release/watcher ~/.local/bin/watcher
 ```
 
-The backend automatically checks project `node_modules/.bin`, parent `node_modules/.bin`, this repository's `frontend/node_modules/.bin`, and then `PATH`. Avoid `sudo npm -g` as the default setup; local project installs are more portable.
+You can also run every example below as `cargo run --` followed by the shown arguments.
 
-QML:
+## Project summary
 
-- The QML parser works without external tools.
-- Optional semantic analyzer: `qmlls`
-- `qmlls` is installed with Qt and is usually under `<Qt installation>/bin/qmlls`. You can pass an explicit path with `--qmlls-path`.
-- If your QML project needs build information, pass it with `--qmlls-build-dir /path/to/build`.
-- `--qmlls-no-cmake-calls` is enabled by default to avoid surprising rebuild/configure steps.
-- `qmlls` is still evolving and may need build information for accurate module/type resolution.
-
-Analyzer mode flags:
-
-- `--python-analyzer auto|parser|ty`
-- `--ty-path /path/to/ty`
-- `--disable-ty`
-- `--typescript-analyzer auto|parser|typescript-language-server`
-- `--typescript-language-server-path /path/to/typescript-language-server`
-- `--disable-typescript-language-server`
-- `--qml-analyzer auto|parser|qmlls`
-- `--qmlls-path /path/to/qmlls`
-- `--disable-qmlls`
-- `--qmlls-build-dir /path/to/build`
-- `--qmlls-no-cmake-calls`
-- `--rust-analyzer /path/to/rust-analyzer`
-
-## Run A Project
-
-Index any local project and open the browser UI:
+Analyze the current Cargo project or workspace:
 
 ```bash
-cargo run -p web-server -- serve --project /path/to/rust/project --open
+watcher .
 ```
 
-If `--project` is omitted, the server indexes the current working directory.
-The default host is `127.0.0.1`; `--port 0` picks a free local port.
-
-## Frontend Development
-
-Run the backend on the Vite proxy port, then start Vite:
+Analyze another checkout:
 
 ```bash
-cargo run -p web-server -- serve --project /path/to/rust/project --port 34127
-cd frontend
-pnpm dev
+watcher /path/to/project
 ```
 
-Override the backend proxy target with `VITE_BACKEND_URL` when needed.
+The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and `main` entrypoints. Empty diagnostics are reported only after rust-analyzer has completed its initial progress and diagnostic notifications have settled.
 
-## MCP Server
+## Semantic commands
 
-`rust_watcher` can expose the project graph to AI coding agents through a read-only MCP server.
-It does not require the browser UI or the HTTP web server to be running.
+Commands default to the current directory. Put a project path before the command to inspect another project.
 
 ```bash
-cargo run -p mcp-server
+watcher symbol Runtime
+watcher definition Runtime
+watcher refs Runtime
+watcher calls Engine::run
+watcher calls Engine::run --depth 3
+watcher callers LspClient::request
+watcher diagnostics
+watcher diagnostics --errors
+watcher diagnostics --warnings
+watcher explain Engine::run
 ```
 
-By default the MCP server indexes the current working directory. Pass `--project /path/to/project` only when you want to pin it to a specific project root. The MCP server exposes bounded JSON tools and resources for graph snapshots, search, node context packs, route traces, diagnostics, project checks, and detached Rust file metadata. It does not expose file mutation, file deletion, git operations, editor-open side effects, or arbitrary command execution.
+`explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It is intended to be useful both in a terminal and as compact context for an AI coding agent.
 
-Analyzer flags are aligned with the web server:
+Call traversal is bounded: the default depth is 2, the maximum is 4, and each level returns at most 20 calls.
+
+## JSON output
+
+All analysis commands support `--json`, either before or after the command:
 
 ```bash
-cargo run -p mcp-server -- \
-  --rust-analyzer rust-analyzer \
-  --python-analyzer auto \
-  --ty-path ty \
-  --typescript-analyzer auto \
-  --typescript-language-server-path typescript-language-server \
-  --qml-analyzer auto \
-  --qmlls-path qmlls
+watcher --json symbol Runtime
+watcher explain LspClient::request --json
+watcher diagnostics --errors --json
 ```
 
-You can force parser-only behavior with `--disable-ty`, `--disable-typescript-language-server`, or `--disable-qmlls`. QML build flags `--qmlls-build-dir` and `--qmlls-no-cmake-calls` are accepted for configuration parity.
+JSON contains normalized semantic records with deterministic ordering and repository-relative paths for workspace files. It contains no layout, UI, session, timestamp, or graph-snapshot fields.
 
-Generic MCP client configuration example:
+## Architecture
 
-```json
-{
-  "mcpServers": {
-    "rust_watcher": {
-      "command": "/path/to/rust_watcher/target/debug/mcp-server"
-    }
-  }
-}
+```text
+CLI
+ ↓
+Cargo project discovery (`cargo metadata`)
+ ↓
+One rust-analyzer child process
+ ↓
+Typed JSON-RPC/LSP requests and notifications
+ ↓
+Small normalized Rust structures
+ ↓
+Terminal or JSON output
 ```
 
-Common tools include `get_status`, `get_check_status`, `search_symbols`, `get_graph_snapshot`, `get_node`, `get_node_context`, `get_edge_context`, `trace_node`, `trace_route`, `run_project_checks`, `list_diagnostics`, and `list_detached_rust_files`. `run_project_checks` runs fixed read-only checks, then refreshes diagnostics; checks are not run during tool listing so MCP clients can start quickly. Agents should treat empty diagnostics as inconclusive until `get_check_status.canClaimClean` is true.
+The implementation is one binary crate:
 
-`run_project_checks` accepts optional arguments:
+- `cli.rs` defines arguments and commands.
+- `project.rs` maps Cargo metadata into a small workspace model.
+- `lsp.rs` owns framing, request routing, initialization, progress, and diagnostics notifications.
+- `rust.rs` implements semantic operations over rust-analyzer responses.
+- `model.rs` contains transport-neutral result structures.
+- `output.rs` renders those structures.
 
-```json
-{
-  "target": "all",
-  "timeoutSeconds": 60,
-  "includeSlow": false
-}
+Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.
+
+## Development
+
+Run the required checks:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build
+git diff --check
 ```
 
-`target` can be `all`, `rust`, `frontend`, `backend`, or `firmware`. Rust checks use `cargo check --message-format=json --all-targets` for discovered Cargo packages. Frontend checks prefer `typecheck` or `check` package scripts; `build` is treated as slow and only runs when `includeSlow` is true. Firmware/embedded Rust packages are skipped by default during `all`/`rust`; run with `target: "firmware"` or `includeSlow: true` when the toolchain is ready.
-
-Detached Rust files use the existing `SourceReachability::Detached` metadata and should be treated as review signals, not automatic deletion advice.
-
-## API
-
-- `GET /api/health`
-- `GET /api/status`
-- `GET /api/graph/snapshot?mode=Macro`
-- `GET /api/node/:id`
-- `GET /api/search?q=query`
-- `POST /api/focus`
-- `POST /api/project/open`
-- `GET /ws`
-
-The app never exposes file mutation, deletion, shell execution, or write APIs.
+The integration fixture is under `tests/fixtures/simple_project`. Its test uses a real rust-analyzer when available. If rust-analyzer is missing, the test prints the exact rustup installation command and skips without substituting a parser.
