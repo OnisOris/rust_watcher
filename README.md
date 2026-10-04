@@ -48,7 +48,7 @@ Analyze another checkout:
 watcher /path/to/project
 ```
 
-The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and `main` entrypoints. Empty diagnostics are reported only after rust-analyzer has completed its initial progress and diagnostic notifications have settled.
+The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and binary entrypoints from Cargo targets. Empty diagnostics are reported only after rust-analyzer reports a quiescent server and every opened workspace file has produced an initial diagnostic notification. A timeout is an error, never a clean result.
 
 ## Semantic commands
 
@@ -69,7 +69,9 @@ watcher explain Engine::run
 
 `explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It is intended to be useful both in a terminal and as compact context for an AI coding agent.
 
-Call traversal is bounded: the default depth is 2, the maximum is 4, and each level returns at most 20 calls.
+Unqualified commands fail when multiple symbols match instead of choosing one arbitrarily. Add a module or type qualifier such as `Engine::run` to disambiguate.
+
+Call traversal is bounded: the default depth is 2, the maximum is 4, each level returns at most 20 calls, and a command returns at most 100 call nodes. Cycles are marked and not expanded repeatedly. Terminal and JSON results explicitly report truncation.
 
 ## JSON output
 
@@ -81,7 +83,19 @@ watcher explain LspClient::request --json
 watcher diagnostics --errors --json
 ```
 
-JSON contains normalized semantic records with deterministic ordering and repository-relative paths for workspace files. It contains no layout, UI, session, timestamp, or graph-snapshot fields.
+Every JSON response has the same versioned envelope. Successful commands use:
+
+```json
+{"schemaVersion":1,"ok":true,"data":[]}
+```
+
+Failures keep a non-zero exit status while writing one valid JSON value to stdout:
+
+```json
+{"schemaVersion":1,"ok":false,"error":{"code":"symbol_not_found","message":"symbol not found: Missing"}}
+```
+
+Ambiguity errors also include deterministic candidates. JSON contains normalized semantic records with repository-relative paths for workspace files. It contains no layout, UI, session, timestamp, or graph-snapshot fields.
 
 ## Architecture
 
@@ -103,7 +117,7 @@ The implementation is one binary crate:
 
 - `cli.rs` defines arguments and commands.
 - `project.rs` maps Cargo metadata into a small workspace model.
-- `lsp.rs` owns framing, request routing, initialization, progress, and diagnostics notifications.
+- `lsp.rs` owns framing, request routing, initialization, server readiness, progress, diagnostics notifications, bounded stderr capture, and shutdown.
 - `rust.rs` implements semantic operations over rust-analyzer responses.
 - `model.rs` contains transport-neutral result structures.
 - `output.rs` renders those structures.
@@ -122,4 +136,4 @@ cargo build
 git diff --check
 ```
 
-The integration fixture is under `tests/fixtures/simple_project`. Its test uses a real rust-analyzer when available. If rust-analyzer is missing, the test prints the exact rustup installation command and skips without substituting a parser.
+Integration fixtures cover ordinary navigation, ambiguity, diagnostics inside function bodies, recursive calls, Unicode identifiers, and cross-crate workspace navigation. Tests use a real rust-analyzer when available. A local run prints an explicit skip reason when it is absent; CI installs rust-analyzer and treats its absence as a failure. No parser fallback exists.
