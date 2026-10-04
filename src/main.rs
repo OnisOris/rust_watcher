@@ -1,23 +1,258 @@
 mod cli;
+mod lsp;
 mod model;
+mod output;
 mod project;
+mod rust;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, Command};
+use model::{ProjectSummary, Severity};
+use project::Project;
+use rust::RustAnalyzer;
+use serde::Serialize;
+use std::path::Path;
+use std::process::Stdio;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let project = project::Project::discover(&cli.path)?;
-    if cli.json {
-        println!("{}", serde_json::to_string(&project)?);
+    if matches!(cli.command, Some(Command::Doctor)) {
+        return doctor(&cli.path, cli.json).await;
+    }
+    let project = Project::discover(&cli.path)?;
+    let mut analyzer = RustAnalyzer::start(project, Path::new("rust-analyzer"))
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{error}\n\nInstall rust-analyzer with:\n    rustup component add rust-analyzer"
+            )
+        })?;
+    let result = run(&cli, &mut analyzer).await;
+    analyzer.shutdown().await;
+    result
+}
+
+async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
+    match &cli.command {
+        None => {
+            let symbols = analyzer.all_document_symbols().await?;
+            let diagnostics = analyzer.diagnostics().await?;
+            let mut entrypoints: Vec<_> = symbols
+                .iter()
+                .filter(|symbol| symbol.name == "main" && symbol.kind == "function")
+                .map(|symbol| model::Location {
+                    file: symbol.file.clone(),
+                    range: symbol.range,
+                })
+                .collect();
+            entrypoints.sort();
+            let summary = ProjectSummary {
+                workspace_root: analyzer.project.workspace_root.clone(),
+                crates: analyzer.project.packages.len(),
+                files: analyzer.project.rust_files.len(),
+                symbols: symbols.len(),
+                errors: diagnostics
+                    .iter()
+                    .filter(|item| item.severity == Severity::Error)
+                    .count(),
+                warnings: diagnostics
+                    .iter()
+                    .filter(|item| item.severity == Severity::Warning)
+                    .count(),
+                entrypoints,
+            };
+            if cli.json {
+                output::json(&summary)
+            } else {
+                output::summary(&summary);
+                Ok(())
+            }
+        }
+        Some(Command::Symbol { name }) => {
+            let symbols = analyzer.symbols(name).await?;
+            if cli.json {
+                output::json(&symbols)
+            } else {
+                output::symbols(&symbols);
+                Ok(())
+            }
+        }
+        Some(Command::Refs { name }) => {
+            let symbol = analyzer.find_symbol(name).await?;
+            let locations = analyzer.references(&symbol).await?;
+            if cli.json {
+                output::json(&locations)
+            } else {
+                output::locations(&locations);
+                Ok(())
+            }
+        }
+        Some(Command::Definition { name }) => {
+            let symbol = analyzer.find_symbol(name).await?;
+            let location = analyzer.definition(&symbol).await?;
+            if cli.json {
+                output::json(&location)
+            } else {
+                output::locations(&location.into_iter().collect::<Vec<_>>());
+                Ok(())
+            }
+        }
+        Some(Command::Calls { name, depth }) => {
+            call_command(analyzer, name, *depth, false, cli.json).await
+        }
+        Some(Command::Callers { name, depth }) => {
+            call_command(analyzer, name, *depth, true, cli.json).await
+        }
+        Some(Command::Diagnostics { errors, warnings }) => {
+            let mut diagnostics = analyzer.diagnostics().await?;
+            if *errors {
+                diagnostics.retain(|item| item.severity == Severity::Error);
+            }
+            if *warnings {
+                diagnostics.retain(|item| item.severity == Severity::Warning);
+            }
+            if cli.json {
+                output::json(&diagnostics)
+            } else {
+                output::diagnostics(&diagnostics);
+                Ok(())
+            }
+        }
+        Some(Command::Explain { name }) => {
+            let symbol = analyzer.find_symbol(name).await?;
+            let explanation = analyzer.explain(symbol).await?;
+            if cli.json {
+                output::json(&explanation)
+            } else {
+                output::explanation(&explanation);
+                Ok(())
+            }
+        }
+        Some(Command::Doctor) => unreachable!(),
+    }
+}
+
+async fn call_command(
+    analyzer: &mut RustAnalyzer,
+    name: &str,
+    depth: u8,
+    incoming: bool,
+    json: bool,
+) -> Result<()> {
+    let symbol = analyzer.find_symbol(name).await?;
+    let calls = analyzer.calls(&symbol, depth, incoming).await?;
+    if json {
+        output::json(&calls)
     } else {
-        println!(
-            "rust_watcher\n\nWorkspace\n  root:   {}\n  crates: {}\n  files:  {}",
-            project.workspace_root.display(),
-            project.packages.len(),
-            project.rust_files.len()
-        );
+        output::calls(name, &calls);
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    ok: bool,
+    detail: Option<String>,
+}
+
+async fn doctor(path: &Path, json: bool) -> Result<()> {
+    let mut checks = vec![
+        tool_check("cargo", &["--version"]),
+        tool_check("rustc", &["--version"]),
+    ];
+    let analyzer_check = tool_check("rust-analyzer", &["--version"]);
+    let analyzer_ok = analyzer_check.ok;
+    checks.push(analyzer_check);
+    let manifest = project::find_manifest(path);
+    checks.push(DoctorCheck {
+        name: "Cargo.toml",
+        ok: manifest.is_ok(),
+        detail: manifest.as_ref().err().map(ToString::to_string),
+    });
+    let project = Project::discover(path);
+    checks.push(DoctorCheck {
+        name: "cargo metadata",
+        ok: project.is_ok(),
+        detail: project.as_ref().err().map(ToString::to_string),
+    });
+    if analyzer_ok {
+        let workspace = match project {
+            Ok(project) => match RustAnalyzer::start(project, Path::new("rust-analyzer")).await {
+                Ok(mut analyzer) => {
+                    analyzer.shutdown().await;
+                    DoctorCheck {
+                        name: "rust-analyzer workspace",
+                        ok: true,
+                        detail: None,
+                    }
+                }
+                Err(error) => DoctorCheck {
+                    name: "rust-analyzer workspace",
+                    ok: false,
+                    detail: Some(error.to_string()),
+                },
+            },
+            Err(error) => DoctorCheck {
+                name: "rust-analyzer workspace",
+                ok: false,
+                detail: Some(error.to_string()),
+            },
+        };
+        checks.push(workspace);
+    }
+    if json {
+        output::json(&checks)?;
+    } else {
+        for check in &checks {
+            println!(
+                "{} {}{}",
+                if check.ok { "✓" } else { "✗" },
+                check.name,
+                check
+                    .detail
+                    .as_ref()
+                    .map(|value| format!(": {value}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    if !analyzer_ok {
+        if !json {
+            eprintln!("\nerror: rust-analyzer not found\n\nInstall:\n    rustup component add rust-analyzer");
+        }
+        bail!("rust-analyzer not found");
+    }
+    if checks.iter().any(|check| !check.ok) {
+        bail!("one or more doctor checks failed");
     }
     Ok(())
+}
+
+fn tool_check(name: &'static str, args: &[&str]) -> DoctorCheck {
+    match std::process::Command::new(name)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(result) if result.status.success() => DoctorCheck {
+            name,
+            ok: true,
+            detail: None,
+        },
+        Ok(result) => DoctorCheck {
+            name,
+            ok: false,
+            detail: Some(String::from_utf8_lossy(&result.stderr).trim().to_owned()),
+        },
+        Err(error) => DoctorCheck {
+            name,
+            ok: false,
+            detail: Some(error.to_string()),
+        },
+    }
 }

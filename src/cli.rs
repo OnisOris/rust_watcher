@@ -32,12 +32,12 @@ pub enum Command {
     },
     Calls {
         name: String,
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=8))]
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=4))]
         depth: u8,
     },
     Callers {
         name: String,
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=8))]
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=4))]
         depth: u8,
     },
     Diagnostics {
