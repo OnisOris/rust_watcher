@@ -6,6 +6,11 @@ fn calculate() -> i32 {
     add(1, 2)
 }
 
+fn привет() -> &'static str {
+    "🦀"
+}
+
 fn main() {
     println!("{}", calculate());
+    println!("{}", привет());
 }
