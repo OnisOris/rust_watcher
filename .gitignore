@@ -36,3 +36,4 @@ coverage/
 # Local UI review artifacts
 /tmp/cloud-ui-review/
 /tmp/cloud-ui-review.zip
+/tmp/tui-review/

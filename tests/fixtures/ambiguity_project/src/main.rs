@@ -21,6 +21,12 @@ impl<T> Runner for Engine<T> {
 }
 
 mod api {
+    pub struct Engine<T>(pub T);
+
+    impl<T> Engine<T> {
+        pub fn run(&self) {}
+    }
+
     pub mod users {
         pub fn load() {}
     }
@@ -57,4 +63,5 @@ fn main() {
     engine.run();
     engine.execute();
     api::users::load();
+    api::Engine(1).run();
 }

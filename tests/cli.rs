@@ -24,7 +24,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn watcher(project: &str, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_watcher"))
+    Command::new(env!("CARGO_BIN_EXE_wt"))
         .current_dir(fixture(project))
         .args(arguments)
         .output()
@@ -147,6 +147,21 @@ fn ambiguity_is_a_structured_error() {
     let search = json_success("ambiguity_project", &["symbol", "item_", "--json"]);
     assert_eq!(search["items"].as_array().unwrap().len(), 50);
     assert_eq!(search["truncated"], true);
+    let qualified = json_success("ambiguity_project", &["symbol", "Engine::run", "--json"]);
+    assert!(qualified["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|symbol| symbol["container"]
+            .as_str()
+            .is_some_and(|value| value.contains("Engine"))));
+    assert_eq!(
+        json_success(
+            "ambiguity_project",
+            &["definition", "api::Engine::run", "--json"]
+        )["file"],
+        "src/main.rs"
+    );
     let missing = json_error("ambiguity_project", &["refs", "DOES_NOT_EXIST", "--json"]);
     assert_eq!(missing["code"], "symbol_not_found");
 }
@@ -213,7 +228,7 @@ fn cargo_workspace_supports_cross_crate_navigation() {
     if !require_analyzer() {
         return;
     }
-    let summary = json_success("workspace_project", &["--json"]);
+    let summary = json_success("workspace_project", &["summary", "--json"]);
     assert_eq!(summary["workspaceRoot"], ".");
     assert_eq!(summary["crates"], 2);
     assert_eq!(summary["entrypoints"].as_array().unwrap().len(), 1);
@@ -248,7 +263,7 @@ fn cargo_workspace_supports_cross_crate_navigation() {
 #[test]
 fn missing_project_has_a_typed_json_error() {
     let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/does-not-exist");
-    let output = Command::new(env!("CARGO_BIN_EXE_watcher"))
+    let output = Command::new(env!("CARGO_BIN_EXE_wt"))
         .arg(missing)
         .arg("--json")
         .output()

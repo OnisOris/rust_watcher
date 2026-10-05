@@ -4,6 +4,7 @@ mod model;
 mod output;
 mod project;
 mod rust;
+mod tui;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -38,6 +39,9 @@ async fn execute(cli: &Cli) -> Result<()> {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
+    if cli.command.is_none() && !cli.json {
+        return tui::run(project).await;
+    }
     let mut analyzer = RustAnalyzer::start(project, Path::new("rust-analyzer")).await?;
     let result = run(cli, &mut analyzer).await;
     analyzer.shutdown().await;
@@ -46,50 +50,7 @@ async fn execute(cli: &Cli) -> Result<()> {
 
 async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
     match &cli.command {
-        None => {
-            analyzer.wait_ready().await?;
-            let symbols = analyzer.all_document_symbols().await?;
-            let diagnostics = analyzer.diagnostics().await?;
-            let entrypoints: Vec<_> = analyzer
-                .project
-                .binary_entrypoints()
-                .into_iter()
-                .map(|file| model::Location {
-                    file,
-                    range: model::Range {
-                        start: model::Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: model::Position {
-                            line: 0,
-                            character: 0,
-                        },
-                    },
-                })
-                .collect();
-            let summary = ProjectSummary {
-                workspace_root: analyzer.project.workspace_root.clone(),
-                crates: analyzer.project.packages.len(),
-                files: analyzer.project.rust_files.len(),
-                symbols: symbols.len(),
-                errors: diagnostics
-                    .iter()
-                    .filter(|item| item.severity == Severity::Error)
-                    .count(),
-                warnings: diagnostics
-                    .iter()
-                    .filter(|item| item.severity == Severity::Warning)
-                    .count(),
-                entrypoints,
-            };
-            if cli.json {
-                output::json(&summary)
-            } else {
-                output::summary(&summary);
-                Ok(())
-            }
-        }
+        None | Some(Command::Summary) => summary(analyzer, cli.json).await,
         Some(Command::Symbol { name }) => {
             let symbols = analyzer.symbols(name).await?;
             if cli.json {
@@ -151,6 +112,51 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
             }
         }
         Some(Command::Doctor) => unreachable!(),
+    }
+}
+
+async fn summary(analyzer: &mut RustAnalyzer, json: bool) -> Result<()> {
+    analyzer.wait_ready().await?;
+    let symbols = analyzer.all_document_symbols().await?;
+    let diagnostics = analyzer.diagnostics().await?;
+    let entrypoints: Vec<_> = analyzer
+        .project
+        .binary_entrypoints()
+        .into_iter()
+        .map(|file| model::Location {
+            file,
+            range: model::Range {
+                start: model::Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: model::Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+        })
+        .collect();
+    let summary = ProjectSummary {
+        workspace_root: analyzer.project.workspace_root.clone(),
+        crates: analyzer.project.packages.len(),
+        files: analyzer.project.rust_files.len(),
+        symbols: symbols.len(),
+        errors: diagnostics
+            .iter()
+            .filter(|item| item.severity == Severity::Error)
+            .count(),
+        warnings: diagnostics
+            .iter()
+            .filter(|item| item.severity == Severity::Warning)
+            .count(),
+        entrypoints,
+    };
+    if json {
+        output::json(&summary)
+    } else {
+        output::summary(&summary);
+        Ok(())
     }
 }
 

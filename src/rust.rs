@@ -102,6 +102,14 @@ impl RustAnalyzer {
         self.client.wait_ready(Duration::from_secs(30)).await
     }
 
+    pub fn is_ready(&self) -> bool {
+        self.client.is_ready()
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.client.error()
+    }
+
     async fn open(&mut self, file: &Path) -> Result<bool> {
         let file = if file.is_absolute() {
             file.to_path_buf()
@@ -116,10 +124,24 @@ impl RustAnalyzer {
     }
 
     pub async fn symbols(&mut self, query: &str) -> Result<SymbolSearchResult> {
-        let mut symbols = self.workspace_symbols(query).await?;
+        let leaf = query.rsplit("::").next().unwrap_or(query);
+        let mut symbols = self.workspace_symbols(leaf).await?;
         debug_assert!(enrichment_files(&symbols, query, LookupPurpose::List).is_empty());
-        let needle = query.to_lowercase();
+        if query.contains("::") && !self.is_ready() {
+            self.wait_ready().await?;
+            symbols = self.workspace_symbols(leaf).await?;
+        }
+        let needle = leaf.to_lowercase();
         symbols.retain(|symbol| symbol.name.to_lowercase().contains(&needle));
+        if query.contains("::") {
+            let files = qualified_candidate_files(&symbols, query);
+            let enriched = if files.is_empty() {
+                self.all_document_symbols().await?
+            } else {
+                self.document_symbols_for_files(&files).await?
+            };
+            symbols = best_qualified_symbols(enriched, query);
+        }
         sort_and_dedup_symbols(&mut symbols, query);
         let truncated = symbols.len() > SYMBOL_SEARCH_LIMIT;
         symbols.truncate(SYMBOL_SEARCH_LIMIT);
@@ -161,8 +183,15 @@ impl RustAnalyzer {
 
     pub async fn find_symbol(&mut self, query: &str) -> Result<Symbol> {
         let leaf = query.rsplit("::").next().unwrap_or(query);
-        let lightweight = self.workspace_symbols(leaf).await?;
-        let files = enrichment_files(&lightweight, leaf, LookupPurpose::Resolve);
+        let mut lightweight = self.workspace_symbols(leaf).await?;
+        if needs_authoritative_retry(
+            self.is_ready(),
+            provisional_match_count(&lightweight, query),
+        ) {
+            self.wait_ready().await?;
+            lightweight = self.workspace_symbols(leaf).await?;
+        }
+        let files = resolution_files(&lightweight, query);
         let mut candidates: Vec<_> = lightweight
             .iter()
             .filter(|symbol| symbol.name == leaf || symbol.name == query)
@@ -172,8 +201,8 @@ impl RustAnalyzer {
         let mut candidates_are_enriched = false;
 
         if query.contains("::") {
-            let mut enriched = self.document_symbols_for_files(&files).await?;
-            enriched.retain(|symbol| symbol.name == leaf && qualification_matches(symbol, query));
+            let enriched =
+                best_qualified_symbols(self.document_symbols_for_files(&files).await?, query);
             if !enriched.is_empty() {
                 candidates = enriched;
                 candidates_are_enriched = true;
@@ -190,10 +219,11 @@ impl RustAnalyzer {
 
         if candidates.is_empty() {
             let mut fallback = self.all_document_symbols().await?;
-            fallback.retain(|symbol| {
-                symbol.name == leaf
-                    && (!query.contains("::") || qualification_matches(symbol, query))
-            });
+            if query.contains("::") {
+                fallback = best_qualified_symbols(fallback, query);
+            } else {
+                fallback.retain(|symbol| symbol.name == leaf);
+            }
             return select_symbol(fallback, query);
         }
 
@@ -322,7 +352,7 @@ impl RustAnalyzer {
         incoming: bool,
         path: &'a mut HashSet<String>,
         traversal: &'a mut TraversalState,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<CallNode>>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<CallNode>>> + Send + 'a>> {
         Box::pin(async move {
             if depth == 0 {
                 return Ok(Vec::new());
@@ -428,7 +458,7 @@ impl RustAnalyzer {
         self.collect_diagnostics(&expected)
     }
 
-    async fn diagnostics_for_file(&mut self, file: &Path) -> Result<Vec<Diagnostic>> {
+    pub async fn diagnostics_for_file(&mut self, file: &Path) -> Result<Vec<Diagnostic>> {
         let absolute = self.absolute(file);
         let uri = path_uri(&absolute, false)?;
         let generation = self.client.diagnostic_generation();
@@ -501,6 +531,10 @@ impl RustAnalyzer {
             references: references.len(),
             diagnostics,
         })
+    }
+
+    pub fn source_for_symbol(&self, symbol: &Symbol) -> Result<String> {
+        source_fragment(&self.absolute(&symbol.file), symbol.selection_range)
     }
 
     pub async fn shutdown(&mut self) {
@@ -614,8 +648,41 @@ fn qualification_matches(symbol: &Symbol, query: &str) -> bool {
     }) || symbol.name == query
 }
 
-fn normalized_container(container: &str) -> &str {
-    normalize_impl_target(container).unwrap_or(container.trim())
+fn best_qualified_symbols(symbols: Vec<Symbol>, query: &str) -> Vec<Symbol> {
+    let Some((qualifier, leaf)) = query.rsplit_once("::") else {
+        return symbols;
+    };
+    let mut exact = Vec::new();
+    let mut suffix = Vec::new();
+    for symbol in symbols.into_iter().filter(|symbol| symbol.name == leaf) {
+        let Some(container) = symbol.container.as_deref() else {
+            continue;
+        };
+        let container = normalized_container(container);
+        if container == qualifier {
+            exact.push(symbol);
+        } else if container.ends_with(&format!("::{qualifier}")) {
+            suffix.push(symbol);
+        }
+    }
+    if exact.is_empty() {
+        suffix
+    } else {
+        exact
+    }
+}
+
+fn normalized_container(container: &str) -> String {
+    let container = container.trim();
+    if let Some(target) = normalize_impl_target(container) {
+        return target.to_owned();
+    }
+    if let Some((prefix, implementation)) = container.rsplit_once("::impl") {
+        if let Some(target) = normalize_impl_target(&format!("impl{implementation}")) {
+            return format!("{prefix}::{target}");
+        }
+    }
+    container.to_owned()
 }
 
 fn normalize_impl_target(container: &str) -> Option<&str> {
@@ -702,6 +769,52 @@ fn enrichment_files(symbols: &[Symbol], leaf: &str, purpose: LookupPurpose) -> V
     files.sort();
     files.dedup();
     files
+}
+
+fn qualified_candidate_files(symbols: &[Symbol], query: &str) -> Vec<PathBuf> {
+    let leaf = query.rsplit("::").next().unwrap_or(query);
+    let exact: Vec<_> = symbols
+        .iter()
+        .filter(|symbol| symbol.name == leaf)
+        .collect();
+    let qualified: Vec<_> = exact
+        .iter()
+        .copied()
+        .filter(|symbol| qualification_matches(symbol, query))
+        .collect();
+    let selected = if qualified.is_empty() {
+        exact
+    } else {
+        qualified
+    };
+    let mut files: Vec<_> = selected
+        .into_iter()
+        .map(|symbol| symbol.file.clone())
+        .collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn resolution_files(symbols: &[Symbol], query: &str) -> Vec<PathBuf> {
+    if query.contains("::") {
+        qualified_candidate_files(symbols, query)
+    } else {
+        enrichment_files(symbols, query, LookupPurpose::Resolve)
+    }
+}
+
+fn provisional_match_count(symbols: &[Symbol], query: &str) -> usize {
+    let leaf = query.rsplit("::").next().unwrap_or(query);
+    symbols
+        .iter()
+        .filter(|symbol| symbol.name == leaf)
+        .filter(|symbol| !query.contains("::") || qualification_matches(symbol, query))
+        .count()
+}
+
+fn needs_authoritative_retry(ready: bool, provisional_matches: usize) -> bool {
+    !ready && provisional_matches <= 1
 }
 
 fn call_item_key(item: &CallHierarchyItem) -> String {
@@ -864,6 +977,14 @@ mod tests {
         ] {
             assert_eq!(normalize_impl_target(input), Some("Engine"), "{input}");
         }
+        assert_eq!(
+            normalized_container("api::impl<T> Engine<T>"),
+            "api::Engine"
+        );
+        assert_eq!(
+            normalized_container("api::impl<T> Runner<T> for Engine<T>"),
+            "api::Engine"
+        );
     }
 
     #[test]
@@ -907,5 +1028,13 @@ mod tests {
             enrichment_files(&symbols, "UniqueName", LookupPurpose::Resolve),
             vec![PathBuf::from("src/file_173.rs")]
         );
+    }
+
+    #[test]
+    fn authoritative_lookup_retries_partial_or_negative_results() {
+        assert!(needs_authoritative_retry(false, 0));
+        assert!(needs_authoritative_retry(false, 1));
+        assert!(!needs_authoritative_retry(false, 2));
+        assert!(!needs_authoritative_retry(true, 0));
     }
 }

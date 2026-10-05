@@ -95,7 +95,7 @@ fn error_body(error: &anyhow::Error) -> ErrorBody {
 }
 
 pub fn summary(value: &ProjectSummary) {
-    println!("rust_watcher\n\nWorkspace\n  root:        {}\n  crates:      {}\n  files:       {}\n  symbols:     {}\n\nDiagnostics\n  errors:      {}\n  warnings:    {}", value.workspace_root.display(), value.crates, value.files, value.symbols, value.errors, value.warnings);
+    println!("wt\n\nWorkspace\n  root:        {}\n  crates:      {}\n  files:       {}\n  symbols:     {}\n\nDiagnostics\n  errors:      {}\n  warnings:    {}", value.workspace_root.display(), value.crates, value.files, value.symbols, value.errors, value.warnings);
     if !value.entrypoints.is_empty() {
         println!("\nEntrypoints");
         for entrypoint in &value.entrypoints {

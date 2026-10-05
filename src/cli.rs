@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "watcher", version, about = "Semantic Rust codebase explorer")]
+#[command(name = "wt", version, about = "Interactive semantic Rust explorer")]
 pub struct Cli {
     #[arg(long, global = true, help = "Emit stable machine-readable JSON")]
     pub json: bool,
@@ -21,6 +21,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Doctor,
+    Summary,
     Symbol {
         name: String,
     },
@@ -49,4 +50,23 @@ pub enum Command {
     Explain {
         name: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_mode_selects_tui_and_summary_is_explicit() {
+        let tui = Cli::try_parse_from(["wt"]).unwrap();
+        assert!(tui.command.is_none());
+        assert!(!tui.json);
+
+        let summary = Cli::try_parse_from(["wt", "summary"]).unwrap();
+        assert!(matches!(summary.command, Some(Command::Summary)));
+
+        let json = Cli::try_parse_from(["wt", "--json"]).unwrap();
+        assert!(json.command.is_none());
+        assert!(json.json);
+    }
 }

@@ -239,6 +239,22 @@ impl LspClient {
         }
     }
 
+    pub fn is_ready(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        let progress_quiet = state
+            .last_progress_at
+            .is_some_and(|time| time.elapsed() >= Duration::from_millis(500));
+        (state.server_status_seen && state.server_quiescent)
+            || (!state.server_status_seen
+                && state.saw_progress
+                && state.active_progress.is_empty()
+                && progress_quiet)
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.reader_error.lock().unwrap().clone()
+    }
+
     pub fn diagnostics(&self) -> Vec<(String, lsp_types::Diagnostic)> {
         let state = self.state.lock().unwrap();
         let mut result: Vec<_> = state
