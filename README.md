@@ -1,10 +1,10 @@
-# rust_watcher
+# wt — rust_watcher
 
 rust_watcher is a small semantic CLI for understanding Rust codebases.
 
 It uses cargo metadata and rust-analyzer instead of implementing its own Rust parser or compiler frontend.
 
-The `watcher` binary discovers a Cargo workspace, starts one rust-analyzer process for the command, communicates with it over LSP on stdin/stdout, and prints compact terminal output or stable JSON. There is no web server, database, daemon, parser fallback, or frontend.
+The `wt` binary opens an interactive terminal UI for a Cargo workspace. It shows project structure immediately after Cargo metadata is available, then starts one rust-analyzer process that remains alive for the entire UI session. Headless semantic commands print compact terminal output or stable JSON. There is no web server, database, daemon, parser fallback, or frontend.
 
 ## Requirements
 
@@ -20,7 +20,7 @@ rustup component add rust-analyzer
 Verify the complete local setup:
 
 ```bash
-watcher doctor
+wt doctor
 ```
 
 ## Install
@@ -29,44 +29,55 @@ Build from this checkout:
 
 ```bash
 cargo build --release
-install -m 755 target/release/watcher ~/.local/bin/watcher
+install -m 755 target/release/wt ~/.local/bin/wt
 ```
 
 You can also run every example below as `cargo run --` followed by the shown arguments.
 
-## Project summary
+## Interactive UI
 
-Analyze the current Cargo project or workspace:
-
-```bash
-watcher .
-```
-
-Analyze another checkout:
+Open the current Rust workspace in the interactive terminal UI:
 
 ```bash
-watcher /path/to/project
+wt
 ```
 
-The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and binary entrypoints from Cargo targets. Empty diagnostics are reported only after rust-analyzer reports a quiescent server and every opened workspace file has produced an initial diagnostic notification. A timeout is an error, never a clean result.
+Open another checkout:
 
-The summary and `diagnostics` command wait for a fully quiescent analyzer. Lookup commands (`symbol`, `definition`, `refs`, `calls`, `callers`, and `explain`) issue their semantic request as soon as initialization completes. A unique lookup enriches only its candidate file with `documentSymbol`; a workspace-wide document-symbol scan is reserved for the exact summary count and the fallback where `workspace/symbol` returns no usable candidate.
+```bash
+wt /path/to/project
+```
+
+The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. Press `/` for debounced symbol search, select with the arrow keys, and press Enter for a progressively populated inspector. Press `?` for help and `q` to quit. One rust-analyzer process serves every search and inspector action until the UI exits.
+
+## Headless summary
+
+Produce the complete textual summary:
+
+```bash
+wt summary
+wt /path/to/project summary
+```
+
+The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and binary entrypoints from Cargo targets. Empty diagnostics are reported only after rust-analyzer reports a quiescent server and every opened workspace file has produced an initial diagnostic notification. A timeout is an error, never a clean result. `wt --json` without a subcommand remains a non-interactive JSON summary for scripting.
+
+The summary and `diagnostics` command wait for a fully quiescent analyzer. TUI search may display partial results while indexing. Authoritative headless resolution confirms provisional zero-or-one matches after readiness, then enriches only candidate files. A workspace-wide document-symbol scan is reserved for the exact summary count and the fallback where a ready `workspace/symbol` still returns no usable candidate.
 
 ## Semantic commands
 
 Commands default to the current directory. Put a project path before the command to inspect another project.
 
 ```bash
-watcher symbol Runtime
-watcher definition Runtime
-watcher refs Runtime
-watcher calls Engine::run
-watcher calls Engine::run --depth 3
-watcher callers LspClient::request
-watcher diagnostics
-watcher diagnostics --errors
-watcher diagnostics --warnings
-watcher explain Engine::run
+wt symbol Runtime
+wt definition Runtime
+wt refs Runtime
+wt calls Engine::run
+wt calls Engine::run --depth 3
+wt callers LspClient::request
+wt diagnostics
+wt diagnostics --errors
+wt diagnostics --warnings
+wt explain Engine::run
 ```
 
 `explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It opens and waits for diagnostics from the selected file only; the standalone `diagnostics` command still waits for the complete workspace diagnostic state. `explain` is intended to be useful both in a terminal and as compact context for an AI coding agent.
@@ -82,9 +93,9 @@ Symbol search returns at most 50 results. Ambiguity errors return at most 20 can
 All analysis commands support `--json`, either before or after the command:
 
 ```bash
-watcher --json symbol Runtime
-watcher explain LspClient::request --json
-watcher diagnostics --errors --json
+wt --json symbol Runtime
+wt explain LspClient::request --json
+wt diagnostics --errors --json
 ```
 
 Every JSON response has the same versioned envelope. Successful commands use:
@@ -133,6 +144,7 @@ The implementation is one binary crate:
 - `rust.rs` implements semantic operations over rust-analyzer responses.
 - `model.rs` contains transport-neutral result structures.
 - `output.rs` renders those structures.
+- `tui.rs` owns interactive state, rendering, input, and the single-session analyzer worker.
 
 Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.
 
