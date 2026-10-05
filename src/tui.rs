@@ -38,6 +38,14 @@ enum Pane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusDirection {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Overlay {
     None,
     Help,
@@ -122,11 +130,35 @@ impl App {
         }
     }
 
-    fn switch_pane(&mut self) {
+    fn next_pane(&mut self) {
         self.pane = match self.pane {
             Pane::Project => Pane::Details,
             Pane::Details => Pane::Project,
         };
+    }
+
+    fn previous_pane(&mut self) {
+        self.pane = match self.pane {
+            Pane::Project => Pane::Details,
+            Pane::Details => Pane::Project,
+        };
+    }
+
+    fn focus_direction(&mut self, direction: FocusDirection) {
+        self.pane = match (self.pane, direction) {
+            (Pane::Project, FocusDirection::Right) => Pane::Details,
+            (Pane::Details, FocusDirection::Left) => Pane::Project,
+            _ => self.pane,
+        };
+    }
+
+    fn escape(&mut self) {
+        match self.overlay {
+            Overlay::Help | Overlay::Search => self.overlay = Overlay::None,
+            Overlay::None if self.pane == Pane::Details => self.pane = Pane::Project,
+            Overlay::None => {}
+        }
+        self.notice = None;
     }
 
     fn activate_project_item(&mut self) {
@@ -311,13 +343,17 @@ async fn handle_key(
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(true);
     }
+    if key.code == KeyCode::Esc {
+        app.escape();
+        return Ok(false);
+    }
     match app.overlay {
-        Overlay::Help => match key.code {
-            KeyCode::Esc | KeyCode::Char('?') => app.overlay = Overlay::None,
-            _ => {}
-        },
+        Overlay::Help => {
+            if key.code == KeyCode::Char('?') {
+                app.overlay = Overlay::None;
+            }
+        }
         Overlay::Search => match key.code {
-            KeyCode::Esc => app.overlay = Overlay::None,
             KeyCode::Down => app.move_selection(1),
             KeyCode::Up => app.move_selection(-1),
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -352,11 +388,23 @@ async fn handle_key(
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('?') => app.overlay = Overlay::Help,
             KeyCode::Char('/') => app.open_search(),
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.focus_direction(FocusDirection::Left)
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.focus_direction(FocusDirection::Down)
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.focus_direction(FocusDirection::Up)
+            }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.focus_direction(FocusDirection::Right)
+            }
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-            KeyCode::Tab | KeyCode::BackTab => app.switch_pane(),
+            KeyCode::Tab => app.next_pane(),
+            KeyCode::BackTab => app.previous_pane(),
             KeyCode::Enter => app.activate_project_item(),
-            KeyCode::Esc => app.notice = None,
             _ => {}
         },
     }
@@ -557,7 +605,7 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     render_project(frame, panes[0], app);
     render_details(frame, panes[1], app);
     frame.render_widget(
-        Paragraph::new("/ search   Tab pane   Enter inspect   ? help   q quit")
+        Paragraph::new(footer_text(app))
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL)),
         rows[2],
@@ -566,6 +614,19 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         Overlay::Help => render_help(frame, area),
         Overlay::Search => render_search(frame, area, app),
         Overlay::None => {}
+    }
+}
+
+fn footer_text(app: &App) -> &'static str {
+    match app.overlay {
+        Overlay::Search => {
+            "type search   ↑/↓ results   Ctrl+j/k results   Enter inspect   Esc close"
+        }
+        Overlay::Help => "Esc / ? close help",
+        Overlay::None if app.pane == Pane::Details => {
+            "Ctrl+h project   Esc back   Tab pane   / search   ? help   q quit"
+        }
+        Overlay::None => "j/k move   Ctrl+l details   Tab pane   / search   ? help   q quit",
     }
 }
 
@@ -738,11 +799,11 @@ fn inspector_text(inspector: &Inspector) -> Vec<Line<'_>> {
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered(area, 48, 13);
+    let popup = centered(area, 58, 100);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(
-            "Navigation\n\nj / ↓       down\nk / ↑       up\nTab         next pane\nEnter       inspect\n/           search\nq           quit\n? / Esc     close help",
+            "Navigation\n\n  j / ↓          move down\n  k / ↑          move up\n  Ctrl+h         focus left\n  Ctrl+j         focus down\n  Ctrl+k         focus up\n  Ctrl+l         focus right\n  Tab            next pane\n  Shift+Tab      previous pane\n  Enter          inspect\n  Esc            back\n  /              search\n  ?              close help\n  q / Ctrl+C     quit",
         )
         .block(Block::default().title(" Help ").borders(Borders::ALL)),
         popup,
@@ -883,21 +944,142 @@ mod tests {
         }
     }
 
+    fn symbol() -> Symbol {
+        Symbol {
+            id: "src/lsp.rs:44:11:struct:LspClient".into(),
+            name: "LspClient".into(),
+            kind: "struct".into(),
+            file: "src/lsp.rs".into(),
+            range: Range {
+                start: Position {
+                    line: 44,
+                    character: 0,
+                },
+                end: Position {
+                    line: 54,
+                    character: 1,
+                },
+            },
+            selection_range: Range {
+                start: Position {
+                    line: 44,
+                    character: 11,
+                },
+                end: Position {
+                    line: 44,
+                    character: 20,
+                },
+            },
+            container: None,
+        }
+    }
+
     #[test]
-    fn navigation_is_bounded_and_panes_switch() {
+    fn selection_is_bounded_and_project_items_activate() {
         let mut app = App::new(project());
         app.move_selection(-1);
         assert_eq!(app.project_selection, 0);
         app.move_selection(99);
         assert_eq!(app.project_selection, app.project_item_count() - 1);
-        app.switch_pane();
-        assert_eq!(app.pane, Pane::Details);
-        app.switch_pane();
-        assert_eq!(app.pane, Pane::Project);
         app.project_selection = 1;
         app.activate_project_item();
         assert_eq!(app.pane, Pane::Details);
         assert_eq!(app.notice.as_deref(), Some("Entrypoint: src/main.rs"));
+    }
+
+    #[test]
+    fn directional_focus_is_spatial_and_does_not_wrap() {
+        let mut app = App::new(project());
+        for direction in [
+            FocusDirection::Left,
+            FocusDirection::Up,
+            FocusDirection::Down,
+        ] {
+            app.focus_direction(direction);
+            assert_eq!(app.pane, Pane::Project);
+        }
+        app.focus_direction(FocusDirection::Right);
+        assert_eq!(app.pane, Pane::Details);
+        for direction in [
+            FocusDirection::Right,
+            FocusDirection::Up,
+            FocusDirection::Down,
+        ] {
+            app.focus_direction(direction);
+            assert_eq!(app.pane, Pane::Details);
+        }
+        app.focus_direction(FocusDirection::Left);
+        assert_eq!(app.pane, Pane::Project);
+    }
+
+    #[test]
+    fn next_and_previous_panes_have_explicit_transitions() {
+        let mut app = App::new(project());
+        app.next_pane();
+        assert_eq!(app.pane, Pane::Details);
+        app.next_pane();
+        assert_eq!(app.pane, Pane::Project);
+        app.previous_pane();
+        assert_eq!(app.pane, Pane::Details);
+        app.previous_pane();
+        assert_eq!(app.pane, Pane::Project);
+    }
+
+    #[test]
+    fn escape_closes_modes_then_returns_details_to_project() {
+        let mut app = App::new(project());
+        app.escape();
+        assert_eq!(app.pane, Pane::Project);
+
+        app.pane = Pane::Details;
+        app.inspector = Some(Inspector::loading(symbol()));
+        app.escape();
+        assert_eq!(app.pane, Pane::Project);
+        assert!(app.inspector.is_some());
+
+        app.pane = Pane::Details;
+        app.overlay = Overlay::Help;
+        app.escape();
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.pane, Pane::Details);
+
+        app.overlay = Overlay::Search;
+        app.escape();
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.pane, Pane::Details);
+    }
+
+    #[tokio::test]
+    async fn search_ctrl_jk_moves_results_without_changing_pane() {
+        let mut app = App::new(project());
+        app.pane = Pane::Details;
+        app.overlay = Overlay::Search;
+        let first = symbol();
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.name = "LspClientBuilder".into();
+        app.search_results = vec![first, second];
+        let (commands, _receiver) = mpsc::channel(1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.search_selection, 1);
+        assert_eq!(app.pane, Pane::Details);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.search_selection, 0);
+        assert_eq!(app.pane, Pane::Details);
     }
 
     #[test]
@@ -937,6 +1119,30 @@ mod tests {
     }
 
     #[test]
+    fn details_footer_and_help_document_back_and_spatial_navigation() {
+        let mut app = App::new(project());
+        app.pane = Pane::Details;
+        let details = render_text(&app);
+        assert!(details.contains("Ctrl+h project"));
+        assert!(details.contains("Esc back"));
+
+        app.overlay = Overlay::Help;
+        let help = render_text(&app);
+        for expected in [
+            "Ctrl+h",
+            "Ctrl+j",
+            "Ctrl+k",
+            "Ctrl+l",
+            "Tab",
+            "Shift+Tab",
+            "Esc",
+            "q / Ctrl+C",
+        ] {
+            assert!(help.contains(expected), "missing {expected} in help");
+        }
+    }
+
+    #[test]
     fn exports_review_frames_when_requested() {
         let Some(directory) = std::env::var_os("WT_TUI_REVIEW_DIR") else {
             return;
@@ -952,39 +1158,12 @@ mod tests {
         ready.analyzer_state = AnalyzerState::Ready;
         std::fs::write(directory.join("02-ready.txt"), render_text(&ready)).unwrap();
 
-        let symbol = Symbol {
-            id: "src/lsp.rs:44:11:struct:LspClient".into(),
-            name: "LspClient".into(),
-            kind: "struct".into(),
-            file: "src/lsp.rs".into(),
-            range: Range {
-                start: Position {
-                    line: 44,
-                    character: 0,
-                },
-                end: Position {
-                    line: 54,
-                    character: 1,
-                },
-            },
-            selection_range: Range {
-                start: Position {
-                    line: 44,
-                    character: 11,
-                },
-                end: Position {
-                    line: 44,
-                    character: 20,
-                },
-            },
-            container: None,
-        };
         let mut inspected = App::new(project());
         inspected.analyzer_state = AnalyzerState::Ready;
         inspected.pane = Pane::Details;
         inspected.search_query = "LspClient".into();
         inspected.inspector = Some(Inspector {
-            symbol,
+            symbol: symbol(),
             source: Some(
                 "  43 | }\n  44 |\n  45 | pub struct LspClient {\n  46 |     child: Child,\n  47 |     input: Arc<Mutex<ChildStdin>>,".into(),
             ),
@@ -996,6 +1175,14 @@ mod tests {
             error: None,
         });
         std::fs::write(directory.join("03-inspector.txt"), render_text(&inspected)).unwrap();
+        std::fs::write(
+            directory.join("04-details-focused.txt"),
+            render_text(&inspected),
+        )
+        .unwrap();
+
+        inspected.overlay = Overlay::Help;
+        std::fs::write(directory.join("05-help.txt"), render_text(&inspected)).unwrap();
     }
 
     fn render_text(app: &App) -> String {

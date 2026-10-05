@@ -48,7 +48,7 @@ Open another checkout:
 wt /path/to/project
 ```
 
-The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. Press `/` for debounced symbol search, select with the arrow keys, and press Enter for a progressively populated inspector. Press `?` for help and `q` to quit. One rust-analyzer process serves every search and inspector action until the UI exits.
+The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. Use `j`/`k` or the arrow keys within a pane, `Ctrl+h/j/k/l` for spatial pane navigation, `Tab`/`Shift+Tab` for next/previous pane, and `Esc` to close the current mode or return from Details to Project. Press `/` for debounced symbol search, Enter to inspect, `?` for help, and `q` or `Ctrl+C` to quit. One rust-analyzer process serves every search and inspector action until the UI exits.
 
 ## Headless summary
 
