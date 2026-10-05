@@ -48,7 +48,7 @@ Open another checkout:
 wt /path/to/project
 ```
 
-The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. Use `j`/`k` or the arrow keys within a pane, `Ctrl+h/j/k/l` for spatial pane navigation, `Tab`/`Shift+Tab` for next/previous pane, and `Esc` to close the current mode or return from Details to Project. Press `/` for debounced symbol search, Enter to inspect, `?` for help, and `q` or `Ctrl+C` to quit. One rust-analyzer process serves every search and inspector action until the UI exits.
+The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. Press `1` for Overview or `2` for the persistent Symbols browser. In Symbols, press `/`, search for a name such as `LspClient`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Use `Ctrl+h/j/k/l` for spatial pane navigation, `Tab`/`Shift+Tab` for next/previous pane, and `Esc` to close the current mode or return to the left pane. Press `?` for help and `q` or `Ctrl+C` to quit. One rust-analyzer process serves every search and inspector action until the UI exits.
 
 ## Headless summary
 
@@ -144,7 +144,7 @@ The implementation is one binary crate:
 - `rust.rs` implements semantic operations over rust-analyzer responses.
 - `model.rs` contains transport-neutral result structures.
 - `output.rs` renders those structures.
-- `tui.rs` owns interactive state, rendering, input, and the single-session analyzer worker.
+- `tui/` separates interactive state, terminal events, rendering, and the single-session analyzer worker.
 
 Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.
 

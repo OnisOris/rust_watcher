@@ -533,8 +533,8 @@ impl RustAnalyzer {
         })
     }
 
-    pub fn source_for_symbol(&self, symbol: &Symbol) -> Result<String> {
-        source_fragment(&self.absolute(&symbol.file), symbol.selection_range)
+    pub fn source_preview_for_symbol(&self, symbol: &Symbol) -> Result<String> {
+        source_preview(&self.absolute(&symbol.file), symbol.selection_range)
     }
 
     pub async fn shutdown(&mut self) {
@@ -914,6 +914,28 @@ fn source_fragment(file: &Path, selected: Range) -> Result<String> {
         .join("\n"))
 }
 
+fn source_preview(file: &Path, selected: Range) -> Result<String> {
+    let source = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    let lines: Vec<_> = source.lines().collect();
+    let start = selected.start.line.saturating_sub(10) as usize;
+    let end = ((selected.end.line + 11) as usize).min(lines.len());
+    Ok(lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_number = start + index;
+            let marker = if line_number == selected.start.line as usize {
+                '>'
+            } else {
+                ' '
+            };
+            format!("{marker}{:>4} | {}", line_number + 1, line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,6 +951,33 @@ mod tests {
             signature_line("```rust\nfn add(a: i32) -> i32\n```"),
             Some("fn add(a: i32) -> i32")
         );
+    }
+
+    #[test]
+    fn source_preview_is_bounded_and_marks_the_selected_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("preview.rs");
+        let source = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, source).unwrap();
+        let preview = source_preview(
+            &file,
+            Range {
+                start: Position {
+                    line: 19,
+                    character: 0,
+                },
+                end: Position {
+                    line: 19,
+                    character: 7,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(preview.lines().count(), 21);
+        assert!(preview.lines().any(|line| line == ">  20 | line 20"));
     }
 
     #[test]
