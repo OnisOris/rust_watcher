@@ -14,3 +14,25 @@ fn main() {
     println!("{}", calculate());
     println!("{}", привет());
 }
+
+fn chain_a() {
+    chain_b();
+}
+
+fn chain_b() {
+    chain_c();
+}
+
+fn chain_c() {}
+
+mod first {
+    pub fn run() {}
+}
+
+mod second {
+    pub fn run() {}
+}
+
+fn invoke_first() {
+    first::run();
+}

@@ -76,6 +76,36 @@ pub struct CallTree {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CallTarget {
+    pub name: String,
+    pub kind: String,
+    pub file: PathBuf,
+    pub range: Range,
+    pub selection_range: Range,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl CallTarget {
+    pub fn from_symbol(symbol: &Symbol) -> Self {
+        Self {
+            name: symbol.name.clone(),
+            kind: symbol.kind.clone(),
+            file: symbol.file.clone(),
+            range: symbol.range,
+            selection_range: symbol.selection_range,
+            detail: symbol.container.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallTargets {
+    pub items: Vec<CallTarget>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSummary {
     #[serde(rename = "workspaceRoot", serialize_with = "serialize_workspace_root")]

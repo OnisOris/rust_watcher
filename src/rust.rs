@@ -1,7 +1,7 @@
 use crate::lsp::{path_uri, uri_path, LspClient};
 use crate::model::{
-    stable_symbol_id, CallNode, CallTree, Diagnostic, Explanation, Location, Position, Range,
-    Severity, Symbol, SymbolSearchResult,
+    stable_symbol_id, CallNode, CallTarget, CallTargets, CallTree, Diagnostic, Explanation,
+    Location, Position, Range, Severity, Symbol, SymbolSearchResult,
 };
 use crate::project::Project;
 use anyhow::{Context, Result};
@@ -345,6 +345,97 @@ impl RustAnalyzer {
         })
     }
 
+    pub async fn callers_for_target(&self, target: &CallTarget) -> Result<Option<CallTargets>> {
+        self.call_targets(target, true).await
+    }
+
+    pub async fn callees_for_target(&self, target: &CallTarget) -> Result<Option<CallTargets>> {
+        self.call_targets(target, false).await
+    }
+
+    async fn call_targets(
+        &self,
+        target: &CallTarget,
+        incoming: bool,
+    ) -> Result<Option<CallTargets>> {
+        let Some(item) = self.prepare_call_item(target).await? else {
+            return Ok(None);
+        };
+        let items: Vec<CallHierarchyItem> = if incoming {
+            let calls: Option<Vec<CallHierarchyIncomingCall>> = self
+                .client
+                .request("callHierarchy/incomingCalls", json!({"item": item}))
+                .await?;
+            calls
+                .unwrap_or_default()
+                .into_iter()
+                .map(|call| call.from)
+                .collect()
+        } else {
+            let calls: Option<Vec<CallHierarchyOutgoingCall>> = self
+                .client
+                .request("callHierarchy/outgoingCalls", json!({"item": item}))
+                .await?;
+            calls
+                .unwrap_or_default()
+                .into_iter()
+                .map(|call| call.to)
+                .collect()
+        };
+        let mut items = items
+            .into_iter()
+            .map(|item| self.normalize_call_target(&item))
+            .collect::<Result<Vec<_>>>()?;
+        items.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then(a.file.cmp(&b.file))
+                .then(a.selection_range.cmp(&b.selection_range))
+        });
+        items.dedup_by(|a, b| {
+            a.name == b.name && a.file == b.file && a.selection_range == b.selection_range
+        });
+        let truncated = items.len() > CALL_CHILD_LIMIT;
+        items.truncate(CALL_CHILD_LIMIT);
+        Ok(Some(CallTargets { items, truncated }))
+    }
+
+    async fn prepare_call_item(&self, target: &CallTarget) -> Result<Option<CallHierarchyItem>> {
+        let items: Option<Vec<CallHierarchyItem>> = self
+            .client
+            .request(
+                "textDocument/prepareCallHierarchy",
+                json!({
+                    "textDocument": {"uri": path_uri(&self.absolute(&target.file), false)?},
+                    "position": lsp_position(target.selection_range.start)
+                }),
+            )
+            .await?;
+        let mut items = items.unwrap_or_default();
+        items.sort_by_key(call_item_key);
+        if let Some(index) = items.iter().position(|item| {
+            self.normalize_call_target(item).is_ok_and(|candidate| {
+                candidate.file == target.file
+                    && candidate.selection_range == target.selection_range
+                    && candidate.name == target.name
+            })
+        }) {
+            return Ok(Some(items.remove(index)));
+        }
+        Ok(items.into_iter().next())
+    }
+
+    fn normalize_call_target(&self, item: &CallHierarchyItem) -> Result<CallTarget> {
+        Ok(CallTarget {
+            name: item.name.clone(),
+            kind: kind_name(item.kind).into(),
+            file: self.relative(uri_path(item.uri.as_str())?),
+            range: range(item.range),
+            selection_range: range(item.selection_range),
+            detail: item.detail.clone(),
+        })
+    }
+
     fn expand_calls<'a>(
         &'a self,
         item: CallHierarchyItem,
@@ -357,7 +448,7 @@ impl RustAnalyzer {
             if depth == 0 {
                 return Ok(Vec::new());
             }
-            let pairs: Vec<(CallHierarchyItem, LspLocation)> = if incoming {
+            let items: Vec<CallHierarchyItem> = if incoming {
                 let calls: Option<Vec<CallHierarchyIncomingCall>> = self
                     .client
                     .request("callHierarchy/incomingCalls", json!({"item": item}))
@@ -365,13 +456,7 @@ impl RustAnalyzer {
                 calls
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|call| {
-                        let location = LspLocation {
-                            uri: call.from.uri.clone(),
-                            range: call.from.selection_range,
-                        };
-                        (call.from, location)
-                    })
+                    .map(|call| call.from)
                     .collect()
             } else {
                 let calls: Option<Vec<CallHierarchyOutgoingCall>> = self
@@ -381,24 +466,21 @@ impl RustAnalyzer {
                 calls
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|call| {
-                        let location = LspLocation {
-                            uri: call.to.uri.clone(),
-                            range: call.to.selection_range,
-                        };
-                        (call.to, location)
-                    })
+                    .map(|call| call.to)
                     .collect()
             };
-            let mut calls: Vec<_> = pairs
+            let mut calls: Vec<_> = items
                 .into_iter()
-                .map(|(item, location)| {
-                    let location = self.normalize_location(location)?;
+                .map(|item| {
+                    let target = self.normalize_call_target(&item)?;
                     Ok(NormalizedCall {
                         key: call_item_key(&item),
                         name: item.name.clone(),
                         item,
-                        location,
+                        location: Location {
+                            file: target.file,
+                            range: target.selection_range,
+                        },
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -939,6 +1021,37 @@ fn source_preview(file: &Path, selected: Range) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn require_analyzer() -> bool {
+        let available = Command::new("rust-analyzer")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !available {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "rust-analyzer is required in CI"
+            );
+            eprintln!("skipping rust-analyzer test: install rust-analyzer");
+        }
+        available
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    async fn fixture_analyzer(name: &str) -> RustAnalyzer {
+        let project = Project::discover(&fixture(name)).expect("fixture should be a Cargo project");
+        let analyzer = RustAnalyzer::start(project, Path::new("rust-analyzer"))
+            .await
+            .expect("rust-analyzer should start");
+        analyzer.wait_ready().await.expect("analyzer should settle");
+        analyzer
+    }
 
     #[test]
     fn normalizes_kind_names() {
@@ -1085,5 +1198,90 @@ mod tests {
         assert!(needs_authoritative_retry(false, 1));
         assert!(!needs_authoritative_retry(false, 2));
         assert!(!needs_authoritative_retry(true, 0));
+    }
+
+    #[tokio::test]
+    async fn one_hop_calls_are_direct_and_follow_exact_locations() {
+        if !require_analyzer() {
+            return;
+        }
+        let mut analyzer = fixture_analyzer("simple_project").await;
+
+        let a = analyzer.find_symbol("chain_a").await.unwrap();
+        let b = analyzer.find_symbol("chain_b").await.unwrap();
+        let c = analyzer.find_symbol("chain_c").await.unwrap();
+        let a_callees = analyzer
+            .callees_for_target(&CallTarget::from_symbol(&a))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a_callees.items.len(), 1);
+        assert_eq!(a_callees.items[0].selection_range, b.selection_range);
+        let b_callers = analyzer
+            .callers_for_target(&CallTarget::from_symbol(&b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(b_callers
+            .items
+            .iter()
+            .any(|target| target.selection_range == a.selection_range));
+        let b_callees = analyzer
+            .callees_for_target(&a_callees.items[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(b_callees.items.len(), 1);
+        assert_eq!(b_callees.items[0].selection_range, c.selection_range);
+
+        let first = analyzer.find_symbol("first::run").await.unwrap();
+        let second = analyzer.find_symbol("second::run").await.unwrap();
+        let normalized = CallTarget::from_symbol(&first);
+        assert_eq!(normalized.name, "run");
+        assert_eq!(normalized.kind, "function");
+        assert_eq!(normalized.file, PathBuf::from("src/main.rs"));
+        assert_eq!(normalized.selection_range, first.selection_range);
+        let callers = analyzer
+            .callers_for_target(&normalized)
+            .await
+            .unwrap()
+            .unwrap();
+        let caller = callers
+            .items
+            .iter()
+            .find(|target| target.name == "invoke_first")
+            .expect("first::run should have its exact caller");
+        let followed = analyzer.callees_for_target(caller).await.unwrap().unwrap();
+        assert!(followed
+            .items
+            .iter()
+            .any(|target| target.selection_range == first.selection_range));
+        assert!(!followed
+            .items
+            .iter()
+            .any(|target| target.selection_range == second.selection_range));
+        assert!(followed
+            .items
+            .iter()
+            .all(|target| !target.file.is_absolute()));
+
+        analyzer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn one_hop_calls_handle_direct_recursion_without_expanding_it() {
+        if !require_analyzer() {
+            return;
+        }
+        let mut analyzer = fixture_analyzer("recursive_project").await;
+        let recurse = analyzer.find_symbol("recurse").await.unwrap();
+        let target = CallTarget::from_symbol(&recurse);
+        let callers = analyzer.callers_for_target(&target).await.unwrap().unwrap();
+        let callees = analyzer.callees_for_target(&target).await.unwrap().unwrap();
+        assert!(callers.items.iter().any(|item| item.name == "recurse"));
+        assert!(callees.items.iter().any(|item| item.name == "recurse"));
+        assert!(callers.items.len() <= CALL_CHILD_LIMIT);
+        assert!(callees.items.len() <= CALL_CHILD_LIMIT);
+        analyzer.shutdown().await;
     }
 }
