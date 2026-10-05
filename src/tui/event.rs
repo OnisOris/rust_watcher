@@ -73,7 +73,11 @@ pub(super) async fn handle_key(
         return Ok(true);
     }
     if key.code == KeyCode::Esc {
-        app.escape();
+        if let Some((id, target)) = app.escape() {
+            commands
+                .send(AnalyzerCommand::LoadCalls { id, target })
+                .await?;
+        }
         return Ok(false);
     }
     match app.overlay {
@@ -110,6 +114,8 @@ pub(super) async fn handle_key(
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('1') => app.switch_view(View::Overview),
             KeyCode::Char('2') => app.switch_view(View::Symbols),
+            KeyCode::Char('3') => open_calls(app, commands).await?,
+            KeyCode::Char('c') if app.view == View::Symbols => open_calls(app, commands).await?,
             KeyCode::Char('?') => app.overlay = Overlay::Help,
             KeyCode::Char('/') => app.open_search(),
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -135,6 +141,7 @@ pub(super) async fn handle_key(
             KeyCode::Tab => app.next_pane(),
             KeyCode::BackTab => app.previous_pane(),
             KeyCode::Enter if app.view == View::Symbols => begin_inspect(app, commands).await?,
+            KeyCode::Enter if app.view == View::Calls => follow_call(app, commands).await?,
             KeyCode::Enter => app.activate_project_item(),
             _ => {}
         },
@@ -146,6 +153,24 @@ async fn begin_inspect(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) 
     if let Some((id, symbol)) = app.begin_selected_inspect() {
         commands
             .send(AnalyzerCommand::Inspect { id, symbol })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn open_calls(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
+    if let Some((id, target)) = app.open_calls_for_inspector() {
+        commands
+            .send(AnalyzerCommand::LoadCalls { id, target })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn follow_call(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
+    if let Some((id, target)) = app.follow_selected_call() {
+        commands
+            .send(AnalyzerCommand::LoadCalls { id, target })
             .await?;
     }
     Ok(())
@@ -274,7 +299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn number_keys_switch_views_without_analyzer_commands() {
+    async fn number_keys_switch_views_and_calls_use_the_inspected_symbol() {
         let mut app = app();
         let (commands, mut receiver) = mpsc::channel(1);
         handle_key(
@@ -295,5 +320,37 @@ mod tests {
         .unwrap();
         assert_eq!(app.view, View::Overview);
         assert!(receiver.try_recv().is_err());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.view, View::Calls);
+        assert!(app.calls.center.is_none());
+        assert!(receiver.try_recv().is_err());
+
+        app.inspector = Some(super::super::app::Inspector::loading(1, symbol("run")));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.view, View::Calls);
+        assert_eq!(app.calls.center.as_ref().unwrap().name, "run");
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            AnalyzerCommand::LoadCalls { .. }
+        ));
     }
 }

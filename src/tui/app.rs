@@ -1,5 +1,5 @@
 use super::worker::AnalyzerEvent;
-use crate::model::{Location, Symbol};
+use crate::model::{CallTarget, CallTargets, Location, Symbol};
 use crate::project::Project;
 use std::time::Instant;
 
@@ -15,6 +15,7 @@ pub(super) enum AnalyzerState {
 pub(super) enum View {
     Overview,
     Symbols,
+    Calls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,9 @@ pub(super) enum Pane {
     Details,
     Symbols,
     Inspector,
+    Callers,
+    CallCurrent,
+    Callees,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +94,25 @@ impl Inspector {
     }
 }
 
+const CALL_HISTORY_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct CallsState {
+    pub center: Option<CallTarget>,
+    pub callers: Vec<CallTarget>,
+    pub callees: Vec<CallTarget>,
+    pub callers_selection: usize,
+    pub callees_selection: usize,
+    pub callers_loading: bool,
+    pub callees_loading: bool,
+    pub callers_truncated: bool,
+    pub callees_truncated: bool,
+    pub callers_error: Option<String>,
+    pub callees_error: Option<String>,
+    pub history: Vec<CallTarget>,
+    pub request_id: u64,
+}
+
 pub(super) struct App {
     pub project: Project,
     pub analyzer_state: AnalyzerState,
@@ -106,6 +129,7 @@ pub(super) struct App {
     pub symbols_loading: bool,
     pub inspector: Option<Inspector>,
     pub inspect_request: u64,
+    pub calls: CallsState,
     pub notice: Option<String>,
 }
 
@@ -127,6 +151,7 @@ impl App {
             symbols_loading: false,
             inspector: None,
             inspect_request: 0,
+            calls: CallsState::default(),
             notice: None,
         }
     }
@@ -141,6 +166,7 @@ impl App {
         self.pane = match view {
             View::Overview => Pane::Project,
             View::Symbols => Pane::Symbols,
+            View::Calls => Pane::CallCurrent,
         };
     }
 
@@ -164,7 +190,21 @@ impl App {
                     inspector.scroll_by(delta);
                 }
             }
-            Pane::Details => {}
+            Pane::Callers => {
+                self.calls.callers_selection = move_index(
+                    self.calls.callers_selection,
+                    self.calls.callers.len(),
+                    delta,
+                );
+            }
+            Pane::Callees => {
+                self.calls.callees_selection = move_index(
+                    self.calls.callees_selection,
+                    self.calls.callees.len(),
+                    delta,
+                );
+            }
+            Pane::Details | Pane::CallCurrent => {}
         }
     }
 
@@ -174,6 +214,9 @@ impl App {
             (View::Overview, Pane::Details) => Pane::Project,
             (View::Symbols, Pane::Symbols) => Pane::Inspector,
             (View::Symbols, Pane::Inspector) => Pane::Symbols,
+            (View::Calls, Pane::Callers) => Pane::CallCurrent,
+            (View::Calls, Pane::CallCurrent) => Pane::Callees,
+            (View::Calls, Pane::Callees) => Pane::Callers,
             (_, pane) => pane,
         };
     }
@@ -184,6 +227,9 @@ impl App {
             (View::Overview, Pane::Details) => Pane::Project,
             (View::Symbols, Pane::Symbols) => Pane::Inspector,
             (View::Symbols, Pane::Inspector) => Pane::Symbols,
+            (View::Calls, Pane::Callers) => Pane::Callees,
+            (View::Calls, Pane::CallCurrent) => Pane::Callers,
+            (View::Calls, Pane::Callees) => Pane::CallCurrent,
             (_, pane) => pane,
         };
     }
@@ -194,18 +240,33 @@ impl App {
             (View::Overview, Pane::Details, FocusDirection::Left) => Pane::Project,
             (View::Symbols, Pane::Symbols, FocusDirection::Right) => Pane::Inspector,
             (View::Symbols, Pane::Inspector, FocusDirection::Left) => Pane::Symbols,
+            (View::Calls, Pane::Callers, FocusDirection::Right) => Pane::CallCurrent,
+            (View::Calls, Pane::CallCurrent, FocusDirection::Left) => Pane::Callers,
+            (View::Calls, Pane::CallCurrent, FocusDirection::Right) => Pane::Callees,
+            (View::Calls, Pane::Callees, FocusDirection::Left) => Pane::CallCurrent,
             _ => self.pane,
         };
     }
 
-    pub(super) fn escape(&mut self) {
+    pub(super) fn escape(&mut self) -> Option<(u64, CallTarget)> {
         match self.overlay {
             Overlay::Help | Overlay::Search => self.overlay = Overlay::None,
             Overlay::None if self.pane == Pane::Details => self.pane = Pane::Project,
             Overlay::None if self.pane == Pane::Inspector => self.pane = Pane::Symbols,
+            Overlay::None if matches!(self.pane, Pane::Callers | Pane::Callees) => {
+                self.pane = Pane::CallCurrent;
+            }
+            Overlay::None if self.pane == Pane::CallCurrent => {
+                if let Some(target) = self.calls.history.pop() {
+                    self.notice = None;
+                    return Some(self.load_calls(target, false));
+                }
+                self.switch_view(View::Symbols);
+            }
             Overlay::None => {}
         }
         self.notice = None;
+        None
     }
 
     pub(super) fn activate_project_item(&mut self) {
@@ -246,8 +307,58 @@ impl App {
         self.pane = match self.view {
             View::Overview => Pane::Details,
             View::Symbols => Pane::Inspector,
+            View::Calls => Pane::CallCurrent,
         };
         Some((id, symbol))
+    }
+
+    pub(super) fn open_calls_for_inspector(&mut self) -> Option<(u64, CallTarget)> {
+        self.switch_view(View::Calls);
+        let target = CallTarget::from_symbol(&self.inspector.as_ref()?.symbol);
+        self.calls.history.clear();
+        Some(self.load_calls(target, false))
+    }
+
+    pub(super) fn follow_selected_call(&mut self) -> Option<(u64, CallTarget)> {
+        let target = match self.pane {
+            Pane::Callers => self
+                .calls
+                .callers
+                .get(self.calls.callers_selection)?
+                .clone(),
+            Pane::Callees => self
+                .calls
+                .callees
+                .get(self.calls.callees_selection)?
+                .clone(),
+            _ => return None,
+        };
+        Some(self.load_calls(target, true))
+    }
+
+    fn load_calls(&mut self, target: CallTarget, remember: bool) -> (u64, CallTarget) {
+        if remember {
+            if let Some(center) = self.calls.center.take() {
+                self.calls.history.push(center);
+                if self.calls.history.len() > CALL_HISTORY_LIMIT {
+                    self.calls.history.remove(0);
+                }
+            }
+        }
+        self.calls.request_id += 1;
+        self.calls.center = Some(target.clone());
+        self.calls.callers.clear();
+        self.calls.callees.clear();
+        self.calls.callers_selection = 0;
+        self.calls.callees_selection = 0;
+        self.calls.callers_loading = true;
+        self.calls.callees_loading = true;
+        self.calls.callers_truncated = false;
+        self.calls.callees_truncated = false;
+        self.calls.callers_error = None;
+        self.calls.callees_error = None;
+        self.pane = Pane::CallCurrent;
+        (self.calls.request_id, target)
     }
 
     pub(super) fn apply_event(&mut self, event: AnalyzerEvent) {
@@ -278,17 +389,34 @@ impl App {
             AnalyzerEvent::References { id, count } => self.with_inspector(id, |item| {
                 item.references = Some(count);
             }),
-            AnalyzerEvent::Calls {
-                id,
-                callers,
-                callees,
-            } => self.with_inspector(id, |item| {
-                item.callers = Some(callers);
-                item.callees = Some(callees);
-            }),
+            AnalyzerEvent::InspectorCallers { id, count } => {
+                self.with_inspector(id, |item| item.callers = Some(count));
+            }
+            AnalyzerEvent::InspectorCallees { id, count } => {
+                self.with_inspector(id, |item| item.callees = Some(count));
+            }
             AnalyzerEvent::Diagnostics { id, values } => self.with_inspector(id, |item| {
                 item.diagnostics = Some(values.len());
             }),
+            AnalyzerEvent::CallersLoaded { id, result } if id == self.calls.request_id => {
+                self.apply_callers(result);
+            }
+            AnalyzerEvent::CalleesLoaded { id, result } if id == self.calls.request_id => {
+                self.apply_callees(result);
+            }
+            AnalyzerEvent::CallsFailed {
+                id,
+                incoming,
+                message,
+            } if id == self.calls.request_id => {
+                if incoming {
+                    self.calls.callers_loading = false;
+                    self.calls.callers_error = Some(message);
+                } else {
+                    self.calls.callees_loading = false;
+                    self.calls.callees_error = Some(message);
+                }
+            }
             AnalyzerEvent::InspectFailed {
                 id,
                 section,
@@ -296,7 +424,37 @@ impl App {
             } => self.with_inspector(id, |item| {
                 item.errors.push((section.into(), message));
             }),
-            AnalyzerEvent::SearchResults { .. } | AnalyzerEvent::SearchFailed { .. } => {}
+            AnalyzerEvent::SearchResults { .. }
+            | AnalyzerEvent::SearchFailed { .. }
+            | AnalyzerEvent::CallersLoaded { .. }
+            | AnalyzerEvent::CalleesLoaded { .. }
+            | AnalyzerEvent::CallsFailed { .. } => {}
+        }
+    }
+
+    fn apply_callers(&mut self, result: Option<CallTargets>) {
+        self.calls.callers_loading = false;
+        match result {
+            Some(result) => {
+                self.calls.callers = result.items;
+                self.calls.callers_truncated = result.truncated;
+            }
+            None => {
+                self.calls.callers_error = Some("Call hierarchy unavailable for this symbol".into())
+            }
+        }
+    }
+
+    fn apply_callees(&mut self, result: Option<CallTargets>) {
+        self.calls.callees_loading = false;
+        match result {
+            Some(result) => {
+                self.calls.callees = result.items;
+                self.calls.callees_truncated = result.truncated;
+            }
+            None => {
+                self.calls.callees_error = Some("Call hierarchy unavailable for this symbol".into())
+            }
         }
     }
 
@@ -384,12 +542,20 @@ mod tests {
         }
     }
 
+    fn call_target(name: &str, line: u32) -> CallTarget {
+        let mut symbol = symbol(name);
+        symbol.kind = "function".into();
+        symbol.selection_range.start.line = line;
+        symbol.selection_range.end.line = line;
+        CallTarget::from_symbol(&symbol)
+    }
+
     #[test]
     fn views_and_spatial_navigation_are_explicit() {
         let mut app = App::new(project());
         app.focus_direction(FocusDirection::Right);
         assert_eq!(app.pane, Pane::Details);
-        app.escape();
+        let _ = app.escape();
         assert_eq!(app.pane, Pane::Project);
 
         app.switch_view(View::Symbols);
@@ -406,6 +572,31 @@ mod tests {
         assert_eq!(app.pane, Pane::Inspector);
         app.previous_pane();
         assert_eq!(app.pane, Pane::Symbols);
+
+        app.switch_view(View::Calls);
+        assert_eq!(app.pane, Pane::CallCurrent);
+        app.focus_direction(FocusDirection::Left);
+        assert_eq!(app.pane, Pane::Callers);
+        app.focus_direction(FocusDirection::Right);
+        app.focus_direction(FocusDirection::Right);
+        assert_eq!(app.pane, Pane::Callees);
+        app.focus_direction(FocusDirection::Right);
+        assert_eq!(app.pane, Pane::Callees);
+        assert!(app.escape().is_none());
+        assert_eq!(app.pane, Pane::CallCurrent);
+        app.next_pane();
+        assert_eq!(app.pane, Pane::Callees);
+        app.previous_pane();
+        assert_eq!(app.pane, Pane::CallCurrent);
+        app.pane = Pane::Callers;
+        app.next_pane();
+        assert_eq!(app.pane, Pane::CallCurrent);
+        app.next_pane();
+        assert_eq!(app.pane, Pane::Callees);
+        app.next_pane();
+        assert_eq!(app.pane, Pane::Callers);
+        app.previous_pane();
+        assert_eq!(app.pane, Pane::Callees);
     }
 
     #[test]
@@ -476,5 +667,67 @@ mod tests {
             app.inspector.as_ref().unwrap().source.as_deref(),
             Some("bar")
         );
+    }
+
+    #[test]
+    fn calls_selection_history_and_stale_events_are_bounded() {
+        let mut app = App::new(project());
+        app.inspector = Some(Inspector::loading(1, symbol("A")));
+        let (first, _) = app.open_calls_for_inspector().unwrap();
+        let caller_b = call_target("B", 10);
+        let callee_c = call_target("C", 20);
+        app.apply_event(AnalyzerEvent::CallersLoaded {
+            id: first,
+            result: Some(CallTargets {
+                items: vec![caller_b.clone()],
+                truncated: false,
+            }),
+        });
+        app.pane = Pane::Callers;
+        app.move_selection(99);
+        assert_eq!(app.calls.callers_selection, 0);
+        let (second, target) = app.follow_selected_call().unwrap();
+        assert_eq!(target.name, "B");
+        assert_eq!(app.calls.history.len(), 1);
+
+        app.apply_event(AnalyzerEvent::CalleesLoaded {
+            id: first,
+            result: Some(CallTargets {
+                items: vec![call_target("stale", 30)],
+                truncated: false,
+            }),
+        });
+        assert!(app.calls.callees.is_empty());
+        app.apply_event(AnalyzerEvent::CalleesLoaded {
+            id: second,
+            result: Some(CallTargets {
+                items: vec![callee_c, call_target("D", 21)],
+                truncated: false,
+            }),
+        });
+        app.pane = Pane::Callees;
+        app.move_selection(99);
+        assert_eq!(app.calls.callees_selection, 1);
+        app.move_selection(-99);
+        assert_eq!(app.calls.callees_selection, 0);
+        let (_third, target) = app.follow_selected_call().unwrap();
+        assert_eq!(target.name, "C");
+        assert_eq!(app.calls.history.len(), 2);
+
+        let (_, target) = app.escape().unwrap();
+        assert_eq!(target.name, "B");
+        let (_, target) = app.escape().unwrap();
+        assert_eq!(target.name, "A");
+    }
+
+    #[test]
+    fn call_history_drops_oldest_entry_at_limit() {
+        let mut app = App::new(project());
+        app.calls.center = Some(call_target("root", 0));
+        for line in 1..=CALL_HISTORY_LIMIT as u32 + 1 {
+            app.load_calls(call_target(&format!("target_{line}"), line), true);
+        }
+        assert_eq!(app.calls.history.len(), CALL_HISTORY_LIMIT);
+        assert_eq!(app.calls.history[0].name, "target_1");
     }
 }
