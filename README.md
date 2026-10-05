@@ -50,6 +50,8 @@ watcher /path/to/project
 
 The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and binary entrypoints from Cargo targets. Empty diagnostics are reported only after rust-analyzer reports a quiescent server and every opened workspace file has produced an initial diagnostic notification. A timeout is an error, never a clean result.
 
+The summary and `diagnostics` command wait for a fully quiescent analyzer. Lookup commands (`symbol`, `definition`, `refs`, `calls`, `callers`, and `explain`) issue their semantic request as soon as initialization completes. A unique lookup enriches only its candidate file with `documentSymbol`; a workspace-wide document-symbol scan is reserved for the exact summary count and the fallback where `workspace/symbol` returns no usable candidate.
+
 ## Semantic commands
 
 Commands default to the current directory. Put a project path before the command to inspect another project.
@@ -67,11 +69,13 @@ watcher diagnostics --warnings
 watcher explain Engine::run
 ```
 
-`explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It is intended to be useful both in a terminal and as compact context for an AI coding agent.
+`explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It opens and waits for diagnostics from the selected file only; the standalone `diagnostics` command still waits for the complete workspace diagnostic state. `explain` is intended to be useful both in a terminal and as compact context for an AI coding agent.
 
 Unqualified commands fail when multiple symbols match instead of choosing one arbitrarily. Add a module or type qualifier such as `Engine::run` to disambiguate.
 
 Call traversal is bounded: the default depth is 2, the maximum is 4, each level returns at most 20 calls, and a command returns at most 100 call nodes. Cycles are marked and not expanded repeatedly. Terminal and JSON results explicitly report truncation.
+
+Symbol search returns at most 50 results. Ambiguity errors return at most 20 candidates. Both terminal and JSON output explicitly indicate when more matches were omitted.
 
 ## JSON output
 
@@ -89,13 +93,21 @@ Every JSON response has the same versioned envelope. Successful commands use:
 {"schemaVersion":1,"ok":true,"data":[]}
 ```
 
+The `symbol` command's v1 data is an object so truncation is explicit:
+
+```json
+{"schemaVersion":1,"ok":true,"data":{"items":[],"truncated":false}}
+```
+
 Failures keep a non-zero exit status while writing one valid JSON value to stdout:
 
 ```json
 {"schemaVersion":1,"ok":false,"error":{"code":"symbol_not_found","message":"symbol not found: Missing"}}
 ```
 
-Ambiguity errors also include deterministic candidates. JSON contains normalized semantic records with repository-relative paths for workspace files. It contains no layout, UI, session, timestamp, or graph-snapshot fields.
+Ambiguity errors also include deterministic candidates and a `truncated` flag. Missing project paths use `project_not_found`; a missing rust-analyzer executable uses `analyzer_not_found` and is the only error that triggers installation advice.
+
+JSON contains normalized semantic records with repository-relative paths for workspace files. Summary JSON reports `"workspaceRoot":"."`, so equivalent checkouts serialize identically; terminal summary output still shows the absolute workspace path. JSON contains no layout, UI, session, timestamp, or graph-snapshot fields. The envelope remains schema version 1 because this pre-production contract is being refined before its first stable release.
 
 ## Architecture
 
