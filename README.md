@@ -48,7 +48,18 @@ Open another checkout:
 wt /path/to/project
 ```
 
-The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. Press `1` for Overview or `2` for the persistent Symbols browser. In Symbols, press `/`, search for a name such as `LspClient`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Use `Ctrl+h/j/k/l` for spatial pane navigation, `Tab`/`Shift+Tab` for next/previous pane, and `Esc` to close the current mode or return to the left pane. Press `?` for help and `q` or `Ctrl+C` to quit. One rust-analyzer process serves every search and inspector action until the UI exits.
+The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. The three persistent views are `1 Overview`, `2 Symbols`, and `3 Calls`. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact inspected symbol:
+
+```text
+2
+/ request
+Enter
+c
+```
+
+Calls shows immediate `CALLERS | CURRENT | CALLEES`. Use `Ctrl+h/l` to move spatially without wrapping, `Tab`/`Shift+Tab` to cycle panes, and `j`/`k` to select a caller or callee. Enter follows the selected semantic target immediately, while its two one-hop lists load progressively. `Esc` from a side pane returns to CURRENT; from CURRENT it walks back through up to 50 visited targets, then returns to Symbols. Each side is deterministically sorted, deduplicated, limited to 20 entries, and labels truncated results. Navigation uses rust-analyzer locations rather than resolving repeated names again.
+
+In every view, press `?` for help and `q` or `Ctrl+C` to quit. One rust-analyzer process serves search, Inspector, and Calls for the entire UI session. Interactive work is scheduled between semantic phases, so a newer inspection or Calls target replaces stale remaining work and search does not wait for a complete old Inspector pipeline.
 
 ## Headless summary
 
