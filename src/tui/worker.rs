@@ -1,13 +1,15 @@
-use crate::model::{Diagnostic, Location, Symbol, SymbolSearchResult};
+use crate::model::{CallTarget, CallTargets, Diagnostic, Location, Symbol, SymbolSearchResult};
 use crate::project::Project;
 use crate::rust::RustAnalyzer;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone)]
 pub(super) enum AnalyzerCommand {
     Search { id: u64, query: String },
     Inspect { id: u64, symbol: Symbol },
+    LoadCalls { id: u64, target: CallTarget },
     Shutdown,
 }
 
@@ -39,10 +41,13 @@ pub(super) enum AnalyzerEvent {
         id: u64,
         count: usize,
     },
-    Calls {
+    InspectorCallers {
         id: u64,
-        callers: usize,
-        callees: usize,
+        count: usize,
+    },
+    InspectorCallees {
+        id: u64,
+        count: usize,
     },
     Diagnostics {
         id: u64,
@@ -53,6 +58,104 @@ pub(super) enum AnalyzerEvent {
         section: &'static str,
         message: String,
     },
+    CallersLoaded {
+        id: u64,
+        result: Option<CallTargets>,
+    },
+    CalleesLoaded {
+        id: u64,
+        result: Option<CallTargets>,
+    },
+    CallsFailed {
+        id: u64,
+        incoming: bool,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectPhase {
+    Source,
+    Definition,
+    Hover,
+    References,
+    Callers,
+    Callees,
+    Diagnostics,
+}
+
+impl InspectPhase {
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Source => Some(Self::Definition),
+            Self::Definition => Some(Self::Hover),
+            Self::Hover => Some(Self::References),
+            Self::References => Some(Self::Callers),
+            Self::Callers => Some(Self::Callees),
+            Self::Callees => Some(Self::Diagnostics),
+            Self::Diagnostics => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallsPhase {
+    Callers,
+    Callees,
+}
+
+#[derive(Debug, Clone)]
+enum InteractiveWork {
+    Inspect {
+        id: u64,
+        symbol: Symbol,
+        phase: InspectPhase,
+    },
+    Calls {
+        id: u64,
+        target: CallTarget,
+        phase: CallsPhase,
+    },
+}
+
+#[derive(Default)]
+struct Scheduler {
+    search: Option<(u64, String)>,
+    work: Option<InteractiveWork>,
+    shutdown: bool,
+}
+
+impl Scheduler {
+    fn push(&mut self, command: AnalyzerCommand) {
+        match command {
+            AnalyzerCommand::Search { id, query } => self.search = Some((id, query)),
+            AnalyzerCommand::Inspect { id, symbol } => {
+                self.work = Some(InteractiveWork::Inspect {
+                    id,
+                    symbol,
+                    phase: InspectPhase::Source,
+                })
+            }
+            AnalyzerCommand::LoadCalls { id, target } => {
+                self.work = Some(InteractiveWork::Calls {
+                    id,
+                    target,
+                    phase: CallsPhase::Callers,
+                })
+            }
+            AnalyzerCommand::Shutdown => {
+                self.shutdown = true;
+                self.search = None;
+                self.work = None;
+            }
+        }
+    }
+
+    fn resume(&mut self, work: Option<InteractiveWork>) {
+        if !self.shutdown && self.work.is_none() {
+            self.work = work;
+        }
+    }
 }
 
 pub(super) async fn analyzer_worker(
@@ -70,95 +173,186 @@ pub(super) async fn analyzer_worker(
         }
     };
     let _ = events.send(AnalyzerEvent::Indexing).await;
+    let mut scheduler = Scheduler::default();
     let mut ready_sent = false;
     let mut error_sent = false;
     loop {
+        while let Ok(command) = commands.try_recv() {
+            scheduler.push(command);
+        }
+        if scheduler.shutdown {
+            break;
+        }
         if !error_sent {
             if let Some(error) = analyzer.error() {
                 error_sent = true;
-                let _ = events.send(AnalyzerEvent::Error(error)).await;
+                send(&events, AnalyzerEvent::Error(error)).await;
             }
         }
         if !ready_sent && analyzer.is_ready() {
             ready_sent = true;
-            let _ = events.send(AnalyzerEvent::Ready).await;
+            send(&events, AnalyzerEvent::Ready).await;
+        }
+        if let Some((id, query)) = scheduler.search.take() {
+            match analyzer.symbols(&query).await {
+                Ok(result) => send(&events, AnalyzerEvent::SearchResults { id, result }).await,
+                Err(error) => {
+                    send(
+                        &events,
+                        AnalyzerEvent::SearchFailed {
+                            id,
+                            message: format!("{error:#}"),
+                        },
+                    )
+                    .await
+                }
+            }
+            continue;
+        }
+        if let Some(work) = scheduler.work.take() {
+            let continuation = run_phase(&mut analyzer, work, &events).await;
+            scheduler.resume(continuation);
+            continue;
         }
         tokio::select! {
-            command = commands.recv() => match command {
-                Some(AnalyzerCommand::Search { id, query }) => {
-                    match analyzer.symbols(&query).await {
-                        Ok(result) => {
-                            let _ = events.send(AnalyzerEvent::SearchResults { id, result }).await;
-                        }
-                        Err(error) => {
-                            let _ = events.send(AnalyzerEvent::SearchFailed {
-                                id,
-                                message: format!("{error:#}"),
-                            }).await;
-                        }
-                    }
-                }
-                Some(AnalyzerCommand::Inspect { id, symbol }) => {
-                    inspect_symbol(&mut analyzer, id, symbol, &events).await;
-                }
-                Some(AnalyzerCommand::Shutdown) | None => break,
-            },
+            command = commands.recv() => match command { Some(command) => scheduler.push(command), None => scheduler.push(AnalyzerCommand::Shutdown) },
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
     analyzer.shutdown().await;
 }
 
-async fn inspect_symbol(
+async fn run_phase(
+    analyzer: &mut RustAnalyzer,
+    work: InteractiveWork,
+    events: &mpsc::Sender<AnalyzerEvent>,
+) -> Option<InteractiveWork> {
+    match work {
+        InteractiveWork::Inspect { id, symbol, phase } => {
+            run_inspect_phase(analyzer, id, &symbol, phase, events).await;
+            phase
+                .next()
+                .map(|phase| InteractiveWork::Inspect { id, symbol, phase })
+        }
+        InteractiveWork::Calls { id, target, phase } => {
+            run_calls_phase(analyzer, id, &target, phase, events).await;
+            match phase {
+                CallsPhase::Callers => Some(InteractiveWork::Calls {
+                    id,
+                    target,
+                    phase: CallsPhase::Callees,
+                }),
+                CallsPhase::Callees => None,
+            }
+        }
+    }
+}
+
+async fn run_inspect_phase(
     analyzer: &mut RustAnalyzer,
     id: u64,
-    symbol: Symbol,
+    symbol: &Symbol,
+    phase: InspectPhase,
     events: &mpsc::Sender<AnalyzerEvent>,
 ) {
-    match analyzer.source_preview_for_symbol(&symbol) {
-        Ok(value) => send(events, AnalyzerEvent::Source { id, value }).await,
-        Err(error) => failed(events, id, "source", error).await,
+    let error = match phase {
+        InspectPhase::Source => match analyzer.source_preview_for_symbol(symbol) {
+            Ok(value) => return send(events, AnalyzerEvent::Source { id, value }).await,
+            Err(error) => error,
+        },
+        InspectPhase::Definition => match analyzer.definition(symbol).await {
+            Ok(value) => return send(events, AnalyzerEvent::Definition { id, value }).await,
+            Err(error) => error,
+        },
+        InspectPhase::Hover => match analyzer.hover(symbol).await {
+            Ok(value) => return send(events, AnalyzerEvent::Hover { id, value }).await,
+            Err(error) => error,
+        },
+        InspectPhase::References => match analyzer.references(symbol).await {
+            Ok(values) => {
+                return send(
+                    events,
+                    AnalyzerEvent::References {
+                        id,
+                        count: values.len(),
+                    },
+                )
+                .await
+            }
+            Err(error) => error,
+        },
+        InspectPhase::Callers => match analyzer.calls(symbol, 1, true).await {
+            Ok(value) => {
+                return send(
+                    events,
+                    AnalyzerEvent::InspectorCallers {
+                        id,
+                        count: value.nodes.len(),
+                    },
+                )
+                .await
+            }
+            Err(error) => error,
+        },
+        InspectPhase::Callees => match analyzer.calls(symbol, 1, false).await {
+            Ok(value) => {
+                return send(
+                    events,
+                    AnalyzerEvent::InspectorCallees {
+                        id,
+                        count: value.nodes.len(),
+                    },
+                )
+                .await
+            }
+            Err(error) => error,
+        },
+        InspectPhase::Diagnostics => match analyzer.diagnostics_for_file(&symbol.file).await {
+            Ok(values) => return send(events, AnalyzerEvent::Diagnostics { id, values }).await,
+            Err(error) => error,
+        },
+    };
+    failed(events, id, inspect_section(phase), error).await;
+}
+
+fn inspect_section(phase: InspectPhase) -> &'static str {
+    match phase {
+        InspectPhase::Source => "source",
+        InspectPhase::Definition => "definition",
+        InspectPhase::Hover => "hover",
+        InspectPhase::References => "references",
+        InspectPhase::Callers | InspectPhase::Callees => "calls",
+        InspectPhase::Diagnostics => "diagnostics",
     }
-    match analyzer.definition(&symbol).await {
-        Ok(value) => send(events, AnalyzerEvent::Definition { id, value }).await,
-        Err(error) => failed(events, id, "definition", error).await,
-    }
-    match analyzer.hover(&symbol).await {
-        Ok(value) => send(events, AnalyzerEvent::Hover { id, value }).await,
-        Err(error) => failed(events, id, "hover", error).await,
-    }
-    match analyzer.references(&symbol).await {
-        Ok(references) => {
+}
+
+async fn run_calls_phase(
+    analyzer: &RustAnalyzer,
+    id: u64,
+    target: &CallTarget,
+    phase: CallsPhase,
+    events: &mpsc::Sender<AnalyzerEvent>,
+) {
+    let incoming = phase == CallsPhase::Callers;
+    let result = if incoming {
+        analyzer.callers_for_target(target).await
+    } else {
+        analyzer.callees_for_target(target).await
+    };
+    match result {
+        Ok(result) if incoming => send(events, AnalyzerEvent::CallersLoaded { id, result }).await,
+        Ok(result) => send(events, AnalyzerEvent::CalleesLoaded { id, result }).await,
+        Err(error) => {
             send(
                 events,
-                AnalyzerEvent::References {
+                AnalyzerEvent::CallsFailed {
                     id,
-                    count: references.len(),
+                    incoming,
+                    message: format!("{error:#}"),
                 },
             )
-            .await;
+            .await
         }
-        Err(error) => failed(events, id, "references", error).await,
-    }
-    let callers = analyzer.calls(&symbol, 1, true).await;
-    let callees = analyzer.calls(&symbol, 1, false).await;
-    match (callers, callees) {
-        (Ok(callers), Ok(callees)) => {
-            send(
-                events,
-                AnalyzerEvent::Calls {
-                    id,
-                    callers: callers.nodes.len(),
-                    callees: callees.nodes.len(),
-                },
-            )
-            .await;
-        }
-        (Err(error), _) | (_, Err(error)) => failed(events, id, "calls", error).await,
-    }
-    match analyzer.diagnostics_for_file(&symbol.file).await {
-        Ok(values) => send(events, AnalyzerEvent::Diagnostics { id, values }).await,
-        Err(error) => failed(events, id, "diagnostics", error).await,
     }
 }
 
@@ -181,4 +375,91 @@ async fn failed(
         },
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Position, Range};
+
+    fn symbol(name: &str) -> Symbol {
+        Symbol {
+            id: name.into(),
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 0,
+                },
+            },
+            selection_range: Range {
+                start: Position {
+                    line: 0,
+                    character: 3,
+                },
+                end: Position {
+                    line: 0,
+                    character: 4,
+                },
+            },
+            container: None,
+        }
+    }
+
+    #[test]
+    fn scheduler_coalesces_work_and_prioritizes_shutdown() {
+        let mut scheduler = Scheduler::default();
+        scheduler.push(AnalyzerCommand::Inspect {
+            id: 1,
+            symbol: symbol("A"),
+        });
+        scheduler.push(AnalyzerCommand::Inspect {
+            id: 2,
+            symbol: symbol("B"),
+        });
+        scheduler.push(AnalyzerCommand::Inspect {
+            id: 3,
+            symbol: symbol("C"),
+        });
+        assert!(matches!(
+            scheduler.work,
+            Some(InteractiveWork::Inspect { id: 3, .. })
+        ));
+        scheduler.push(AnalyzerCommand::LoadCalls {
+            id: 4,
+            target: CallTarget::from_symbol(&symbol("D")),
+        });
+        scheduler.push(AnalyzerCommand::LoadCalls {
+            id: 5,
+            target: CallTarget::from_symbol(&symbol("E")),
+        });
+        assert!(matches!(
+            scheduler.work,
+            Some(InteractiveWork::Calls { id: 5, .. })
+        ));
+        scheduler.push(AnalyzerCommand::Shutdown);
+        assert!(scheduler.shutdown);
+        assert!(scheduler.work.is_none());
+    }
+
+    #[test]
+    fn search_is_queued_independently_between_phases() {
+        let mut scheduler = Scheduler::default();
+        scheduler.push(AnalyzerCommand::Inspect {
+            id: 1,
+            symbol: symbol("A"),
+        });
+        scheduler.push(AnalyzerCommand::Search {
+            id: 2,
+            query: "B".into(),
+        });
+        assert_eq!(scheduler.search.as_ref().unwrap().0, 2);
+        assert!(scheduler.work.is_some());
+    }
 }
