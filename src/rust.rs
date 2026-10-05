@@ -1,7 +1,7 @@
 use crate::lsp::{path_uri, uri_path, LspClient};
 use crate::model::{
     stable_symbol_id, CallNode, CallTree, Diagnostic, Explanation, Location, Position, Range,
-    Severity, Symbol,
+    Severity, Symbol, SymbolSearchResult,
 };
 use crate::project::Project;
 use anyhow::{Context, Result};
@@ -19,6 +19,14 @@ use std::time::Duration;
 
 const CALL_NODE_BUDGET: usize = 100;
 const CALL_CHILD_LIMIT: usize = 20;
+const SYMBOL_SEARCH_LIMIT: usize = 50;
+const AMBIGUITY_LIMIT: usize = 20;
+
+#[derive(Clone, Copy)]
+enum LookupPurpose {
+    List,
+    Resolve,
+}
 
 #[derive(Debug)]
 pub enum ResolveError {
@@ -28,6 +36,7 @@ pub enum ResolveError {
     Ambiguous {
         query: String,
         candidates: Vec<Symbol>,
+        truncated: bool,
     },
 }
 
@@ -35,7 +44,11 @@ impl std::fmt::Display for ResolveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound { query } => write!(formatter, "symbol not found: {query}"),
-            Self::Ambiguous { query, candidates } => {
+            Self::Ambiguous {
+                query,
+                candidates,
+                truncated,
+            } => {
                 writeln!(formatter, "Multiple symbols matched \"{query}\":\n")?;
                 for symbol in candidates {
                     writeln!(
@@ -45,6 +58,9 @@ impl std::fmt::Display for ResolveError {
                         symbol.file.display(),
                         symbol.selection_range.start.line + 1
                     )?;
+                }
+                if *truncated {
+                    writeln!(formatter, "  … more candidates omitted")?;
                 }
                 write!(formatter, "\nUse a more specific symbol name.")
             }
@@ -75,12 +91,15 @@ struct NormalizedCall {
 impl RustAnalyzer {
     pub async fn start(project: Project, binary: &Path) -> Result<Self> {
         let client = LspClient::start(binary, &project.workspace_root).await?;
-        client.wait_ready(Duration::from_secs(30)).await?;
         Ok(Self {
             project,
             client,
             opened: HashSet::new(),
         })
+    }
+
+    pub async fn wait_ready(&self) -> Result<()> {
+        self.client.wait_ready(Duration::from_secs(30)).await
     }
 
     async fn open(&mut self, file: &Path) -> Result<bool> {
@@ -96,80 +115,127 @@ impl RustAnalyzer {
         Ok(false)
     }
 
-    pub async fn symbols(&mut self, query: &str) -> Result<Vec<Symbol>> {
+    pub async fn symbols(&mut self, query: &str) -> Result<SymbolSearchResult> {
+        let mut symbols = self.workspace_symbols(query).await?;
+        debug_assert!(enrichment_files(&symbols, query, LookupPurpose::List).is_empty());
+        let needle = query.to_lowercase();
+        symbols.retain(|symbol| symbol.name.to_lowercase().contains(&needle));
+        sort_and_dedup_symbols(&mut symbols, query);
+        let truncated = symbols.len() > SYMBOL_SEARCH_LIMIT;
+        symbols.truncate(SYMBOL_SEARCH_LIMIT);
+        Ok(SymbolSearchResult {
+            items: symbols,
+            truncated,
+        })
+    }
+
+    async fn workspace_symbols(&self, query: &str) -> Result<Vec<Symbol>> {
         #[allow(deprecated)]
-        let values: Vec<SymbolInformation> = self
+        let mut values: Vec<SymbolInformation> = self
             .client
-            .request(
+            .request::<_, Option<Vec<SymbolInformation>>>(
                 "workspace/symbol",
-                json!({"query": query.rsplit("::").next().unwrap_or(query)}),
+                json!({"query": query}),
             )
-            .await?;
-        let mut symbols: Vec<_> = values
+            .await?
+            .unwrap_or_default();
+        for delay in [50, 100, 150, 200, 250, 300, 350, 400] {
+            if !values.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            values = self
+                .client
+                .request::<_, Option<Vec<SymbolInformation>>>(
+                    "workspace/symbol",
+                    json!({"query": query}),
+                )
+                .await?
+                .unwrap_or_default();
+        }
+        Ok(values
             .into_iter()
             .filter_map(|value| self.normalize_symbol(value).ok())
-            .collect();
-        symbols.extend(self.all_document_symbols().await?);
-        let needle = query.to_lowercase();
-        symbols.retain(|symbol| {
-            symbol
-                .name
-                .to_lowercase()
-                .contains(needle.rsplit("::").next().unwrap_or(&needle))
-                && qualification_matches(symbol, query)
-        });
-        symbols.sort_by(|a, b| {
-            symbol_score(b, query)
-                .cmp(&symbol_score(a, query))
-                .then(range_size(b.range).cmp(&range_size(a.range)))
-                .then(a.id.cmp(&b.id))
-        });
-        symbols.dedup_by(|a, b| {
-            a.file == b.file
-                && a.selection_range.start == b.selection_range.start
-                && a.name == b.name
-        });
-        Ok(symbols)
+            .collect())
     }
 
     pub async fn find_symbol(&mut self, query: &str) -> Result<Symbol> {
-        let symbols = self.symbols(query).await?;
         let leaf = query.rsplit("::").next().unwrap_or(query);
-        let exact: Vec<_> = symbols
+        let lightweight = self.workspace_symbols(leaf).await?;
+        let files = enrichment_files(&lightweight, leaf, LookupPurpose::Resolve);
+        let mut candidates: Vec<_> = lightweight
             .iter()
             .filter(|symbol| symbol.name == leaf || symbol.name == query)
+            .filter(|symbol| !query.contains("::") || qualification_matches(symbol, query))
             .cloned()
             .collect();
-        let candidates = if exact.is_empty() { symbols } else { exact };
-        match candidates.len() {
-            0 => Err(ResolveError::NotFound {
-                query: query.to_owned(),
+        let mut candidates_are_enriched = false;
+
+        if query.contains("::") {
+            let mut enriched = self.document_symbols_for_files(&files).await?;
+            enriched.retain(|symbol| symbol.name == leaf && qualification_matches(symbol, query));
+            if !enriched.is_empty() {
+                candidates = enriched;
+                candidates_are_enriched = true;
             }
-            .into()),
-            1 => Ok(candidates.into_iter().next().unwrap()),
-            _ => Err(ResolveError::Ambiguous {
-                query: query.to_owned(),
-                candidates,
+        } else if candidates.is_empty() && !files.is_empty() {
+            let mut enriched = self.document_symbols_for_files(&files).await?;
+            enriched.retain(|symbol| symbol.name == leaf);
+            if !enriched.is_empty() {
+                candidates = enriched;
+                candidates_are_enriched = true;
             }
-            .into()),
         }
+        sort_and_dedup_symbols(&mut candidates, query);
+
+        if candidates.is_empty() {
+            let mut fallback = self.all_document_symbols().await?;
+            fallback.retain(|symbol| {
+                symbol.name == leaf
+                    && (!query.contains("::") || qualification_matches(symbol, query))
+            });
+            return select_symbol(fallback, query);
+        }
+
+        if candidates.len() == 1 {
+            let candidate = candidates.pop().unwrap();
+            if candidates_are_enriched {
+                return Ok(candidate);
+            }
+            let enriched = self
+                .document_symbols_for_files(std::slice::from_ref(&candidate.file))
+                .await?;
+            return Ok(enriched
+                .into_iter()
+                .find(|symbol| {
+                    symbol.name == candidate.name
+                        && symbol.selection_range.start == candidate.selection_range.start
+                })
+                .unwrap_or(candidate));
+        }
+        select_symbol(candidates, query)
     }
 
     pub async fn all_document_symbols(&mut self) -> Result<Vec<Symbol>> {
         let files = self.project.rust_files.clone();
+        self.document_symbols_for_files(&files).await
+    }
+
+    async fn document_symbols_for_files(&self, files: &[PathBuf]) -> Result<Vec<Symbol>> {
         let mut result = Vec::new();
         for file in files {
+            let absolute = self.absolute(file);
             let response: Option<DocumentSymbolResponse> = self
                 .client
                 .request(
                     "textDocument/documentSymbol",
-                    json!({"textDocument": {"uri": path_uri(&file, false)?}}),
+                    json!({"textDocument": {"uri": path_uri(&absolute, false)?}}),
                 )
                 .await?;
             match response {
                 Some(DocumentSymbolResponse::Nested(symbols)) => {
                     for symbol in symbols {
-                        self.flatten_document_symbol(&file, symbol, None, &mut result);
+                        self.flatten_document_symbol(&absolute, symbol, None, &mut result);
                     }
                 }
                 #[allow(deprecated)]
@@ -343,6 +409,7 @@ impl RustAnalyzer {
     }
 
     pub async fn diagnostics(&mut self) -> Result<Vec<Diagnostic>> {
+        self.wait_ready().await?;
         let generation = self.client.diagnostic_generation();
         let mut expected = HashSet::new();
         let mut opened = false;
@@ -356,10 +423,34 @@ impl RustAnalyzer {
             generation.saturating_sub(1)
         };
         self.client
-            .wait_for_diagnostics(&expected, after, Duration::from_secs(30))
+            .wait_for_diagnostics(&expected, after, Duration::from_secs(30), true)
             .await?;
+        self.collect_diagnostics(&expected)
+    }
+
+    async fn diagnostics_for_file(&mut self, file: &Path) -> Result<Vec<Diagnostic>> {
+        let absolute = self.absolute(file);
+        let uri = path_uri(&absolute, false)?;
+        let generation = self.client.diagnostic_generation();
+        let opened = self.open(&absolute).await?;
+        let expected = HashSet::from([uri]);
+        let after = if opened {
+            generation
+        } else {
+            generation.saturating_sub(1)
+        };
+        self.client
+            .wait_for_diagnostics(&expected, after, Duration::from_secs(15), false)
+            .await?;
+        self.collect_diagnostics(&expected)
+    }
+
+    fn collect_diagnostics(&self, expected: &HashSet<String>) -> Result<Vec<Diagnostic>> {
         let mut diagnostics = Vec::new();
         for (uri, diagnostic) in self.client.diagnostics() {
+            if !expected.contains(&uri) {
+                continue;
+            }
             let severity = match diagnostic.severity {
                 Some(lsp_types::DiagnosticSeverity::ERROR) => Severity::Error,
                 Some(lsp_types::DiagnosticSeverity::WARNING) => Severity::Warning,
@@ -390,7 +481,7 @@ impl RustAnalyzer {
         let callers = self.calls(&symbol, 1, true).await?;
         let callees = self.calls(&symbol, 1, false).await?;
         let diagnostics = self
-            .diagnostics()
+            .diagnostics_for_file(&symbol.file)
             .await?
             .into_iter()
             .filter(|diagnostic| {
@@ -440,6 +531,10 @@ impl RustAnalyzer {
     ) {
         let name = value.name;
         let container = parent.clone();
+        let path = match &parent {
+            Some(parent) => format!("{parent}::{name}"),
+            None => name.clone(),
+        };
         let relative = self.relative(file.to_path_buf());
         let mut symbol = Symbol {
             id: String::new(),
@@ -453,7 +548,7 @@ impl RustAnalyzer {
         symbol.id = stable_symbol_id(&self.project.workspace_root, &symbol);
         output.push(symbol);
         for child in value.children.unwrap_or_default() {
-            self.flatten_document_symbol(file, child, Some(name.clone()), output);
+            self.flatten_document_symbol(file, child, Some(path.clone()), output);
         }
     }
 
@@ -488,6 +583,27 @@ impl RustAnalyzer {
     }
 }
 
+fn select_symbol(mut candidates: Vec<Symbol>, query: &str) -> Result<Symbol> {
+    sort_and_dedup_symbols(&mut candidates, query);
+    match candidates.len() {
+        0 => Err(ResolveError::NotFound {
+            query: query.to_owned(),
+        }
+        .into()),
+        1 => Ok(candidates.pop().expect("one candidate")),
+        _ => {
+            let truncated = candidates.len() > AMBIGUITY_LIMIT;
+            candidates.truncate(AMBIGUITY_LIMIT);
+            Err(ResolveError::Ambiguous {
+                query: query.to_owned(),
+                candidates,
+                truncated,
+            }
+            .into())
+        }
+    }
+}
+
 fn qualification_matches(symbol: &Symbol, query: &str) -> bool {
     let Some((qualifier, _)) = query.rsplit_once("::") else {
         return true;
@@ -499,12 +615,43 @@ fn qualification_matches(symbol: &Symbol, query: &str) -> bool {
 }
 
 fn normalized_container(container: &str) -> &str {
-    let container = container
-        .trim()
-        .strip_prefix("impl ")
-        .unwrap_or(container.trim());
-    let container = container.rsplit(" for ").next().unwrap_or(container);
-    container.split(['<', ' ']).next().unwrap_or(container)
+    normalize_impl_target(container).unwrap_or(container.trim())
+}
+
+fn normalize_impl_target(container: &str) -> Option<&str> {
+    let mut value = container.trim();
+    if !value.starts_with("impl") {
+        return None;
+    }
+    value = &value[4..];
+    value = value.trim_start();
+    if value.starts_with('<') {
+        let mut depth = 0_u32;
+        let mut end = None;
+        for (index, character) in value.char_indices() {
+            match character {
+                '<' => depth += 1,
+                '>' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(index + character.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        value = value.get(end?..)?.trim_start();
+    }
+    if let Some((_, target)) = value.rsplit_once(" for ") {
+        value = target.trim();
+    }
+    let end = value
+        .char_indices()
+        .find_map(|(index, character)| matches!(character, '<' | ' ' | '{').then_some(index))
+        .unwrap_or(value.len());
+    let base = value[..end].trim();
+    base.rsplit("::").next().filter(|name| !name.is_empty())
 }
 
 fn qualified_name(symbol: &Symbol) -> String {
@@ -526,6 +673,35 @@ fn range_size(range: Range) -> (u32, u32) {
         range.end.line.saturating_sub(range.start.line),
         range.end.character.saturating_sub(range.start.character),
     )
+}
+
+fn sort_and_dedup_symbols(symbols: &mut Vec<Symbol>, query: &str) {
+    symbols.sort_by(|a, b| {
+        symbol_score(b, query)
+            .cmp(&symbol_score(a, query))
+            .then(range_size(b.range).cmp(&range_size(a.range)))
+            .then(a.id.cmp(&b.id))
+    });
+    symbols.dedup_by(|a, b| {
+        a.file == b.file && a.selection_range.start == b.selection_range.start && a.name == b.name
+    });
+}
+
+fn enrichment_files(symbols: &[Symbol], leaf: &str, purpose: LookupPurpose) -> Vec<PathBuf> {
+    if matches!(purpose, LookupPurpose::List) {
+        return Vec::new();
+    }
+    let mut files: Vec<_> = symbols
+        .iter()
+        .filter(|symbol| symbol.name == leaf)
+        .map(|symbol| symbol.file.clone())
+        .collect();
+    if files.is_empty() {
+        files.extend(symbols.iter().map(|symbol| symbol.file.clone()));
+    }
+    files.sort();
+    files.dedup();
+    files
 }
 
 fn call_item_key(item: &CallHierarchyItem) -> String {
@@ -673,5 +849,63 @@ mod tests {
         };
         assert!(qualification_matches(&symbol, "MyEngine::run"));
         assert!(!qualification_matches(&symbol, "Engine::run"));
+    }
+
+    #[test]
+    fn normalizes_generic_impl_targets() {
+        for input in [
+            "impl Engine",
+            "impl Engine<T>",
+            "impl<T> Engine<T>",
+            "impl<T, U> Engine<T, U>",
+            "impl Trait for Engine",
+            "impl<T> Trait<T> for Engine<T>",
+            "impl<'a, T> Engine<'a, T>",
+        ] {
+            assert_eq!(normalize_impl_target(input), Some("Engine"), "{input}");
+        }
+    }
+
+    #[test]
+    fn lookup_strategy_never_scans_workspace_for_symbol_lists() {
+        let mut symbols = Vec::new();
+        for index in 0..300 {
+            symbols.push(Symbol {
+                id: index.to_string(),
+                name: if index == 173 {
+                    "UniqueName".into()
+                } else {
+                    format!("Other{index}")
+                },
+                kind: "function".into(),
+                file: format!("src/file_{index}.rs").into(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 0,
+                    },
+                },
+                selection_range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 13,
+                    },
+                },
+                container: None,
+            });
+        }
+        assert!(enrichment_files(&symbols, "UniqueName", LookupPurpose::List).is_empty());
+        assert_eq!(
+            enrichment_files(&symbols, "UniqueName", LookupPurpose::Resolve),
+            vec![PathBuf::from("src/file_173.rs")]
+        );
     }
 }

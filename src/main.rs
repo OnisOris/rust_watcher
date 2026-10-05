@@ -8,6 +8,7 @@ mod rust;
 use anyhow::{bail, Result};
 use clap::Parser;
 use cli::{Cli, Command};
+use lsp::AnalyzerNotFound;
 use model::{ProjectSummary, Severity};
 use project::Project;
 use rust::RustAnalyzer;
@@ -24,11 +25,7 @@ async fn main() {
             output::json_error(&error);
         } else {
             eprintln!("error: {error:#}");
-            if error.chain().any(|cause| {
-                cause
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-            }) {
+            if error.downcast_ref::<AnalyzerNotFound>().is_some() {
                 eprintln!("\nInstall rust-analyzer with:\n    rustup component add rust-analyzer");
             }
         }
@@ -50,6 +47,7 @@ async fn execute(cli: &Cli) -> Result<()> {
 async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
     match &cli.command {
         None => {
+            analyzer.wait_ready().await?;
             let symbols = analyzer.all_document_symbols().await?;
             let diagnostics = analyzer.diagnostics().await?;
             let entrypoints: Vec<_> = analyzer
@@ -244,7 +242,7 @@ async fn doctor(path: &Path, json: bool) -> Result<()> {
         if !json {
             eprintln!("\nerror: rust-analyzer not found\n\nInstall:\n    rustup component add rust-analyzer");
         }
-        bail!("rust-analyzer not found");
+        return Err(AnalyzerNotFound(Path::new("rust-analyzer").to_path_buf()).into());
     }
     if failed {
         bail!("one or more doctor checks failed");

@@ -3,6 +3,21 @@ use cargo_metadata::{Metadata, MetadataCommand};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
+pub struct ProjectNotFound(pub PathBuf);
+
+impl std::fmt::Display for ProjectNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "project path does not exist: {}",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for ProjectNotFound {}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Project {
     pub workspace_root: PathBuf,
@@ -106,9 +121,16 @@ impl Project {
 }
 
 pub fn find_manifest(path: &Path) -> Result<PathBuf> {
-    let start = path
-        .canonicalize()
-        .with_context(|| format!("project path does not exist: {}", path.display()))?;
+    let start = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProjectNotFound(path.to_path_buf()).into())
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to access project path: {}", path.display()))
+        }
+    };
     let mut directory = if start.is_file() {
         start.parent().unwrap_or(&start).to_path_buf()
     } else {
@@ -168,5 +190,12 @@ mod tests {
             find_manifest(&source).unwrap(),
             temp.path().join("Cargo.toml")
         );
+    }
+
+    #[test]
+    fn classifies_missing_project_path() {
+        let error =
+            find_manifest(Path::new("/definitely/missing/rust-watcher-project")).unwrap_err();
+        assert!(error.downcast_ref::<ProjectNotFound>().is_some());
     }
 }

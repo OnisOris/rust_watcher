@@ -15,6 +15,21 @@ use url::Url;
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
+#[derive(Debug)]
+pub struct AnalyzerNotFound(pub PathBuf);
+
+impl std::fmt::Display for AnalyzerNotFound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "rust-analyzer executable not found: {}",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for AnalyzerNotFound {}
+
 #[derive(Default)]
 struct NotificationState {
     diagnostics: HashMap<String, Vec<lsp_types::Diagnostic>>,
@@ -40,13 +55,23 @@ pub struct LspClient {
 
 impl LspClient {
     pub async fn start(binary: &Path, root: &Path) -> Result<Self> {
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("failed to start rust-analyzer at {}", binary.display()))?;
+            .kill_on_drop(true);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AnalyzerNotFound(binary.to_path_buf()).into())
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to start rust-analyzer at {}", binary.display())
+                })
+            }
+        };
         let input = Arc::new(tokio::sync::Mutex::new(
             child
                 .stdin
@@ -152,7 +177,9 @@ impl LspClient {
                     return serde_json::from_value(value)
                         .with_context(|| format!("invalid rust-analyzer response to {method}"))
                 }
-                Err(error) if error.contains("-32801") && attempt < 2 => {
+                Err(error)
+                    if (error.contains("-32801") || error.contains("-32802")) && attempt < 2 =>
+                {
                     tokio::time::sleep(Duration::from_millis(150)).await
                 }
                 Err(error) => {
@@ -242,6 +269,7 @@ impl LspClient {
         expected_uris: &HashSet<String>,
         after: u64,
         maximum: Duration,
+        require_analysis_ready: bool,
     ) -> Result<()> {
         let started = Instant::now();
         loop {
@@ -255,7 +283,7 @@ impl LspClient {
                     && expected_uris
                         .iter()
                         .all(|uri| state.diagnostics.contains_key(uri))
-                    && analysis_ready
+                    && (!require_analysis_ready || analysis_ready)
                     && state
                         .last_diagnostic_at
                         .is_some_and(|time| time.elapsed() >= Duration::from_millis(500))
@@ -579,5 +607,19 @@ mod tests {
         drop(writer);
         let error = read_message(&mut BufReader::new(reader)).await.unwrap_err();
         assert!(error.to_string().contains("invalid digit"));
+    }
+
+    #[tokio::test]
+    async fn classifies_missing_analyzer_executable() {
+        let error = match LspClient::start(
+            Path::new("/definitely/missing/rust-analyzer"),
+            Path::new("."),
+        )
+        .await
+        {
+            Ok(_) => panic!("missing analyzer unexpectedly started"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<AnalyzerNotFound>().is_some());
     }
 }

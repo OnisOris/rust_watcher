@@ -67,7 +67,7 @@ fn semantic_navigation_and_unicode_work() {
         return;
     }
     let symbols = json_success("simple_project", &["symbol", "add", "--json"]);
-    assert!(symbols
+    assert!(symbols["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -119,9 +119,34 @@ fn ambiguity_is_a_structured_error() {
     }
     let error = json_error("ambiguity_project", &["calls", "run", "--json"]);
     assert_eq!(error["code"], "symbol_ambiguous");
-    assert!(error["candidates"].as_array().unwrap().len() >= 3);
+    assert_eq!(error["candidates"].as_array().unwrap().len(), 20);
+    assert_eq!(error["truncated"], true);
     let calls = json_success("ambiguity_project", &["calls", "Engine::run", "--json"]);
     assert!(calls["nodes"].is_array());
+    assert_eq!(
+        json_success(
+            "ambiguity_project",
+            &["definition", "Engine::run", "--json"]
+        )["file"],
+        "src/main.rs"
+    );
+    assert_eq!(
+        json_success(
+            "ambiguity_project",
+            &["definition", "Engine::execute", "--json"]
+        )["file"],
+        "src/main.rs"
+    );
+    for command in ["definition", "refs", "calls"] {
+        assert!(!json_success(
+            "ambiguity_project",
+            &[command, "api::users::load", "--json"]
+        )
+        .is_null());
+    }
+    let search = json_success("ambiguity_project", &["symbol", "item_", "--json"]);
+    assert_eq!(search["items"].as_array().unwrap().len(), 50);
+    assert_eq!(search["truncated"], true);
     let missing = json_error("ambiguity_project", &["refs", "DOES_NOT_EXIST", "--json"]);
     assert_eq!(missing["code"], "symbol_not_found");
 }
@@ -189,10 +214,11 @@ fn cargo_workspace_supports_cross_crate_navigation() {
         return;
     }
     let summary = json_success("workspace_project", &["--json"]);
+    assert_eq!(summary["workspaceRoot"], ".");
     assert_eq!(summary["crates"], 2);
     assert_eq!(summary["entrypoints"].as_array().unwrap().len(), 1);
     assert!(
-        json_success("workspace_project", &["symbol", "shared", "--json"])
+        json_success("workspace_project", &["symbol", "shared", "--json"])["items"]
             .as_array()
             .unwrap()
             .iter()
@@ -217,6 +243,20 @@ fn cargo_workspace_supports_cross_crate_navigation() {
         .unwrap()
         .iter()
         .any(|call| call["name"] == "shared"));
+}
+
+#[test]
+fn missing_project_has_a_typed_json_error() {
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/does-not-exist");
+    let output = Command::new(env!("CARGO_BIN_EXE_watcher"))
+        .arg(missing)
+        .arg("--json")
+        .output()
+        .expect("watcher should start");
+    assert!(!output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "project_not_found");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("rustup component add"));
 }
 
 fn count_nodes(nodes: &Value) -> usize {

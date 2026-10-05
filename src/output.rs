@@ -1,6 +1,9 @@
+use crate::lsp::AnalyzerNotFound;
 use crate::model::{
     CallNode, CallTree, Diagnostic, Explanation, Location, ProjectSummary, Severity, Symbol,
+    SymbolSearchResult,
 };
+use crate::project::ProjectNotFound;
 use crate::rust::ResolveError;
 use anyhow::Result;
 use serde::Serialize;
@@ -39,46 +42,56 @@ struct ErrorBody {
     message: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     candidates: Vec<Symbol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
 }
 
 pub fn json_error(error: &anyhow::Error) {
-    let (code, candidates) = if let Some(error) = error.downcast_ref::<ResolveError>() {
-        match error {
-            ResolveError::NotFound { .. } => ("symbol_not_found", Vec::new()),
-            ResolveError::Ambiguous { candidates, .. } => ("symbol_ambiguous", candidates.clone()),
-        }
-    } else if error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    }) {
-        ("tool_not_found", Vec::new())
-    } else if error
-        .to_string()
-        .contains("timed out waiting for rust-analyzer diagnostics")
-    {
-        ("diagnostics_timeout", Vec::new())
-    } else if error
-        .to_string()
-        .contains("timed out waiting for rust-analyzer readiness")
-    {
-        ("analyzer_timeout", Vec::new())
-    } else {
-        ("operation_failed", Vec::new())
-    };
+    let body = error_body(error);
     let envelope = ErrorEnvelope {
         schema_version: 1,
         ok: false,
-        error: ErrorBody {
-            code,
-            message: format!("{error:#}"),
-            candidates,
-        },
+        error: body,
     };
     println!(
         "{}",
         serde_json::to_string(&envelope).expect("error envelope should serialize")
     );
+}
+
+fn error_body(error: &anyhow::Error) -> ErrorBody {
+    let (code, candidates, truncated) = if let Some(error) = error.downcast_ref::<ResolveError>() {
+        match error {
+            ResolveError::NotFound { .. } => ("symbol_not_found", Vec::new(), None),
+            ResolveError::Ambiguous {
+                candidates,
+                truncated,
+                ..
+            } => ("symbol_ambiguous", candidates.clone(), Some(*truncated)),
+        }
+    } else if error.downcast_ref::<ProjectNotFound>().is_some() {
+        ("project_not_found", Vec::new(), None)
+    } else if error.downcast_ref::<AnalyzerNotFound>().is_some() {
+        ("analyzer_not_found", Vec::new(), None)
+    } else if error
+        .to_string()
+        .contains("timed out waiting for rust-analyzer diagnostics")
+    {
+        ("diagnostics_timeout", Vec::new(), None)
+    } else if error
+        .to_string()
+        .contains("timed out waiting for rust-analyzer readiness")
+    {
+        ("analyzer_timeout", Vec::new(), None)
+    } else {
+        ("operation_failed", Vec::new(), None)
+    };
+    ErrorBody {
+        code,
+        message: format!("{error:#}"),
+        candidates,
+        truncated,
+    }
 }
 
 pub fn summary(value: &ProjectSummary) {
@@ -95,12 +108,12 @@ pub fn summary(value: &ProjectSummary) {
     }
 }
 
-pub fn symbols(values: &[Symbol]) {
-    if values.is_empty() {
+pub fn symbols(result: &SymbolSearchResult) {
+    if result.items.is_empty() {
         println!("No symbols found.");
         return;
     }
-    for (index, symbol) in values.iter().enumerate() {
+    for (index, symbol) in result.items.iter().enumerate() {
         if index > 0 {
             println!();
         }
@@ -114,6 +127,12 @@ pub fn symbols(values: &[Symbol]) {
         if let Some(container) = &symbol.container {
             println!("  container: {container}");
         }
+    }
+    if result.truncated {
+        println!(
+            "\nShowing first {} matching symbols; more were omitted.",
+            result.items.len()
+        );
     }
 }
 
@@ -237,6 +256,7 @@ fn severity(value: Severity) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn serialized_locations_are_compact_and_stable() {
         let value = Location {
@@ -256,5 +276,13 @@ mod tests {
             serde_json::to_string(&value).unwrap(),
             r#"{"file":"src/main.rs","range":{"start":{"line":1,"character":2},"end":{"line":1,"character":5}}}"#
         );
+    }
+
+    #[test]
+    fn classifies_missing_analyzer_separately_from_missing_projects() {
+        let analyzer = anyhow::Error::new(AnalyzerNotFound("missing-ra".into()));
+        let project = anyhow::Error::new(ProjectNotFound("missing-project".into()));
+        assert_eq!(error_body(&analyzer).code, "analyzer_not_found");
+        assert_eq!(error_body(&project).code, "project_not_found");
     }
 }

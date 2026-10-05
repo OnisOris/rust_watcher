@@ -34,6 +34,12 @@ pub struct Symbol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolSearchResult {
+    pub items: Vec<Symbol>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub file: PathBuf,
     pub range: Range,
@@ -72,6 +78,7 @@ pub struct CallTree {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSummary {
+    #[serde(rename = "workspaceRoot", serialize_with = "serialize_workspace_root")]
     pub workspace_root: PathBuf,
     pub crates: usize,
     pub files: usize,
@@ -79,6 +86,13 @@ pub struct ProjectSummary {
     pub errors: usize,
     pub warnings: usize,
     pub entrypoints: Vec<Location>,
+}
+
+fn serialize_workspace_root<S>(_: &PathBuf, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(".")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,5 +160,19 @@ mod tests {
             symbol.id
         };
         assert_eq!(make("/tmp/a"), make("/opt/b"));
+    }
+
+    #[test]
+    fn summary_json_uses_a_checkout_independent_root() {
+        let summary = ProjectSummary {
+            workspace_root: "/tmp/arbitrary-checkout".into(),
+            crates: 1,
+            files: 2,
+            symbols: 3,
+            errors: 0,
+            warnings: 0,
+            entrypoints: Vec::new(),
+        };
+        assert_eq!(serde_json::to_value(summary).unwrap()["workspaceRoot"], ".");
     }
 }
