@@ -246,9 +246,6 @@ async fn doctor(path: &Path, json: bool) -> Result<()> {
         }
     }
     if !analyzer_ok {
-        if !json {
-            eprintln!("\nerror: rust-analyzer not found\n\nInstall:\n    rustup component add rust-analyzer");
-        }
         return Err(AnalyzerNotFound(Path::new("rust-analyzer").to_path_buf()).into());
     }
     if failed {

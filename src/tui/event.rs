@@ -26,13 +26,22 @@ pub(super) async fn run_loop(
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     let mut repository_open = true;
+    let mut analyzer_events_open = true;
     loop {
         tokio::select! {
-            event = events.recv() => {
-                if let Some(event) = event {
-                    app.apply_event(event);
-                    terminal.draw(app)?;
+            event = events.recv(), if analyzer_events_open => {
+                match event {
+                    Some(event) => app.apply_event(event),
+                    None => {
+                        analyzer_events_open = false;
+                        if !matches!(app.analyzer_state, super::app::AnalyzerState::Error(_)) {
+                            app.apply_event(AnalyzerEvent::Error(
+                                "rust-analyzer worker stopped unexpectedly".into(),
+                            ));
+                        }
+                    }
                 }
+                terminal.draw(app)?;
             }
             result = repository.recv(), if repository_open => {
                 repository_open = false;
@@ -67,7 +76,7 @@ pub(super) async fn run_loop(
                         app.symbols_truncated = false;
                         app.symbols_loading = false;
                     } else {
-                        commands.send(AnalyzerCommand::Search { id, query }).await?;
+                        send_command(app, commands, AnalyzerCommand::Search { id, query }).await;
                     }
                     terminal.draw(app)?;
                 }
@@ -86,9 +95,12 @@ pub(super) async fn handle_key(
     }
     if key.code == KeyCode::Esc {
         if let Some((id, target, scope)) = app.escape() {
-            commands
-                .send(AnalyzerCommand::LoadCalls { id, target, scope })
-                .await?;
+            send_command(
+                app,
+                commands,
+                AnalyzerCommand::LoadCalls { id, target, scope },
+            )
+            .await;
         }
         return Ok(false);
     }
@@ -186,36 +198,43 @@ pub(super) async fn handle_key(
 
 async fn begin_inspect(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
     if let Some((id, symbol)) = app.begin_selected_inspect() {
-        commands
-            .send(AnalyzerCommand::Inspect { id, symbol })
-            .await?;
+        send_command(app, commands, AnalyzerCommand::Inspect { id, symbol }).await;
     }
     Ok(())
 }
 
 async fn open_calls(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
     if let Some((id, target, scope)) = app.open_calls_for_inspector() {
-        commands
-            .send(AnalyzerCommand::LoadCalls { id, target, scope })
-            .await?;
+        send_command(
+            app,
+            commands,
+            AnalyzerCommand::LoadCalls { id, target, scope },
+        )
+        .await;
     }
     Ok(())
 }
 
 async fn follow_call(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
     if let Some((id, target, scope)) = app.follow_selected_call() {
-        commands
-            .send(AnalyzerCommand::LoadCalls { id, target, scope })
-            .await?;
+        send_command(
+            app,
+            commands,
+            AnalyzerCommand::LoadCalls { id, target, scope },
+        )
+        .await;
     }
     Ok(())
 }
 
 async fn reload_calls_scope(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
     if let Some((id, target, scope)) = app.toggle_call_scope() {
-        commands
-            .send(AnalyzerCommand::LoadCalls { id, target, scope })
-            .await?;
+        send_command(
+            app,
+            commands,
+            AnalyzerCommand::LoadCalls { id, target, scope },
+        )
+        .await;
     }
     Ok(())
 }
@@ -229,23 +248,61 @@ async fn activate_explorer(app: &mut App, commands: &mpsc::Sender<AnalyzerComman
                 .is_some_and(|entry| entry.kind != crate::repository::RepoEntryKind::Directory);
             if let Some((id, file)) = app.explorer.open_selected() {
                 app.pane = Pane::ExplorerFile;
-                commands
-                    .send(AnalyzerCommand::InspectFile { id, file })
-                    .await?;
+                send_command(app, commands, AnalyzerCommand::InspectFile { id, file }).await;
             } else if opens_file {
                 app.pane = Pane::ExplorerFile;
             }
         }
         Pane::ExplorerFile if app.explorer.right_mode == ExplorerRightMode::File => {
             if let Some((id, symbol)) = app.begin_explorer_symbol_inspect() {
-                commands
-                    .send(AnalyzerCommand::Inspect { id, symbol })
-                    .await?;
+                send_command(app, commands, AnalyzerCommand::Inspect { id, symbol }).await;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+async fn send_command(
+    app: &mut App,
+    commands: &mpsc::Sender<AnalyzerCommand>,
+    command: AnalyzerCommand,
+) {
+    let failed = command.clone();
+    if commands.send(command).await.is_ok() {
+        return;
+    }
+
+    let message = "rust-analyzer worker is unavailable".to_owned();
+    app.apply_event(AnalyzerEvent::Error(message.clone()));
+    match failed {
+        AnalyzerCommand::Search { id, .. } => {
+            app.apply_event(AnalyzerEvent::SearchFailed { id, message });
+        }
+        AnalyzerCommand::Inspect { id, .. } => {
+            app.apply_event(AnalyzerEvent::InspectFailed {
+                id,
+                section: "analyzer",
+                message,
+            });
+        }
+        AnalyzerCommand::InspectFile { id, file } => {
+            app.apply_event(AnalyzerEvent::FileSymbolsFailed { id, file, message });
+        }
+        AnalyzerCommand::LoadCalls { id, .. } => {
+            app.apply_event(AnalyzerEvent::CallsFailed {
+                id,
+                incoming: true,
+                message: message.clone(),
+            });
+            app.apply_event(AnalyzerEvent::CallsFailed {
+                id,
+                incoming: false,
+                message,
+            });
+        }
+        AnalyzerCommand::Shutdown => {}
+    }
 }
 
 pub(super) struct TerminalSession {
@@ -545,4 +602,31 @@ mod tests {
             }
         ));
     }
+    #[tokio::test]
+    async fn closed_analyzer_channel_degrades_without_returning_an_error() {
+        let mut app = app();
+        let (commands, receiver) = mpsc::channel(1);
+        drop(receiver);
+
+        send_command(
+            &mut app,
+            &commands,
+            AnalyzerCommand::Search {
+                id: 41,
+                query: "camera".into(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            app.analyzer_state,
+            super::super::app::AnalyzerState::Error(_)
+        ));
+        assert!(!app.symbols_loading);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|message| message.contains("unavailable")));
+    }
+
 }

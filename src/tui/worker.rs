@@ -201,9 +201,9 @@ pub(super) async fn analyzer_worker(
     let mut analyzer = match RustAnalyzer::start(project, Path::new("rust-analyzer")).await {
         Ok(analyzer) => analyzer,
         Err(error) => {
-            let _ = events
-                .send(AnalyzerEvent::Error(format!("{error:#}")))
-                .await;
+            let message = format!("{error:#}");
+            let _ = events.send(AnalyzerEvent::Error(message.clone())).await;
+            unavailable_worker(&mut commands, &events, &message).await;
             return;
         }
     };
@@ -255,6 +255,63 @@ pub(super) async fn analyzer_worker(
         }
     }
     analyzer.shutdown().await;
+}
+
+async fn unavailable_worker(
+    commands: &mut mpsc::Receiver<AnalyzerCommand>,
+    events: &mpsc::Sender<AnalyzerEvent>,
+    message: &str,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            AnalyzerCommand::Search { id, .. } => {
+                send(
+                    events,
+                    AnalyzerEvent::SearchFailed {
+                        id,
+                        message: message.to_owned(),
+                    },
+                )
+                .await;
+            }
+            AnalyzerCommand::Inspect { id, .. } => {
+                send(
+                    events,
+                    AnalyzerEvent::InspectFailed {
+                        id,
+                        section: "analyzer",
+                        message: message.to_owned(),
+                    },
+                )
+                .await;
+            }
+            AnalyzerCommand::InspectFile { id, file } => {
+                send(
+                    events,
+                    AnalyzerEvent::FileSymbolsFailed {
+                        id,
+                        file,
+                        message: message.to_owned(),
+                    },
+                )
+                .await;
+            }
+            AnalyzerCommand::LoadCalls { id, .. } => {
+                for incoming in [true, false] {
+                    send(
+                        events,
+                        AnalyzerEvent::CallsFailed {
+                            id,
+                            incoming,
+                            message: message.to_owned(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            AnalyzerCommand::Shutdown => break,
+        }
+    }
 }
 
 async fn run_phase(
@@ -535,4 +592,47 @@ mod tests {
         assert_eq!(scheduler.search.as_ref().unwrap().0, 2);
         assert!(scheduler.work.is_some());
     }
+    #[tokio::test]
+    async fn unavailable_worker_keeps_channel_alive_and_reports_failures() {
+        let (commands, mut receiver) = mpsc::channel(4);
+        let (events, mut event_receiver) = mpsc::channel(8);
+        let task = tokio::spawn(async move {
+            unavailable_worker(&mut receiver, &events, "rust-analyzer unavailable").await;
+        });
+
+        commands
+            .send(AnalyzerCommand::InspectFile {
+                id: 7,
+                file: "src/camera.rs".into(),
+            })
+            .await
+            .unwrap();
+        match event_receiver.recv().await.unwrap() {
+            AnalyzerEvent::FileSymbolsFailed { id, file, message } => {
+                assert_eq!(id, 7);
+                assert_eq!(file, PathBuf::from("src/camera.rs"));
+                assert_eq!(message, "rust-analyzer unavailable");
+            }
+            _ => panic!("expected file semantic failure"),
+        }
+
+        commands
+            .send(AnalyzerCommand::Search {
+                id: 8,
+                query: "camera".into(),
+            })
+            .await
+            .unwrap();
+        match event_receiver.recv().await.unwrap() {
+            AnalyzerEvent::SearchFailed { id, message } => {
+                assert_eq!(id, 8);
+                assert_eq!(message, "rust-analyzer unavailable");
+            }
+            _ => panic!("expected search failure"),
+        }
+
+        commands.send(AnalyzerCommand::Shutdown).await.unwrap();
+        task.await.unwrap();
+    }
+
 }
