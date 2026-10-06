@@ -211,7 +211,7 @@ fn render_explorer_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let rows: Vec<_> = app
         .explorer
         .visible_entries()
-        .into_iter()
+        .iter()
         .map(|entry| {
             let indent = "  ".repeat(entry.depth);
             let name = if entry.path.as_os_str().is_empty() {
@@ -226,7 +226,7 @@ fn render_explorer_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
             };
             let marker = match entry.kind {
                 RepoEntryKind::Directory if entry.path.as_os_str().is_empty() => "▼ ",
-                RepoEntryKind::Directory if app.explorer.expanded.contains(&entry.path) => "▼ ",
+                RepoEntryKind::Directory if app.explorer.is_expanded(&entry.path) => "▼ ",
                 RepoEntryKind::Directory => "▶ ",
                 RepoEntryKind::Symlink => "@ ",
                 RepoEntryKind::File => "  ",
@@ -267,23 +267,7 @@ fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App) {
             },
             |entry| {
                 if entry.kind == RepoEntryKind::Directory {
-                    let (directories, files) = app
-                        .explorer
-                        .tree
-                        .as_ref()
-                        .map(|tree| {
-                            tree.children(&entry.path).into_iter().fold(
-                                (0, 0),
-                                |(directories, files), child| {
-                                    if child.kind == RepoEntryKind::Directory {
-                                        (directories + 1, files)
-                                    } else {
-                                        (directories, files + 1)
-                                    }
-                                },
-                            )
-                        })
-                        .unwrap_or_default();
+                    let (directories, files) = app.explorer.direct_child_counts(&entry.path);
                     vec![
                         heading("Directory"),
                         Line::raw(""),
@@ -461,7 +445,10 @@ fn render_call_list(frame: &mut Frame<'_>, area: Rect, app: &App, incoming: bool
         );
         return;
     }
-    let rows: Vec<_> = items.iter().map(call_target_row).collect();
+    let rows: Vec<_> = items
+        .iter()
+        .map(|target| call_target_row(target, &app.project.workspace_root))
+        .collect();
     let mut state = ListState::default().with_selected(Some(selection));
     frame.render_stateful_widget(
         List::new(rows)
@@ -477,13 +464,19 @@ fn render_call_list(frame: &mut Frame<'_>, area: Rect, app: &App, incoming: bool
     );
 }
 
-fn call_target_row(target: &CallTarget) -> ListItem<'static> {
+fn call_target_row(target: &CallTarget, workspace_root: &std::path::Path) -> ListItem<'static> {
+    let external = !target.is_workspace_local(workspace_root);
+    let name = if external {
+        format!("[ext] {}", call_target_name(target))
+    } else {
+        call_target_name(target)
+    };
     ListItem::new(vec![
-        Line::raw(call_target_name(target)),
+        Line::raw(name),
         Line::styled(
             format!(
                 "  {}:{}",
-                target.file.display(),
+                compact_call_path(&target.file, workspace_root),
                 target.selection_range.start.line + 1
             ),
             Style::default().fg(Color::DarkGray),
@@ -509,7 +502,7 @@ fn render_call_current(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::raw(format!("kind      {}", target.kind)),
         Line::raw(format!(
             "location  {}:{}",
-            target.file.display(),
+            compact_call_path(&target.file, &app.project.workspace_root),
             target.selection_range.start.line + 1
         )),
         Line::raw(""),
@@ -535,9 +528,46 @@ fn render_call_current(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
-            .block(pane_block(" CURRENT ", app.pane == Pane::CallCurrent)),
+            .block(pane_block(
+                &format!(" CURRENT · {} ", app.calls.scope.label()),
+                app.pane == Pane::CallCurrent,
+            )),
         area,
     );
+}
+
+fn compact_call_path(path: &std::path::Path, workspace_root: &std::path::Path) -> String {
+    if let Ok(relative) = path.strip_prefix(workspace_root) {
+        return relative.display().to_string();
+    }
+    if !path.is_absolute() {
+        return path.display().to_string();
+    }
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    if let Some(index) = components
+        .iter()
+        .position(|component| *component == "library")
+    {
+        return components[index + 1..].join("/");
+    }
+    if let Some(registry) = components
+        .iter()
+        .position(|component| *component == "registry")
+    {
+        if let Some(source) = components[registry + 1..]
+            .iter()
+            .position(|component| *component == "src")
+        {
+            let start = registry + source + 3;
+            if start < components.len() {
+                return components[start..].join("/");
+            }
+        }
+    }
+    components[components.len().saturating_sub(4)..].join("/")
 }
 
 fn call_target_name(target: &CallTarget) -> String {
@@ -592,13 +622,8 @@ fn render_project(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let text = if let Some(inspector) = &app.inspector {
-        inspector_text(inspector)
-    } else {
-        overview_details(app)
-    };
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(overview_details(app))
             .wrap(Wrap { trim: false })
             .block(pane_block(" DETAILS ", app.pane == Pane::Details)),
         area,
@@ -843,13 +868,25 @@ fn footer_text(app: &App) -> &'static str {
             "j/k move   Enter inspect   c calls   / search   Ctrl+l inspector   1/2/3/4 views   q quit"
         }
         Overlay::None if app.pane == Pane::Callers => {
-            "j/k move   Enter follow   Ctrl+l current   Esc center   1/2/3/4 views   q quit"
+            if app.calls.scope == crate::model::CallScope::Workspace {
+                "j/k move   Enter follow   e external   Ctrl+l current   Esc center   q quit"
+            } else {
+                "j/k move   Enter follow   e workspace-only   Ctrl+l current   Esc center   q quit"
+            }
         }
         Overlay::None if app.pane == Pane::CallCurrent => {
-            "Ctrl+h callers   Ctrl+l callees   Esc back   1/2/3/4 views   q quit"
+            if app.calls.scope == crate::model::CallScope::Workspace {
+                "Ctrl+h callers   Ctrl+l callees   e external   Esc back   1/2/3/4 views   q quit"
+            } else {
+                "Ctrl+h callers   Ctrl+l callees   e workspace-only   Esc back   q quit"
+            }
         }
         Overlay::None if app.pane == Pane::Callees => {
-            "j/k move   Enter follow   Ctrl+h current   Esc center   1/2/3/4 views   q quit"
+            if app.calls.scope == crate::model::CallScope::Workspace {
+                "j/k move   Enter follow   e external   Ctrl+h current   Esc center   q quit"
+            } else {
+                "j/k move   Enter follow   e workspace-only   Ctrl+h current   Esc center   q quit"
+            }
         }
         Overlay::None => {
             "1 Overview   2 Symbols   3 Calls   4 Explorer   / search   Ctrl+h/l panes   q quit"
@@ -862,7 +899,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(
-            "Views\n\n  1              Overview\n  2              Symbols\n  3              Calls\n  4              Explorer\n\nNavigation\n\n  j / k          move or scroll\n  Ctrl+h/l       focus left/right\n  Tab / Shift+Tab next / previous pane\n\nExplorer\n\n  j / k          move\n  h / l          collapse / expand\n  Enter          open directory / file / symbol\n\nActions\n\n  c              calls for inspected symbol\n  Esc            back\n  /              search\n  ?              close help\n  q / Ctrl+C     quit",
+            "Views\n\n  1              Overview\n  2              Symbols\n  3              Calls\n  4              Explorer\n\nNavigation\n\n  j / k          move or scroll\n  Ctrl+h/l       focus left/right\n  Tab / Shift+Tab next / previous pane\n\nExplorer\n\n  j / k          move\n  h / l          collapse / expand\n  Enter          open directory / file / symbol\n\nActions\n\n  c              calls for inspected symbol\n  e              toggle external calls\n  Esc            back\n  /              search\n  ?              close help\n  q / Ctrl+C     quit",
         )
         .block(Block::default().title(" Help ").borders(Borders::ALL)),
         popup,
@@ -976,7 +1013,7 @@ fn truncate(value: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Location, Position, Range, Symbol};
+    use crate::model::{CallScope, Location, Position, Range, Symbol};
     use crate::project::{Package, Project, Target};
     use crate::repository::{RepoEntry, RepoEntryKind, RepositoryTree};
     use ratatui::backend::TestBackend;
@@ -1214,8 +1251,8 @@ mod tests {
             truncated: false,
             skipped_errors: 0,
         });
-        app.explorer.expanded.insert("src".into());
-        app.explorer.expanded.insert("src/tui".into());
+        app.explorer.set_expanded("src".into(), true);
+        app.explorer.set_expanded("src/tui".into(), true);
         app.explorer.selected = app
             .explorer
             .visible_entries()
@@ -1262,9 +1299,13 @@ mod tests {
     fn overview_and_help_render_views_and_navigation() {
         let mut app = app();
         app.analyzer_state = AnalyzerState::Ready;
+        app.inspector = inspected_app().inspector;
         let overview = render_text(&app);
         assert!(overview.contains("[1 Overview]"));
         assert!(overview.contains("[2 Symbols]"));
+        assert!(overview.contains("Workspace"));
+        assert!(overview.contains("Entrypoints"));
+        assert!(!overview.contains("LspClient::request"));
         app.overlay = Overlay::Help;
         let help = render_text(&app);
         for expected in [
@@ -1324,6 +1365,43 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &populated_app))
             .unwrap();
+    }
+
+    #[test]
+    fn calls_scope_hides_external_targets_by_default_and_compacts_them_in_all_mode() {
+        let workspace = calls_app(call_target("request", Some("LspClient"), 134));
+        let workspace_render = render_text(&workspace);
+        assert!(workspace_render.contains("CURRENT · workspace"));
+        assert!(!workspace_render.contains("[ext]"));
+
+        let mut all = workspace;
+        all.calls.scope = CallScope::All;
+        let mut external = call_target("unwrap", Some("Option"), 123);
+        external.file =
+            "/home/poke/.rustup/toolchains/stable/lib/rustlib/src/rust/library/core/src/option.rs"
+                .into();
+        all.calls.callees = vec![external];
+        let all_render = render_text(&all);
+        assert!(all_render.contains("CURRENT · all"));
+        assert!(all_render.contains("[ext] Option::unwrap"));
+        assert!(all_render.contains("core/src/option.rs"));
+        assert!(!all_render.contains("/home/poke/.rustup"));
+    }
+
+    #[test]
+    fn symbol_results_render_relevant_request_names_before_late_substrings() {
+        let mut app = app();
+        app.switch_view(View::Symbols);
+        app.symbols_query = "req".into();
+        let mut exact = symbol();
+        exact.name = "request".into();
+        let mut weak = symbol();
+        weak.name = "exports_symbols_review_frames_when_requested".into();
+        weak.id = "weak".into();
+        weak.selection_range.start.line += 10;
+        app.symbols_results = vec![exact, weak];
+        let rendered = render_text(&app);
+        assert!(rendered.find("request").unwrap() < rendered.find("exports").unwrap());
     }
 
     #[test]
@@ -1455,6 +1533,60 @@ mod tests {
         std::fs::write(
             directory.join("14-explorer-inspector.txt"),
             render_text(&explorer),
+        )
+        .unwrap();
+
+        let mut relevance = app();
+        relevance.switch_view(View::Symbols);
+        relevance.symbols_query = "req".into();
+        let mut request = symbol();
+        request.container = Some("LspClient".into());
+        let mut request_handler = symbol();
+        request_handler.name = "request_handler".into();
+        request_handler.container = None;
+        request_handler.id = "request-handler".into();
+        request_handler.selection_range.start.line += 10;
+        let mut server_request = symbol();
+        server_request.name = "server_request".into();
+        server_request.container = None;
+        server_request.id = "server-request".into();
+        server_request.selection_range.start.line += 20;
+        let mut weak = symbol();
+        weak.name = "exports_symbols_review_frames_when_requested".into();
+        weak.container = None;
+        weak.id = "weak-request".into();
+        weak.selection_range.start.line += 30;
+        relevance.symbols_results = vec![request, request_handler, server_request, weak];
+        std::fs::write(
+            directory.join("15-symbol-relevance.txt"),
+            render_text(&relevance),
+        )
+        .unwrap();
+
+        let workspace_calls = calls_app(call_target("request", Some("LspClient"), 134));
+        std::fs::write(
+            directory.join("16-calls-workspace.txt"),
+            render_text(&workspace_calls),
+        )
+        .unwrap();
+        let mut external_calls = workspace_calls;
+        external_calls.calls.scope = CallScope::All;
+        let mut external = call_target("unwrap", Some("Option"), 123);
+        external.file =
+            "/home/poke/.rustup/toolchains/stable/lib/rustlib/src/rust/library/core/src/option.rs"
+                .into();
+        external_calls.calls.callees.push(external);
+        std::fs::write(
+            directory.join("17-calls-external.txt"),
+            render_text(&external_calls),
+        )
+        .unwrap();
+
+        let mut clean_overview = inspected_app();
+        clean_overview.switch_view(View::Overview);
+        std::fs::write(
+            directory.join("18-overview-after-inspector.txt"),
+            render_text(&clean_overview),
         )
         .unwrap();
     }

@@ -1,6 +1,6 @@
 use super::explorer::{ExplorerRightMode, ExplorerState};
 use super::worker::AnalyzerEvent;
-use crate::model::{CallTarget, CallTargets, Location, Symbol};
+use crate::model::{CallScope, CallTarget, CallTargets, Location, Symbol};
 use crate::project::Project;
 use std::time::Instant;
 
@@ -102,6 +102,7 @@ const CALL_HISTORY_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct CallsState {
+    pub scope: CallScope,
     pub center: Option<CallTarget>,
     pub callers: Vec<CallTarget>,
     pub callees: Vec<CallTarget>,
@@ -272,7 +273,7 @@ impl App {
         };
     }
 
-    pub(super) fn escape(&mut self) -> Option<(u64, CallTarget)> {
+    pub(super) fn escape(&mut self) -> Option<(u64, CallTarget, CallScope)> {
         match self.overlay {
             Overlay::Help | Overlay::Search => self.overlay = Overlay::None,
             Overlay::None
@@ -347,7 +348,7 @@ impl App {
         Some((id, symbol))
     }
 
-    pub(super) fn open_calls_for_inspector(&mut self) -> Option<(u64, CallTarget)> {
+    pub(super) fn open_calls_for_inspector(&mut self) -> Option<(u64, CallTarget, CallScope)> {
         self.switch_view(View::Calls);
         let target = CallTarget::from_symbol(&self.inspector.as_ref()?.symbol);
         self.calls.history.clear();
@@ -364,7 +365,7 @@ impl App {
         Some((id, symbol))
     }
 
-    pub(super) fn follow_selected_call(&mut self) -> Option<(u64, CallTarget)> {
+    pub(super) fn follow_selected_call(&mut self) -> Option<(u64, CallTarget, CallScope)> {
         let target = match self.pane {
             Pane::Callers => self
                 .calls
@@ -381,7 +382,13 @@ impl App {
         Some(self.load_calls(target, true))
     }
 
-    fn load_calls(&mut self, target: CallTarget, remember: bool) -> (u64, CallTarget) {
+    pub(super) fn toggle_call_scope(&mut self) -> Option<(u64, CallTarget, CallScope)> {
+        let target = self.calls.center.clone()?;
+        self.calls.scope = self.calls.scope.toggled();
+        Some(self.load_calls(target, false))
+    }
+
+    fn load_calls(&mut self, target: CallTarget, remember: bool) -> (u64, CallTarget, CallScope) {
         if remember {
             if let Some(center) = self.calls.center.take() {
                 self.calls.history.push(center);
@@ -403,7 +410,7 @@ impl App {
         self.calls.callers_error = None;
         self.calls.callees_error = None;
         self.pane = Pane::CallCurrent;
-        (self.calls.request_id, target)
+        (self.calls.request_id, target, self.calls.scope)
     }
 
     pub(super) fn apply_event(&mut self, event: AnalyzerEvent) {
@@ -764,7 +771,7 @@ mod tests {
     fn calls_selection_history_and_stale_events_are_bounded() {
         let mut app = App::new(project());
         app.inspector = Some(Inspector::loading(1, symbol("A")));
-        let (first, _) = app.open_calls_for_inspector().unwrap();
+        let (first, _, _) = app.open_calls_for_inspector().unwrap();
         let caller_b = call_target("B", 10);
         let callee_c = call_target("C", 20);
         app.apply_event(AnalyzerEvent::CallersLoaded {
@@ -777,7 +784,7 @@ mod tests {
         app.pane = Pane::Callers;
         app.move_selection(99);
         assert_eq!(app.calls.callers_selection, 0);
-        let (second, target) = app.follow_selected_call().unwrap();
+        let (second, target, _) = app.follow_selected_call().unwrap();
         assert_eq!(target.name, "B");
         assert_eq!(app.calls.history.len(), 1);
 
@@ -801,13 +808,13 @@ mod tests {
         assert_eq!(app.calls.callees_selection, 1);
         app.move_selection(-99);
         assert_eq!(app.calls.callees_selection, 0);
-        let (_third, target) = app.follow_selected_call().unwrap();
+        let (_third, target, _) = app.follow_selected_call().unwrap();
         assert_eq!(target.name, "C");
         assert_eq!(app.calls.history.len(), 2);
 
-        let (_, target) = app.escape().unwrap();
+        let (_, target, _) = app.escape().unwrap();
         assert_eq!(target.name, "B");
-        let (_, target) = app.escape().unwrap();
+        let (_, target, _) = app.escape().unwrap();
         assert_eq!(target.name, "A");
     }
 
@@ -823,13 +830,37 @@ mod tests {
     }
 
     #[test]
+    fn call_scope_toggle_reloads_neighbors_and_rejects_stale_events() {
+        let mut app = App::new(project());
+        app.calls.center = Some(call_target("root", 0));
+        app.calls.callers = vec![call_target("old", 1)];
+        app.calls.history = vec![call_target("history", 2)];
+        let old_id = app.calls.request_id;
+        let (new_id, target, scope) = app.toggle_call_scope().unwrap();
+        assert_eq!(target.name, "root");
+        assert_eq!(scope, CallScope::All);
+        assert!(new_id > old_id);
+        assert!(app.calls.callers.is_empty());
+        assert_eq!(app.calls.history.len(), 1);
+
+        app.apply_event(AnalyzerEvent::CallersLoaded {
+            id: old_id,
+            result: Some(CallTargets {
+                items: vec![call_target("stale", 3)],
+                truncated: false,
+            }),
+        });
+        assert!(app.calls.callers.is_empty());
+    }
+
+    #[test]
     fn explorer_state_persists_and_file_events_and_inspector_are_exact() {
         let mut app = App::new(project());
         app.explorer.apply_tree(repository_tree());
         app.switch_view(View::Explorer);
         assert_eq!(app.pane, Pane::ExplorerTree);
-        assert!(app.explorer.expanded.contains(std::path::Path::new("src")));
-        app.explorer.expanded.insert("src/tui".into());
+        assert!(app.explorer.is_expanded(std::path::Path::new("src")));
+        app.explorer.set_expanded("src/tui".into(), true);
         app.explorer.selected = app
             .explorer
             .visible_entries()
@@ -863,10 +894,7 @@ mod tests {
 
         app.switch_view(View::Symbols);
         app.switch_view(View::Explorer);
-        assert!(app
-            .explorer
-            .expanded
-            .contains(std::path::Path::new("src/tui")));
+        assert!(app.explorer.is_expanded(std::path::Path::new("src/tui")));
         assert_eq!(
             app.explorer.file.as_ref().unwrap().path,
             std::path::Path::new("src/tui/worker.rs")

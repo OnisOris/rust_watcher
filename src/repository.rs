@@ -32,6 +32,7 @@ impl RepositoryTree {
         self.entries.iter().find(|entry| entry.path == path)
     }
 
+    #[cfg(test)]
     pub fn children(&self, parent: &Path) -> Vec<&RepoEntry> {
         let mut children: Vec<_> = self
             .entries

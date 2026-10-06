@@ -85,9 +85,9 @@ pub(super) async fn handle_key(
         return Ok(true);
     }
     if key.code == KeyCode::Esc {
-        if let Some((id, target)) = app.escape() {
+        if let Some((id, target, scope)) = app.escape() {
             commands
-                .send(AnalyzerCommand::LoadCalls { id, target })
+                .send(AnalyzerCommand::LoadCalls { id, target, scope })
                 .await?;
         }
         return Ok(false);
@@ -134,6 +134,9 @@ pub(super) async fn handle_key(
                         && app.explorer.right_mode == ExplorerRightMode::Inspector) =>
             {
                 open_calls(app, commands).await?
+            }
+            KeyCode::Char('e') if app.view == View::Calls => {
+                reload_calls_scope(app, commands).await?
             }
             KeyCode::Char('?') => app.overlay = Overlay::Help,
             KeyCode::Char('/') => app.open_search(),
@@ -191,18 +194,27 @@ async fn begin_inspect(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) 
 }
 
 async fn open_calls(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
-    if let Some((id, target)) = app.open_calls_for_inspector() {
+    if let Some((id, target, scope)) = app.open_calls_for_inspector() {
         commands
-            .send(AnalyzerCommand::LoadCalls { id, target })
+            .send(AnalyzerCommand::LoadCalls { id, target, scope })
             .await?;
     }
     Ok(())
 }
 
 async fn follow_call(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
-    if let Some((id, target)) = app.follow_selected_call() {
+    if let Some((id, target, scope)) = app.follow_selected_call() {
         commands
-            .send(AnalyzerCommand::LoadCalls { id, target })
+            .send(AnalyzerCommand::LoadCalls { id, target, scope })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn reload_calls_scope(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
+    if let Some((id, target, scope)) = app.toggle_call_scope() {
+        commands
+            .send(AnalyzerCommand::LoadCalls { id, target, scope })
             .await?;
     }
     Ok(())
@@ -444,7 +456,7 @@ mod tests {
             truncated: false,
             skipped_errors: 0,
         });
-        app.explorer.expanded.insert("src".into());
+        app.explorer.set_expanded("src".into(), true);
         app.switch_view(View::Explorer);
         app.explorer.selected = 2;
         let (commands, mut receiver) = mpsc::channel(2);
@@ -509,5 +521,28 @@ mod tests {
                 .unwrap();
         }
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn calls_external_toggle_reloads_current_target_with_new_scope() {
+        let mut app = app();
+        app.switch_view(View::Calls);
+        app.calls.center = Some(crate::model::CallTarget::from_symbol(&symbol("run")));
+        let (commands, mut receiver) = mpsc::channel(1);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.calls.scope, crate::model::CallScope::All);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            AnalyzerCommand::LoadCalls {
+                scope: crate::model::CallScope::All,
+                ..
+            }
+        ));
     }
 }

@@ -1,6 +1,8 @@
 use crate::model::Symbol;
 use crate::project::{Package, Project};
-use crate::repository::{RepoEntry, RepoEntryKind, RepositoryTree};
+#[cfg(test)]
+use crate::repository::RepoEntry;
+use crate::repository::{RepoEntryKind, RepositoryTree};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -38,10 +40,14 @@ pub(super) struct ExplorerState {
     pub loading: bool,
     pub error: Option<String>,
     pub selected: usize,
-    pub expanded: HashSet<PathBuf>,
+    expanded: HashSet<PathBuf>,
+    children_by_parent: HashMap<PathBuf, Vec<usize>>,
+    visible: Vec<VisibleEntry>,
     pub file: Option<FileState>,
     pub right_mode: ExplorerRightMode,
     next_file_request: u64,
+    #[cfg(test)]
+    visible_rebuilds: usize,
 }
 
 impl ExplorerState {
@@ -52,23 +58,23 @@ impl ExplorerState {
             error: None,
             selected: 0,
             expanded: initial_expansion(project),
+            children_by_parent: HashMap::new(),
+            visible: vec![root_entry()],
             file: None,
             right_mode: ExplorerRightMode::File,
             next_file_request: 0,
+            #[cfg(test)]
+            visible_rebuilds: 0,
         }
     }
 
     pub fn apply_tree(&mut self, tree: RepositoryTree) {
         let selected = self.selected_entry().map(|entry| entry.path);
         self.tree = Some(tree);
+        self.rebuild_index();
+        self.rebuild_visible(selected.as_deref());
         self.loading = false;
         self.error = None;
-        if let Some(path) = selected {
-            self.select_path(&path);
-        } else {
-            self.selected = 0;
-        }
-        self.clamp_selection();
     }
 
     pub fn fail(&mut self, message: String) {
@@ -76,42 +82,16 @@ impl ExplorerState {
         self.error = Some(message);
     }
 
-    pub fn visible_entries(&self) -> Vec<VisibleEntry> {
-        let root = VisibleEntry {
-            path: PathBuf::new(),
-            kind: RepoEntryKind::Directory,
-            size: None,
-            depth: 0,
-        };
-        let Some(tree) = &self.tree else {
-            return vec![root];
-        };
-        let mut children: HashMap<PathBuf, Vec<&RepoEntry>> = HashMap::new();
-        for entry in &tree.entries {
-            children
-                .entry(entry.path.parent().unwrap_or(Path::new("")).to_path_buf())
-                .or_default()
-                .push(entry);
-        }
-        for values in children.values_mut() {
-            values.sort_by(|a, b| {
-                kind_rank(a.kind)
-                    .cmp(&kind_rank(b.kind))
-                    .then(a.path.file_name().cmp(&b.path.file_name()))
-            });
-        }
-        let mut visible = vec![root];
-        append_children(Path::new(""), 1, &children, &self.expanded, &mut visible);
-        visible
+    pub fn visible_entries(&self) -> &[VisibleEntry] {
+        &self.visible
     }
 
     pub fn selected_entry(&self) -> Option<VisibleEntry> {
-        self.visible_entries().get(self.selected).cloned()
+        self.visible.get(self.selected).cloned()
     }
 
     pub fn move_tree_selection(&mut self, delta: isize) {
-        let count = self.visible_entries().len();
-        self.selected = super::app::move_index(self.selected, count, delta);
+        self.selected = super::app::move_index(self.selected, self.visible.len(), delta);
     }
 
     pub fn move_file_selection(&mut self, delta: isize) {
@@ -128,9 +108,9 @@ impl ExplorerState {
             return;
         }
         if !self.expanded.remove(&entry.path) {
-            self.expanded.insert(entry.path);
+            self.expanded.insert(entry.path.clone());
         }
-        self.clamp_selection();
+        self.rebuild_visible(Some(&entry.path));
     }
 
     pub fn expand_or_child(&mut self) {
@@ -143,14 +123,15 @@ impl ExplorerState {
         if entry.path.as_os_str().is_empty() || self.expanded.contains(&entry.path) {
             let current_depth = entry.depth;
             if self
-                .visible_entries()
+                .visible
                 .get(self.selected + 1)
                 .is_some_and(|child| child.depth == current_depth + 1)
             {
                 self.selected += 1;
             }
         } else {
-            self.expanded.insert(entry.path);
+            self.expanded.insert(entry.path.clone());
+            self.rebuild_visible(Some(&entry.path));
         }
     }
 
@@ -162,7 +143,7 @@ impl ExplorerState {
             && !entry.path.as_os_str().is_empty()
             && self.expanded.remove(&entry.path)
         {
-            self.clamp_selection();
+            self.rebuild_visible(Some(&entry.path));
             return;
         }
         let parent = entry.path.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -229,20 +210,98 @@ impl ExplorerState {
         file.symbols.get(file.selection).cloned()
     }
 
+    pub fn is_expanded(&self, path: &Path) -> bool {
+        self.expanded.contains(path)
+    }
+
+    #[cfg(test)]
+    pub fn set_expanded(&mut self, path: PathBuf, expanded: bool) {
+        let changed = if expanded {
+            self.expanded.insert(path.clone())
+        } else {
+            self.expanded.remove(&path)
+        };
+        if changed {
+            let selected = self.selected_entry().map(|entry| entry.path);
+            self.rebuild_visible(selected.as_deref());
+        }
+    }
+
+    pub fn direct_child_counts(&self, path: &Path) -> (usize, usize) {
+        let Some(tree) = &self.tree else {
+            return (0, 0);
+        };
+        self.children_by_parent
+            .get(path)
+            .into_iter()
+            .flatten()
+            .fold((0, 0), |(directories, files), index| {
+                if tree.entries[*index].kind == RepoEntryKind::Directory {
+                    (directories + 1, files)
+                } else {
+                    (directories, files + 1)
+                }
+            })
+    }
+
     fn select_path(&mut self, path: &Path) {
-        if let Some(index) = self
-            .visible_entries()
-            .iter()
-            .position(|entry| entry.path == path)
-        {
+        if let Some(index) = self.visible.iter().position(|entry| entry.path == path) {
             self.selected = index;
         }
     }
 
-    fn clamp_selection(&mut self) {
-        self.selected = self
-            .selected
-            .min(self.visible_entries().len().saturating_sub(1));
+    fn rebuild_index(&mut self) {
+        self.children_by_parent.clear();
+        let Some(tree) = &self.tree else {
+            return;
+        };
+        for (index, entry) in tree.entries.iter().enumerate() {
+            self.children_by_parent
+                .entry(entry.path.parent().unwrap_or(Path::new("")).to_path_buf())
+                .or_default()
+                .push(index);
+        }
+        for children in self.children_by_parent.values_mut() {
+            children.sort_by(|a, b| {
+                let a = &tree.entries[*a];
+                let b = &tree.entries[*b];
+                kind_rank(a.kind)
+                    .cmp(&kind_rank(b.kind))
+                    .then(a.path.file_name().cmp(&b.path.file_name()))
+                    .then(a.path.cmp(&b.path))
+            });
+        }
+    }
+
+    fn rebuild_visible(&mut self, selected_path: Option<&Path>) {
+        let mut visible = vec![root_entry()];
+        if let Some(tree) = &self.tree {
+            append_children(
+                Path::new(""),
+                1,
+                tree,
+                &self.children_by_parent,
+                &self.expanded,
+                &mut visible,
+            );
+        }
+        self.visible = visible;
+        self.selected = selected_path
+            .and_then(|path| self.visible.iter().position(|entry| entry.path == path))
+            .unwrap_or_else(|| self.selected.min(self.visible.len().saturating_sub(1)));
+        #[cfg(test)]
+        {
+            self.visible_rebuilds += 1;
+        }
+    }
+}
+
+fn root_entry() -> VisibleEntry {
+    VisibleEntry {
+        path: PathBuf::new(),
+        kind: RepoEntryKind::Directory,
+        size: None,
+        depth: 0,
     }
 }
 
@@ -311,14 +370,16 @@ fn initial_expansion(project: &Project) -> HashSet<PathBuf> {
 fn append_children(
     parent: &Path,
     depth: usize,
-    children: &HashMap<PathBuf, Vec<&RepoEntry>>,
+    tree: &RepositoryTree,
+    children: &HashMap<PathBuf, Vec<usize>>,
     expanded: &HashSet<PathBuf>,
     output: &mut Vec<VisibleEntry>,
 ) {
     let Some(entries) = children.get(parent) else {
         return;
     };
-    for entry in entries {
+    for index in entries {
+        let entry = &tree.entries[*index];
         output.push(VisibleEntry {
             path: entry.path.clone(),
             kind: entry.kind,
@@ -326,7 +387,7 @@ fn append_children(
             depth,
         });
         if entry.kind == RepoEntryKind::Directory && expanded.contains(&entry.path) {
-            append_children(&entry.path, depth + 1, children, expanded, output);
+            append_children(&entry.path, depth + 1, tree, children, expanded, output);
         }
     }
 }
@@ -388,7 +449,7 @@ mod tests {
         assert_eq!(state.visible_entries().len(), 3);
         state.selected = 1;
         state.expand_or_child();
-        assert!(state.expanded.contains(Path::new("src")));
+        assert!(state.is_expanded(Path::new("src")));
         state.expand_or_child();
         assert_eq!(
             state.selected_entry().unwrap().path,
@@ -413,12 +474,12 @@ mod tests {
     fn expansion_and_file_selection_survive_view_switches_by_design() {
         let mut state = ExplorerState::new(&project());
         state.apply_tree(tree());
-        state.expanded.insert("src".into());
-        state.expanded.insert("src/tui".into());
+        state.set_expanded("src".into(), true);
+        state.set_expanded("src/tui".into(), true);
         state.selected = 3;
         let request = state.open_selected().unwrap();
         assert_eq!(request.1, PathBuf::from("src/tui/worker.rs"));
-        assert!(state.expanded.contains(Path::new("src/tui")));
+        assert!(state.is_expanded(Path::new("src/tui")));
         assert_eq!(state.file.as_ref().unwrap().path, request.1);
     }
 
@@ -471,6 +532,68 @@ mod tests {
         assert_eq!(
             file_role(&project, Path::new("src/main.rs")),
             Some("source")
+        );
+    }
+
+    #[test]
+    fn selection_moves_do_not_rebuild_visible_rows() {
+        let mut state = ExplorerState::new(&project());
+        state.apply_tree(tree());
+        state.set_expanded("src".into(), true);
+        let rebuilds = state.visible_rebuilds;
+        for _ in 0..10_000 {
+            state.move_tree_selection(1);
+            state.move_tree_selection(-1);
+        }
+        assert_eq!(state.visible_rebuilds, rebuilds);
+    }
+
+    #[test]
+    #[ignore = "local 50k-entry Explorer cache performance smoke"]
+    fn large_tree_navigation_smoke() {
+        let mut entries = Vec::with_capacity(50_000);
+        entries.push(RepoEntry {
+            path: "bulk".into(),
+            kind: RepoEntryKind::Directory,
+            size: None,
+        });
+        for index in 0..49_999 {
+            entries.push(RepoEntry {
+                path: format!("bulk/file-{index:05}.rs").into(),
+                kind: RepoEntryKind::File,
+                size: Some(1),
+            });
+        }
+        let mut state = ExplorerState::new(&project());
+        let indexing = std::time::Instant::now();
+        state.apply_tree(RepositoryTree {
+            entries,
+            truncated: false,
+            skipped_errors: 0,
+        });
+        let indexing = indexing.elapsed();
+
+        let visible = std::time::Instant::now();
+        state.set_expanded("bulk".into(), true);
+        let visible = visible.elapsed();
+        assert_eq!(state.visible_entries().len(), 50_001);
+
+        let rebuilds = state.visible_rebuilds;
+        let movement = std::time::Instant::now();
+        for _ in 0..1_000 {
+            state.move_tree_selection(1);
+        }
+        let movement = movement.elapsed();
+        assert_eq!(state.visible_rebuilds, rebuilds);
+
+        state.selected = 1;
+        let expansion = std::time::Instant::now();
+        for _ in 0..100 {
+            state.toggle_selected();
+        }
+        let expansion = expansion.elapsed();
+        eprintln!(
+            "50k index {indexing:?}; visible {visible:?}; 1000 moves {movement:?}; 100 expand/collapse {expansion:?}"
         );
     }
 }

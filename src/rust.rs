@@ -1,7 +1,7 @@
 use crate::lsp::{path_uri, uri_path, LspClient};
 use crate::model::{
-    stable_symbol_id, CallNode, CallTarget, CallTargets, CallTree, Diagnostic, Explanation,
-    Location, Position, Range, Severity, Symbol, SymbolSearchResult,
+    stable_symbol_id, CallNode, CallScope, CallTarget, CallTargets, CallTree, Diagnostic,
+    Explanation, Location, Position, Range, Severity, Symbol, SymbolSearchResult,
 };
 use crate::project::Project;
 use anyhow::{Context, Result};
@@ -152,12 +152,15 @@ impl RustAnalyzer {
     }
 
     async fn workspace_symbols(&self, query: &str) -> Result<Vec<Symbol>> {
+        // rust-analyzer's `#` workspace-symbol suffix requests all symbol kinds;
+        // without it short lowercase queries can be treated as type-only searches.
+        let analyzer_query = format!("{query}#");
         #[allow(deprecated)]
         let mut values: Vec<SymbolInformation> = self
             .client
             .request::<_, Option<Vec<SymbolInformation>>>(
                 "workspace/symbol",
-                json!({"query": query}),
+                json!({"query": analyzer_query}),
             )
             .await?
             .unwrap_or_default();
@@ -170,7 +173,7 @@ impl RustAnalyzer {
                 .client
                 .request::<_, Option<Vec<SymbolInformation>>>(
                     "workspace/symbol",
-                    json!({"query": query}),
+                    json!({"query": analyzer_query}),
                 )
                 .await?
                 .unwrap_or_default();
@@ -357,18 +360,27 @@ impl RustAnalyzer {
         })
     }
 
-    pub async fn callers_for_target(&self, target: &CallTarget) -> Result<Option<CallTargets>> {
-        self.call_targets(target, true).await
+    pub async fn callers_for_target_scoped(
+        &self,
+        target: &CallTarget,
+        scope: CallScope,
+    ) -> Result<Option<CallTargets>> {
+        self.call_targets(target, true, scope).await
     }
 
-    pub async fn callees_for_target(&self, target: &CallTarget) -> Result<Option<CallTargets>> {
-        self.call_targets(target, false).await
+    pub async fn callees_for_target_scoped(
+        &self,
+        target: &CallTarget,
+        scope: CallScope,
+    ) -> Result<Option<CallTargets>> {
+        self.call_targets(target, false, scope).await
     }
 
     async fn call_targets(
         &self,
         target: &CallTarget,
         incoming: bool,
+        scope: CallScope,
     ) -> Result<Option<CallTargets>> {
         let Some(item) = self.prepare_call_item(target).await? else {
             return Ok(None);
@@ -394,22 +406,15 @@ impl RustAnalyzer {
                 .map(|call| call.to)
                 .collect()
         };
-        let mut items = items
+        let items = items
             .into_iter()
             .map(|item| self.normalize_call_target(&item))
             .collect::<Result<Vec<_>>>()?;
-        items.sort_by(|a, b| {
-            a.name
-                .cmp(&b.name)
-                .then(a.file.cmp(&b.file))
-                .then(a.selection_range.cmp(&b.selection_range))
-        });
-        items.dedup_by(|a, b| {
-            a.name == b.name && a.file == b.file && a.selection_range == b.selection_range
-        });
-        let truncated = items.len() > CALL_CHILD_LIMIT;
-        items.truncate(CALL_CHILD_LIMIT);
-        Ok(Some(CallTargets { items, truncated }))
+        Ok(Some(finalize_call_targets(
+            items,
+            &self.project.workspace_root,
+            scope,
+        )))
     }
 
     async fn prepare_call_item(&self, target: &CallTarget) -> Result<Option<CallHierarchyItem>> {
@@ -423,18 +428,23 @@ impl RustAnalyzer {
                 }),
             )
             .await?;
-        let mut items = items.unwrap_or_default();
-        items.sort_by_key(call_item_key);
-        if let Some(index) = items.iter().position(|item| {
-            self.normalize_call_target(item).is_ok_and(|candidate| {
-                candidate.file == target.file
-                    && candidate.selection_range == target.selection_range
-                    && candidate.name == target.name
+        let items = items.unwrap_or_default();
+        self.select_prepared_call_item(target, items)
+    }
+
+    fn select_prepared_call_item(
+        &self,
+        target: &CallTarget,
+        items: Vec<CallHierarchyItem>,
+    ) -> Result<Option<CallHierarchyItem>> {
+        let items = items
+            .into_iter()
+            .map(|item| {
+                let candidate = self.normalize_call_target(&item)?;
+                Ok((item, candidate))
             })
-        }) {
-            return Ok(Some(items.remove(index)));
-        }
-        Ok(items.into_iter().next())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(select_prepared_call_item(target, items))
     }
 
     fn normalize_call_target(&self, item: &CallHierarchyItem) -> Result<CallTarget> {
@@ -711,6 +721,49 @@ impl RustAnalyzer {
     }
 }
 
+fn finalize_call_targets(
+    mut items: Vec<CallTarget>,
+    workspace_root: &Path,
+    scope: CallScope,
+) -> CallTargets {
+    if scope == CallScope::Workspace {
+        items.retain(|target| target.is_workspace_local(workspace_root));
+    }
+    items.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.file.cmp(&b.file))
+            .then(a.selection_range.cmp(&b.selection_range))
+    });
+    items.dedup_by(|a, b| {
+        a.name == b.name && a.file == b.file && a.selection_range == b.selection_range
+    });
+    let truncated = items.len() > CALL_CHILD_LIMIT;
+    items.truncate(CALL_CHILD_LIMIT);
+    CallTargets { items, truncated }
+}
+
+fn select_prepared_call_item(
+    target: &CallTarget,
+    mut items: Vec<(CallHierarchyItem, CallTarget)>,
+) -> Option<CallHierarchyItem> {
+    items.sort_by_key(|(item, _)| call_item_key(item));
+    if let Some(index) = items.iter().position(|(_, candidate)| {
+        candidate.file == target.file
+            && candidate.selection_range == target.selection_range
+            && candidate.name == target.name
+    }) {
+        return Some(items.remove(index).0);
+    }
+    let mut safe = items.into_iter().filter(|(_, candidate)| {
+        candidate.file == target.file
+            && candidate.name == target.name
+            && range_contains(candidate.range, target.selection_range.start)
+    });
+    let selected = safe.next()?;
+    safe.next().is_none().then_some(selected.0)
+}
+
 fn select_symbol(mut candidates: Vec<Symbol>, query: &str) -> Result<Symbol> {
     sort_and_dedup_symbols(&mut candidates, query);
     match candidates.len() {
@@ -822,25 +875,60 @@ fn qualified_name(symbol: &Symbol) -> String {
     }
 }
 
-fn symbol_score(symbol: &Symbol, query: &str) -> u8 {
+fn symbol_rank(symbol: &Symbol, query: &str) -> (u8, usize, usize, u8) {
     let leaf = query.rsplit("::").next().unwrap_or(query);
-    u8::from(symbol.name == query) * 4
-        + u8::from(symbol.name == leaf) * 2
-        + u8::from(qualification_matches(symbol, query))
+    let candidate = if query.contains("::") {
+        qualified_name(symbol)
+    } else {
+        symbol.name.clone()
+    };
+    let needle = if query.contains("::") { query } else { leaf };
+    let lower_candidate = candidate.to_lowercase();
+    let lower_needle = needle.to_lowercase();
+    if candidate == needle {
+        return (0, 0, candidate.len(), 0);
+    }
+    if lower_candidate == lower_needle {
+        return (1, 0, candidate.len(), 1);
+    }
+    if candidate.starts_with(needle) {
+        return (2, 0, candidate.len(), 0);
+    }
+    if lower_candidate.starts_with(&lower_needle) {
+        return (2, 0, candidate.len(), 1);
+    }
+    let positions: Vec<_> = lower_candidate.match_indices(&lower_needle).collect();
+    if let Some((position, _)) = positions
+        .iter()
+        .copied()
+        .find(|(position, _)| is_name_boundary(&candidate, *position))
+    {
+        return (3, position, candidate.len(), 0);
+    }
+    if let Some((position, _)) = positions.first() {
+        return (4, *position, candidate.len(), 0);
+    }
+    (5, usize::MAX, candidate.len(), 0)
 }
 
-fn range_size(range: Range) -> (u32, u32) {
-    (
-        range.end.line.saturating_sub(range.start.line),
-        range.end.character.saturating_sub(range.start.character),
-    )
+fn is_name_boundary(value: &str, position: usize) -> bool {
+    if position == 0 {
+        return true;
+    }
+    let previous = value[..position].chars().next_back();
+    let current = value[position..].chars().next();
+    previous.is_some_and(|character| matches!(character, ':' | '_' | '-'))
+        || previous.is_some_and(|character| character.is_lowercase() || character.is_numeric())
+            && current.is_some_and(char::is_uppercase)
 }
 
 fn sort_and_dedup_symbols(symbols: &mut Vec<Symbol>, query: &str) {
     symbols.sort_by(|a, b| {
-        symbol_score(b, query)
-            .cmp(&symbol_score(a, query))
-            .then(range_size(b.range).cmp(&range_size(a.range)))
+        symbol_rank(a, query)
+            .cmp(&symbol_rank(b, query))
+            .then(qualified_name(a).cmp(&qualified_name(b)))
+            .then(a.file.cmp(&b.file))
+            .then(a.selection_range.cmp(&b.selection_range))
             .then(a.id.cmp(&b.id))
     });
     symbols.dedup_by(|a, b| {
@@ -994,6 +1082,10 @@ fn overlaps(a: Range, b: Range) -> bool {
     a.start <= b.end && b.start <= a.end
 }
 
+fn range_contains(range: Range, position: Position) -> bool {
+    range.start <= position && position <= range.end
+}
+
 fn source_fragment(file: &Path, selected: Range) -> Result<String> {
     let source = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read {}", file.display()))?;
@@ -1065,9 +1157,189 @@ mod tests {
         analyzer
     }
 
+    fn ranked_symbol(name: &str, container: Option<&str>, line: u32) -> Symbol {
+        Symbol {
+            id: format!("src/lib.rs:{line}:0:function:{name}"),
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position {
+                    line: line + 1,
+                    character: 0,
+                },
+            },
+            selection_range: Range {
+                start: Position { line, character: 3 },
+                end: Position {
+                    line,
+                    character: 3 + name.len() as u32,
+                },
+            },
+            container: container.map(str::to_owned),
+        }
+    }
+
+    fn call_target_at(name: &str, file: &str, line: u32, range_start: u32) -> CallTarget {
+        CallTarget {
+            name: name.into(),
+            kind: "function".into(),
+            file: file.into(),
+            range: Range {
+                start: Position {
+                    line: range_start,
+                    character: 0,
+                },
+                end: Position {
+                    line: range_start + 20,
+                    character: 0,
+                },
+            },
+            selection_range: Range {
+                start: Position { line, character: 3 },
+                end: Position { line, character: 6 },
+            },
+            detail: None,
+        }
+    }
+
+    fn hierarchy_item(name: &str, detail: &str, line: u32) -> CallHierarchyItem {
+        CallHierarchyItem {
+            name: name.into(),
+            kind: lsp_types::SymbolKind::FUNCTION,
+            tags: None,
+            detail: Some(detail.into()),
+            uri: format!("file:///workspace/{detail}.rs").parse().unwrap(),
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(line, 0),
+                lsp_types::Position::new(line + 1, 0),
+            ),
+            selection_range: lsp_types::Range::new(
+                lsp_types::Position::new(line, 3),
+                lsp_types::Position::new(line, 6),
+            ),
+            data: None,
+        }
+    }
+
     #[test]
     fn normalizes_kind_names() {
         assert_eq!(kind_name(lsp_types::SymbolKind::STRUCT), "struct");
+    }
+
+    #[test]
+    fn symbol_ranking_prioritizes_exact_prefix_boundary_and_early_matches() {
+        let mut req = vec![
+            ranked_symbol("exports_symbols_review_frames_when_requested", None, 5),
+            ranked_symbol("server_request", None, 4),
+            ranked_symbol("my_special_request_handler", None, 3),
+            ranked_symbol("request_handler", None, 2),
+            ranked_symbol("Request", None, 1),
+            ranked_symbol("request", None, 0),
+        ];
+        sort_and_dedup_symbols(&mut req, "req");
+        assert_eq!(
+            req.iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "request",
+                "Request",
+                "request_handler",
+                "server_request",
+                "my_special_request_handler",
+                "exports_symbols_review_frames_when_requested",
+            ]
+        );
+
+        let mut run = vec![
+            ranked_symbol("runtime", None, 1),
+            ranked_symbol("run", None, 0),
+        ];
+        sort_and_dedup_symbols(&mut run, "run");
+        assert_eq!(run[0].name, "run");
+
+        let mut foo = vec![
+            ranked_symbol("foo_helper", None, 1),
+            ranked_symbol("foo", None, 0),
+        ];
+        sort_and_dedup_symbols(&mut foo, "foo");
+        assert_eq!(foo[0].name, "foo");
+
+        let mut qualified = vec![
+            ranked_symbol("run", Some("Other"), 1),
+            ranked_symbol("run", Some("LspClient"), 0),
+        ];
+        qualified = best_qualified_symbols(qualified, "LspClient::run");
+        sort_and_dedup_symbols(&mut qualified, "LspClient::run");
+        assert_eq!(qualified.len(), 1);
+        assert_eq!(qualified[0].container.as_deref(), Some("LspClient"));
+    }
+
+    #[test]
+    fn call_scope_filters_before_deduplication_and_limit() {
+        let root = Path::new("/workspace");
+        let mut targets: Vec<_> = (0..25)
+            .map(|index| {
+                call_target_at(
+                    &format!("external_{index:02}"),
+                    &format!("/toolchain/src/external_{index:02}.rs"),
+                    index,
+                    index,
+                )
+            })
+            .collect();
+        targets.push(call_target_at("workspace_a", "src/a.rs", 1, 0));
+        targets.push(call_target_at("workspace_b", "src/b.rs", 2, 0));
+
+        let workspace = finalize_call_targets(targets.clone(), root, CallScope::Workspace);
+        assert_eq!(workspace.items.len(), 2);
+        assert!(!workspace.truncated);
+        assert!(workspace
+            .items
+            .iter()
+            .all(|target| target.is_workspace_local(root)));
+
+        let all = finalize_call_targets(targets, root, CallScope::All);
+        assert_eq!(all.items.len(), CALL_CHILD_LIMIT);
+        assert!(all.truncated);
+    }
+
+    #[test]
+    fn prepared_call_items_require_exact_or_unique_safe_identity() {
+        let target = call_target_at("run", "src/main.rs", 10, 0);
+        let wrong_target = call_target_at("run", "src/main.rs", 20, 0);
+        let exact_item = hierarchy_item("run", "exact", 10);
+        let wrong_item = hierarchy_item("run", "wrong", 20);
+        let selected = select_prepared_call_item(
+            &target,
+            vec![(wrong_item, wrong_target), (exact_item, target.clone())],
+        )
+        .unwrap();
+        assert_eq!(selected.detail.as_deref(), Some("exact"));
+
+        let other_file = call_target_at("run", "src/other.rs", 10, 0);
+        assert!(select_prepared_call_item(
+            &target,
+            vec![(hierarchy_item("run", "other", 10), other_file)]
+        )
+        .is_none());
+
+        let safe_a = call_target_at("run", "src/main.rs", 5, 0);
+        let safe_b = call_target_at("run", "src/main.rs", 6, 0);
+        assert!(select_prepared_call_item(
+            &target,
+            vec![
+                (hierarchy_item("run", "safe-a", 5), safe_a.clone()),
+                (hierarchy_item("run", "safe-b", 6), safe_b),
+            ],
+        )
+        .is_none());
+        let selected =
+            select_prepared_call_item(&target, vec![(hierarchy_item("run", "safe", 5), safe_a)])
+                .unwrap();
+        assert_eq!(selected.detail.as_deref(), Some("safe"));
     }
 
     #[test]
@@ -1223,14 +1495,14 @@ mod tests {
         let b = analyzer.find_symbol("chain_b").await.unwrap();
         let c = analyzer.find_symbol("chain_c").await.unwrap();
         let a_callees = analyzer
-            .callees_for_target(&CallTarget::from_symbol(&a))
+            .callees_for_target_scoped(&CallTarget::from_symbol(&a), CallScope::All)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(a_callees.items.len(), 1);
         assert_eq!(a_callees.items[0].selection_range, b.selection_range);
         let b_callers = analyzer
-            .callers_for_target(&CallTarget::from_symbol(&b))
+            .callers_for_target_scoped(&CallTarget::from_symbol(&b), CallScope::All)
             .await
             .unwrap()
             .unwrap();
@@ -1239,7 +1511,7 @@ mod tests {
             .iter()
             .any(|target| target.selection_range == a.selection_range));
         let b_callees = analyzer
-            .callees_for_target(&a_callees.items[0])
+            .callees_for_target_scoped(&a_callees.items[0], CallScope::All)
             .await
             .unwrap()
             .unwrap();
@@ -1254,7 +1526,7 @@ mod tests {
         assert_eq!(normalized.file, PathBuf::from("src/main.rs"));
         assert_eq!(normalized.selection_range, first.selection_range);
         let callers = analyzer
-            .callers_for_target(&normalized)
+            .callers_for_target_scoped(&normalized, CallScope::All)
             .await
             .unwrap()
             .unwrap();
@@ -1263,7 +1535,11 @@ mod tests {
             .iter()
             .find(|target| target.name == "invoke_first")
             .expect("first::run should have its exact caller");
-        let followed = analyzer.callees_for_target(caller).await.unwrap().unwrap();
+        let followed = analyzer
+            .callees_for_target_scoped(caller, CallScope::All)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(followed
             .items
             .iter()
@@ -1288,8 +1564,16 @@ mod tests {
         let mut analyzer = fixture_analyzer("recursive_project").await;
         let recurse = analyzer.find_symbol("recurse").await.unwrap();
         let target = CallTarget::from_symbol(&recurse);
-        let callers = analyzer.callers_for_target(&target).await.unwrap().unwrap();
-        let callees = analyzer.callees_for_target(&target).await.unwrap().unwrap();
+        let callers = analyzer
+            .callers_for_target_scoped(&target, CallScope::All)
+            .await
+            .unwrap()
+            .unwrap();
+        let callees = analyzer
+            .callees_for_target_scoped(&target, CallScope::All)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(callers.items.iter().any(|item| item.name == "recurse"));
         assert!(callees.items.iter().any(|item| item.name == "recurse"));
         assert!(callers.items.len() <= CALL_CHILD_LIMIT);

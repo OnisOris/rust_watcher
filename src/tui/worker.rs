@@ -1,4 +1,6 @@
-use crate::model::{CallTarget, CallTargets, Diagnostic, Location, Symbol, SymbolSearchResult};
+use crate::model::{
+    CallScope, CallTarget, CallTargets, Diagnostic, Location, Symbol, SymbolSearchResult,
+};
 use crate::project::Project;
 use crate::rust::RustAnalyzer;
 use std::path::{Path, PathBuf};
@@ -7,10 +9,23 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub(super) enum AnalyzerCommand {
-    Search { id: u64, query: String },
-    Inspect { id: u64, symbol: Symbol },
-    InspectFile { id: u64, file: PathBuf },
-    LoadCalls { id: u64, target: CallTarget },
+    Search {
+        id: u64,
+        query: String,
+    },
+    Inspect {
+        id: u64,
+        symbol: Symbol,
+    },
+    InspectFile {
+        id: u64,
+        file: PathBuf,
+    },
+    LoadCalls {
+        id: u64,
+        target: CallTarget,
+        scope: CallScope,
+    },
     Shutdown,
 }
 
@@ -125,6 +140,7 @@ enum InteractiveWork {
     Calls {
         id: u64,
         target: CallTarget,
+        scope: CallScope,
         phase: CallsPhase,
     },
     File {
@@ -154,10 +170,11 @@ impl Scheduler {
             AnalyzerCommand::InspectFile { id, file } => {
                 self.work = Some(InteractiveWork::File { id, file })
             }
-            AnalyzerCommand::LoadCalls { id, target } => {
+            AnalyzerCommand::LoadCalls { id, target, scope } => {
                 self.work = Some(InteractiveWork::Calls {
                     id,
                     target,
+                    scope,
                     phase: CallsPhase::Callers,
                 })
             }
@@ -252,12 +269,18 @@ async fn run_phase(
                 .next()
                 .map(|phase| InteractiveWork::Inspect { id, symbol, phase })
         }
-        InteractiveWork::Calls { id, target, phase } => {
-            run_calls_phase(analyzer, id, &target, phase, events).await;
+        InteractiveWork::Calls {
+            id,
+            target,
+            scope,
+            phase,
+        } => {
+            run_calls_phase(analyzer, id, &target, scope, phase, events).await;
             match phase {
                 CallsPhase::Callers => Some(InteractiveWork::Calls {
                     id,
                     target,
+                    scope,
                     phase: CallsPhase::Callees,
                 }),
                 CallsPhase::Callees => None,
@@ -365,14 +388,15 @@ async fn run_calls_phase(
     analyzer: &RustAnalyzer,
     id: u64,
     target: &CallTarget,
+    scope: CallScope,
     phase: CallsPhase,
     events: &mpsc::Sender<AnalyzerEvent>,
 ) {
     let incoming = phase == CallsPhase::Callers;
     let result = if incoming {
-        analyzer.callers_for_target(target).await
+        analyzer.callers_for_target_scoped(target, scope).await
     } else {
-        analyzer.callees_for_target(target).await
+        analyzer.callees_for_target_scoped(target, scope).await
     };
     match result {
         Ok(result) if incoming => send(events, AnalyzerEvent::CallersLoaded { id, result }).await,
@@ -469,10 +493,12 @@ mod tests {
         scheduler.push(AnalyzerCommand::LoadCalls {
             id: 4,
             target: CallTarget::from_symbol(&symbol("D")),
+            scope: CallScope::Workspace,
         });
         scheduler.push(AnalyzerCommand::LoadCalls {
             id: 5,
             target: CallTarget::from_symbol(&symbol("E")),
+            scope: CallScope::All,
         });
         assert!(matches!(
             scheduler.work,

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Component;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -87,6 +88,29 @@ pub struct CallTarget {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CallScope {
+    #[default]
+    Workspace,
+    All,
+}
+
+impl CallScope {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Workspace => Self::All,
+            Self::All => Self::Workspace,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::All => "all",
+        }
+    }
+}
+
 impl CallTarget {
     pub fn from_symbol(symbol: &Symbol) -> Self {
         Self {
@@ -96,6 +120,17 @@ impl CallTarget {
             range: symbol.range,
             selection_range: symbol.selection_range,
             detail: symbol.container.clone(),
+        }
+    }
+
+    pub fn is_workspace_local(&self, workspace_root: &std::path::Path) -> bool {
+        if self.file.is_absolute() {
+            self.file.strip_prefix(workspace_root).is_ok()
+        } else {
+            !self
+                .file
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
         }
     }
 }
@@ -204,5 +239,40 @@ mod tests {
             entrypoints: Vec::new(),
         };
         assert_eq!(serde_json::to_value(summary).unwrap()["workspaceRoot"], ".");
+    }
+
+    #[test]
+    fn call_target_workspace_classification_handles_normalized_and_absolute_paths() {
+        let target = |file: &str| CallTarget {
+            name: "run".into(),
+            kind: "function".into(),
+            file: file.into(),
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 0,
+                },
+            },
+            selection_range: Range {
+                start: Position {
+                    line: 0,
+                    character: 3,
+                },
+                end: Position {
+                    line: 0,
+                    character: 6,
+                },
+            },
+            detail: None,
+        };
+        let root = std::path::Path::new("/workspace/project");
+        assert!(target("src/lib.rs").is_workspace_local(root));
+        assert!(target("/workspace/project/src/lib.rs").is_workspace_local(root));
+        assert!(!target("../outside.rs").is_workspace_local(root));
+        assert!(!target("/toolchain/library/core/src/lib.rs").is_workspace_local(root));
     }
 }
