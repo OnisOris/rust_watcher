@@ -605,6 +605,8 @@ mod tests {
     #[tokio::test]
     async fn closed_analyzer_channel_degrades_without_returning_an_error() {
         let mut app = app();
+        app.search_request = 41;
+        app.symbols_loading = true;
         let (commands, receiver) = mpsc::channel(1);
         drop(receiver);
 
