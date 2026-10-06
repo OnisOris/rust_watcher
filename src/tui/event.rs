@@ -629,6 +629,4 @@ mod tests {
             .notice
             .as_deref()
             .is_some_and(|message| message.contains("unavailable")));
-    }
-
-}
+    }}
