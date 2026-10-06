@@ -251,6 +251,18 @@ impl RustAnalyzer {
         self.document_symbols_for_files(&files).await
     }
 
+    pub async fn symbols_for_file(&self, file: &Path) -> Result<Vec<Symbol>> {
+        let mut symbols = self
+            .document_symbols_for_files(std::slice::from_ref(&file.to_path_buf()))
+            .await?;
+        symbols.sort_by(|a, b| {
+            a.selection_range
+                .cmp(&b.selection_range)
+                .then(a.name.cmp(&b.name))
+        });
+        Ok(symbols)
+    }
+
     async fn document_symbols_for_files(&self, files: &[PathBuf]) -> Result<Vec<Symbol>> {
         let mut result = Vec::new();
         for file in files {
@@ -1282,6 +1294,27 @@ mod tests {
         assert!(callees.items.iter().any(|item| item.name == "recurse"));
         assert!(callers.items.len() <= CALL_CHILD_LIMIT);
         assert!(callees.items.len() <= CALL_CHILD_LIMIT);
+        analyzer.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn file_symbols_are_exact_and_scoped_to_one_file() {
+        if !require_analyzer() {
+            return;
+        }
+        let mut analyzer = fixture_analyzer("simple_project").await;
+        let symbols = analyzer
+            .symbols_for_file(Path::new("src/main.rs"))
+            .await
+            .unwrap();
+        assert!(symbols.iter().any(|symbol| symbol.name == "chain_a"));
+        assert!(!symbols.iter().any(|symbol| symbol.name == "other_only"));
+        assert!(symbols
+            .windows(2)
+            .all(|pair| pair[0].selection_range <= pair[1].selection_range));
+        assert!(symbols
+            .iter()
+            .all(|symbol| symbol.file == Path::new("src/main.rs")));
         analyzer.shutdown().await;
     }
 }

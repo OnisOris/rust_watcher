@@ -1,7 +1,9 @@
 use super::app::{
     project_name, qualified_symbol, AnalyzerState, App, Inspector, Overlay, Pane, View,
 };
+use super::explorer::{file_role, package_for_file, ExplorerRightMode};
 use crate::model::CallTarget;
+use crate::repository::RepoEntryKind;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -37,6 +39,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         View::Overview => render_overview(frame, rows[1], app),
         View::Symbols => render_symbols_view(frame, rows[1], app),
         View::Calls => render_calls_view(frame, rows[1], app),
+        View::Explorer => render_explorer_view(frame, rows[1], app),
     }
     frame.render_widget(
         Paragraph::new(footer_text(app))
@@ -109,6 +112,20 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 idle
             },
         ),
+        Span::raw(" "),
+        Span::raw(if app.view == View::Explorer {
+            "▶"
+        } else {
+            " "
+        }),
+        Span::styled(
+            "[4 Explorer]",
+            if app.view == View::Explorer {
+                active
+            } else {
+                idle
+            },
+        ),
         Span::raw("  "),
         Span::styled(format!("RA {status}"), Style::default().fg(color)),
     ]);
@@ -157,6 +174,239 @@ fn render_calls_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
     render_call_list(frame, panes[0], app, true);
     render_call_current(frame, panes[1], app);
     render_call_list(frame, panes[2], app, false);
+}
+
+fn render_explorer_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(area);
+    render_explorer_tree(frame, panes[0], app);
+    if app.explorer.right_mode == ExplorerRightMode::Inspector {
+        render_inspector_block(frame, panes[1], app, app.pane == Pane::ExplorerFile);
+    } else {
+        render_explorer_file(frame, panes[1], app);
+    }
+}
+
+fn render_explorer_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let title = match &app.explorer.tree {
+        Some(tree) if tree.truncated => " PROJECT TREE · truncated ".to_owned(),
+        Some(tree) if tree.skipped_errors > 0 => {
+            format!(" PROJECT TREE · {} skipped ", tree.skipped_errors)
+        }
+        _ if app.explorer.loading => " PROJECT TREE · scanning… ".to_owned(),
+        _ => " PROJECT TREE ".to_owned(),
+    };
+    if let Some(error) = &app.explorer.error {
+        frame.render_widget(
+            Paragraph::new(format!("Repository scan failed\n\n{error}"))
+                .wrap(Wrap { trim: false })
+                .block(pane_block(&title, app.pane == Pane::ExplorerTree)),
+            area,
+        );
+        return;
+    }
+    let workspace = project_name(&app.project);
+    let rows: Vec<_> = app
+        .explorer
+        .visible_entries()
+        .into_iter()
+        .map(|entry| {
+            let indent = "  ".repeat(entry.depth);
+            let name = if entry.path.as_os_str().is_empty() {
+                workspace.to_owned()
+            } else {
+                entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("?")
+                    .to_owned()
+            };
+            let marker = match entry.kind {
+                RepoEntryKind::Directory if entry.path.as_os_str().is_empty() => "▼ ",
+                RepoEntryKind::Directory if app.explorer.expanded.contains(&entry.path) => "▼ ",
+                RepoEntryKind::Directory => "▶ ",
+                RepoEntryKind::Symlink => "@ ",
+                RepoEntryKind::File => "  ",
+            };
+            let role = file_role(&app.project, &entry.path)
+                .map(|role| format!(" [{role}]"))
+                .unwrap_or_default();
+            let line = format!("{indent}{marker}{name}{role}");
+            ListItem::new(if entry.kind == RepoEntryKind::Directory {
+                Line::styled(line, Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                Line::raw(line)
+            })
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(app.explorer.selected));
+    frame.render_stateful_widget(
+        List::new(rows)
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().fg(Color::Cyan))
+            .block(pane_block(&title, app.pane == Pane::ExplorerTree)),
+        area,
+        &mut state,
+    );
+}
+
+fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let active = app.pane == Pane::ExplorerFile;
+    let Some(file) = &app.explorer.file else {
+        let selected = app.explorer.selected_entry();
+        let text = selected.map_or_else(
+            || {
+                vec![
+                    heading("Repository"),
+                    Line::raw(""),
+                    Line::raw("Scanning repository…"),
+                ]
+            },
+            |entry| {
+                if entry.kind == RepoEntryKind::Directory {
+                    let (directories, files) = app
+                        .explorer
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            tree.children(&entry.path).into_iter().fold(
+                                (0, 0),
+                                |(directories, files), child| {
+                                    if child.kind == RepoEntryKind::Directory {
+                                        (directories + 1, files)
+                                    } else {
+                                        (directories, files + 1)
+                                    }
+                                },
+                            )
+                        })
+                        .unwrap_or_default();
+                    vec![
+                        heading("Directory"),
+                        Line::raw(""),
+                        Line::raw(if entry.path.as_os_str().is_empty() {
+                            ".".into()
+                        } else {
+                            entry.path.display().to_string()
+                        }),
+                        Line::raw(""),
+                        Line::raw(format!("directories   {directories}")),
+                        Line::raw(format!("files         {files}")),
+                    ]
+                } else {
+                    vec![heading("Select a file and press Enter")]
+                }
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(text).block(pane_block(" FILE ", active)),
+            area,
+        );
+        return;
+    };
+
+    let details_height = 9;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(details_height), Constraint::Min(3)])
+        .split(area);
+    let package = package_for_file(&app.project, &file.path)
+        .map(|package| package.name.as_str())
+        .unwrap_or("—");
+    let role = file_role(&app.project, &file.path).unwrap_or("file");
+    frame.render_widget(
+        Paragraph::new(vec![
+            heading(&file.path.display().to_string()),
+            Line::raw(""),
+            Line::raw(format!("type      {}", file_type(&file.path))),
+            Line::raw(format!("size      {}", format_size(file.size))),
+            Line::raw(format!("package   {package}")),
+            Line::raw(format!("role      {role}")),
+        ])
+        .block(pane_block(" FILE ", active)),
+        rows[0],
+    );
+    if file
+        .path
+        .extension()
+        .is_none_or(|extension| extension != "rs")
+    {
+        frame.render_widget(
+            Paragraph::new("Semantic symbols unavailable for this file type")
+                .wrap(Wrap { trim: false })
+                .block(Block::default().title(" SYMBOLS ").borders(Borders::ALL)),
+            rows[1],
+        );
+        return;
+    }
+    if let Some(error) = &file.error {
+        frame.render_widget(
+            Paragraph::new(format!("error: {error}"))
+                .wrap(Wrap { trim: false })
+                .block(Block::default().title(" SYMBOLS ").borders(Borders::ALL)),
+            rows[1],
+        );
+        return;
+    }
+    if file.loading {
+        frame.render_widget(
+            Paragraph::new("Loading file symbols…")
+                .block(Block::default().title(" SYMBOLS ").borders(Borders::ALL)),
+            rows[1],
+        );
+        return;
+    }
+    let symbols: Vec<_> = file
+        .symbols
+        .iter()
+        .map(|symbol| {
+            ListItem::new(format!(
+                "{:<10} {}",
+                truncate(&symbol.kind, 10),
+                qualified_symbol(symbol)
+            ))
+        })
+        .collect();
+    let title = if file.truncated {
+        " SYMBOLS · first 200 "
+    } else if file.symbols.is_empty() {
+        " NO SYMBOLS "
+    } else {
+        " SYMBOLS "
+    };
+    let mut state =
+        ListState::default().with_selected((!file.symbols.is_empty()).then_some(file.selection));
+    frame.render_stateful_widget(
+        List::new(symbols)
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().fg(Color::Cyan))
+            .block(Block::default().title(title).borders(Borders::ALL)),
+        rows[1],
+        &mut state,
+    );
+}
+
+fn file_type(path: &std::path::Path) -> String {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("rs") => "Rust source".into(),
+        Some("toml") => "TOML".into(),
+        Some("md") => "Markdown".into(),
+        Some("yaml" | "yml") => "YAML".into(),
+        Some("json") => "JSON".into(),
+        Some(extension) => format!("{extension} file"),
+        None => "file".into(),
+    }
+}
+
+fn format_size(size: Option<u64>) -> String {
+    match size {
+        Some(size) if size >= 1024 => format!("{:.1} KiB", size as f64 / 1024.0),
+        Some(size) => format!("{size} B"),
+        None => "—".into(),
+    }
 }
 
 fn render_call_list(frame: &mut Frame<'_>, area: Rect, app: &App, incoming: bool) {
@@ -469,7 +719,10 @@ fn render_symbols(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let active = app.pane == Pane::Inspector;
+    render_inspector_block(frame, area, app, app.pane == Pane::Inspector);
+}
+
+fn render_inspector_block(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool) {
     let (text, scroll) = app.inspector.as_ref().map_or_else(
         || {
             (
@@ -571,22 +824,36 @@ fn footer_text(app: &App) -> &'static str {
     match app.overlay {
         Overlay::Search => "type search   ↑/↓ or Ctrl+j/k results   Enter inspect   Esc close",
         Overlay::Help => "Esc / ? close help",
+        Overlay::None
+            if app.pane == Pane::ExplorerFile
+                && app.explorer.right_mode == ExplorerRightMode::Inspector =>
+        {
+            "j/k scroll   c calls   Ctrl+h tree   Esc file   1/2/3/4 views   q quit"
+        }
+        Overlay::None if app.pane == Pane::ExplorerFile => {
+            "j/k move   Enter inspect   Ctrl+h tree   Esc back   1/2/3/4 views   q quit"
+        }
+        Overlay::None if app.pane == Pane::ExplorerTree => {
+            "j/k move   h/l collapse/expand   Enter open   Ctrl+l file   1/2/3/4 views   q quit"
+        }
         Overlay::None if app.pane == Pane::Inspector => {
-            "j/k scroll   c calls   Ctrl+h symbols   Esc back   1/2/3 views   q quit"
+            "j/k scroll   c calls   Ctrl+h symbols   Esc back   1/2/3/4 views   q quit"
         }
         Overlay::None if app.pane == Pane::Symbols => {
-            "j/k move   Enter inspect   c calls   / search   Ctrl+l inspector   1/2/3 views   q quit"
+            "j/k move   Enter inspect   c calls   / search   Ctrl+l inspector   1/2/3/4 views   q quit"
         }
         Overlay::None if app.pane == Pane::Callers => {
-            "j/k move   Enter follow   Ctrl+l current   Esc center   1/2/3 views   q quit"
+            "j/k move   Enter follow   Ctrl+l current   Esc center   1/2/3/4 views   q quit"
         }
         Overlay::None if app.pane == Pane::CallCurrent => {
-            "Ctrl+h callers   Ctrl+l callees   Esc back   1/2/3 views   q quit"
+            "Ctrl+h callers   Ctrl+l callees   Esc back   1/2/3/4 views   q quit"
         }
         Overlay::None if app.pane == Pane::Callees => {
-            "j/k move   Enter follow   Ctrl+h current   Esc center   1/2/3 views   q quit"
+            "j/k move   Enter follow   Ctrl+h current   Esc center   1/2/3/4 views   q quit"
         }
-        Overlay::None => "1 Overview   2 Symbols   3 Calls   / search   Ctrl+h/l panes   q quit",
+        Overlay::None => {
+            "1 Overview   2 Symbols   3 Calls   4 Explorer   / search   Ctrl+h/l panes   q quit"
+        }
     }
 }
 
@@ -595,7 +862,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(
-            "Views\n\n  1              Overview\n  2              Symbols\n  3              Calls\n\nNavigation\n\n  j / ↓          move or scroll down\n  k / ↑          move or scroll up\n  Ctrl+h/l       focus left/right\n  Tab            next pane\n  Shift+Tab      previous pane\n\nActions\n\n  Enter          inspect / follow call\n  c              calls for inspected symbol\n  Esc            back / call history back\n  /              search\n  ?              close help\n  q / Ctrl+C     quit",
+            "Views\n\n  1              Overview\n  2              Symbols\n  3              Calls\n  4              Explorer\n\nNavigation\n\n  j / k          move or scroll\n  Ctrl+h/l       focus left/right\n  Tab / Shift+Tab next / previous pane\n\nExplorer\n\n  j / k          move\n  h / l          collapse / expand\n  Enter          open directory / file / symbol\n\nActions\n\n  c              calls for inspected symbol\n  Esc            back\n  /              search\n  ?              close help\n  q / Ctrl+C     quit",
         )
         .block(Block::default().title(" Help ").borders(Borders::ALL)),
         popup,
@@ -710,7 +977,8 @@ fn truncate(value: &str, maximum: usize) -> String {
 mod tests {
     use super::*;
     use crate::model::{Location, Position, Range, Symbol};
-    use crate::project::Project;
+    use crate::project::{Package, Project, Target};
+    use crate::repository::{RepoEntry, RepoEntryKind, RepositoryTree};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -844,6 +1112,133 @@ mod tests {
         app
     }
 
+    fn explorer_symbol(name: &str, kind: &str, line: u32, container: Option<&str>) -> Symbol {
+        Symbol {
+            id: format!("worker-{line}-{name}"),
+            name: name.into(),
+            kind: kind.into(),
+            file: "src/tui/worker.rs".into(),
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position {
+                    line: line + 3,
+                    character: 1,
+                },
+            },
+            selection_range: Range {
+                start: Position { line, character: 4 },
+                end: Position {
+                    line,
+                    character: 4 + name.len() as u32,
+                },
+            },
+            container: container.map(str::to_owned),
+        }
+    }
+
+    fn explorer_app() -> App {
+        let project = Project {
+            workspace_root: "/workspace/rust_watcher".into(),
+            packages: vec![Package {
+                name: "rust_watcher".into(),
+                manifest_path: "/workspace/rust_watcher/Cargo.toml".into(),
+                targets: vec![Target {
+                    name: "wt".into(),
+                    crate_root: "/workspace/rust_watcher/src/main.rs".into(),
+                    kinds: vec!["bin".into()],
+                }],
+                dependencies: Vec::new(),
+            }],
+            rust_files: Vec::new(),
+        };
+        let mut app = App::new(project);
+        app.analyzer_state = AnalyzerState::Ready;
+        app.explorer.apply_tree(RepositoryTree {
+            entries: vec![
+                RepoEntry {
+                    path: ".github".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: ".github/workflows".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: ".github/workflows/ci.yml".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(300),
+                },
+                RepoEntry {
+                    path: "src".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "src/main.rs".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(9000),
+                },
+                RepoEntry {
+                    path: "src/tui".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "src/tui/app.rs".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(22000),
+                },
+                RepoEntry {
+                    path: "src/tui/worker.rs".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(14000),
+                },
+                RepoEntry {
+                    path: "tests".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "Cargo.toml".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(800),
+                },
+                RepoEntry {
+                    path: "README.md".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(7000),
+                },
+            ],
+            truncated: false,
+            skipped_errors: 0,
+        });
+        app.explorer.expanded.insert("src".into());
+        app.explorer.expanded.insert("src/tui".into());
+        app.explorer.selected = app
+            .explorer
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.path == std::path::Path::new("src/tui/worker.rs"))
+            .unwrap();
+        let (id, file) = app.explorer.open_selected().unwrap();
+        app.explorer.apply_file_symbols(
+            id,
+            &file,
+            vec![
+                explorer_symbol("AnalyzerCommand", "enum", 8, None),
+                explorer_symbol("AnalyzerEvent", "enum", 20, None),
+                explorer_symbol("Scheduler", "struct", 100, None),
+                explorer_symbol("push", "method", 110, Some("Scheduler")),
+                explorer_symbol("analyzer_worker", "function", 160, None),
+                explorer_symbol("run_phase", "function", 220, None),
+            ],
+        );
+        app.switch_view(View::Explorer);
+        app
+    }
+
     #[test]
     fn symbols_and_inspector_render_targeted_content() {
         let text = render_text(&inspected_app());
@@ -932,6 +1327,53 @@ mod tests {
     }
 
     #[test]
+    fn explorer_renders_tree_file_symbols_non_rust_and_truncation() {
+        let mut app = explorer_app();
+        app.pane = Pane::ExplorerFile;
+        let populated = render_text(&app);
+        for expected in [
+            "PROJECT TREE",
+            "FILE",
+            "src",
+            "worker.rs",
+            "Cargo.toml",
+            "AnalyzerCommand",
+            "AnalyzerEvent",
+            "Scheduler",
+            "analyzer_worker",
+            "run_phase",
+        ] {
+            assert!(populated.contains(expected), "missing {expected}");
+        }
+
+        app.explorer.tree.as_mut().unwrap().truncated = true;
+        assert!(render_text(&app).contains("truncated"));
+        app.explorer.selected = app
+            .explorer
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.path == std::path::Path::new("README.md"))
+            .unwrap();
+        assert!(app.explorer.open_selected().is_none());
+        assert!(render_text(&app).contains("Semantic symbols unavailable"));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn explorer_tree_remains_available_when_analyzer_failed() {
+        let mut app = explorer_app();
+        app.analyzer_state = AnalyzerState::Error("rust-analyzer unavailable".into());
+        app.pane = Pane::ExplorerTree;
+        let rendered = render_text(&app);
+        assert!(matches!(app.analyzer_state, AnalyzerState::Error(_)));
+        assert!(rendered.contains("PROJECT TREE"));
+        assert!(rendered.contains("worker.rs"));
+    }
+
+    #[test]
     fn exports_symbols_review_frames_when_requested() {
         let Some(directory) = std::env::var_os("WT_TUI_REVIEW_DIR") else {
             return;
@@ -976,6 +1418,43 @@ mod tests {
         std::fs::write(
             directory.join("11-calls-follow-callee.txt"),
             render_text(&callee),
+        )
+        .unwrap();
+
+        let mut explorer = explorer_app();
+        explorer.pane = Pane::ExplorerTree;
+        std::fs::write(
+            directory.join("12-explorer-tree.txt"),
+            render_text(&explorer),
+        )
+        .unwrap();
+        explorer.pane = Pane::ExplorerFile;
+        std::fs::write(
+            directory.join("13-explorer-file-symbols.txt"),
+            render_text(&explorer),
+        )
+        .unwrap();
+        explorer.explorer.file.as_mut().unwrap().selection = 2;
+        let (_, selected) = explorer.begin_explorer_symbol_inspect().unwrap();
+        explorer.inspector = Some(Inspector {
+            request_id: explorer.inspect_request,
+            symbol: selected,
+            source: Some(
+                "> 101 | struct Scheduler {\n  102 |     work: Option<InteractiveWork>,\n  103 | }"
+                    .into(),
+            ),
+            hover: Some(Some("struct Scheduler".into())),
+            definition: Some(None),
+            references: Some(4),
+            callers: Some(0),
+            callees: Some(0),
+            diagnostics: Some(0),
+            errors: Vec::new(),
+            scroll: 0,
+        });
+        std::fs::write(
+            directory.join("14-explorer-inspector.txt"),
+            render_text(&explorer),
         )
         .unwrap();
     }

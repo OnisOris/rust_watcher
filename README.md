@@ -48,7 +48,7 @@ Open another checkout:
 wt /path/to/project
 ```
 
-The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. The three persistent views are `1 Overview`, `2 Symbols`, and `3 Calls`. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact inspected symbol:
+The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. The four persistent views are `1 Overview`, `2 Symbols`, `3 Calls`, and `4 Explorer`. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact inspected symbol:
 
 ```text
 2
@@ -58,6 +58,19 @@ c
 ```
 
 Calls shows immediate `CALLERS | CURRENT | CALLEES`. Use `Ctrl+h/l` to move spatially without wrapping, `Tab`/`Shift+Tab` to cycle panes, and `j`/`k` to select a caller or callee. Enter follows the selected semantic target immediately, while its two one-hop lists load progressively. `Esc` from a side pane returns to CURRENT; from CURRENT it walks back through up to 50 visited targets, then returns to Symbols. Each side is deterministically sorted, deduplicated, limited to 20 entries, and labels truncated results. Navigation uses rust-analyzer locations rather than resolving repeated names again.
+
+Explorer is a read-only, gitignore-aware physical repository tree that remains usable if rust-analyzer fails. Press `4`, navigate with `j`/`k`, expand or collapse directories with `l`/`h` (or the arrow keys), and press Enter on a file. Non-Rust files show metadata; Rust files load document symbols for that file only. Select a symbol and press Enter to reuse the Inspector, then press `c` to open Calls for that exact symbol:
+
+```text
+4
+j / k / h / l
+Enter        # open a Rust file
+j / k
+Enter        # inspect the selected file symbol
+c            # open Calls
+```
+
+The tree includes useful dotfiles, honors `.gitignore`, never follows symlinks, and always omits `.git`, `target`, `node_modules`, `.next`, `.cache`, and `dist`. Its background scan is capped at 50,000 entries and reports truncation or skipped filesystem entries in the Explorer title. `Ctrl+h/l` moves between TREE and FILE; `Esc` returns from the Explorer Inspector to file symbols. Explorer expansion, selection, and loaded file symbols survive view switches.
 
 In every view, press `?` for help and `q` or `Ctrl+C` to quit. One rust-analyzer process serves search, Inspector, and Calls for the entire UI session. Interactive work is scheduled between semantic phases, so a newer inspection or Calls target replaces stale remaining work and search does not wait for a complete old Inspector pipeline.
 
@@ -147,6 +160,8 @@ Small normalized Rust structures
 Terminal or JSON output
 ```
 
+The interactive UI also starts one independent, language-neutral repository metadata scan after its first frame. That scan feeds Explorer without coupling filesystem traversal to rust-analyzer or semantic output.
+
 The implementation is one binary crate:
 
 - `cli.rs` defines arguments and commands.
@@ -155,6 +170,7 @@ The implementation is one binary crate:
 - `rust.rs` implements semantic operations over rust-analyzer responses.
 - `model.rs` contains transport-neutral result structures.
 - `output.rs` renders those structures.
+- `repository.rs` builds the bounded, gitignore-aware physical repository tree.
 - `tui/` separates interactive state, terminal events, rendering, and the single-session analyzer worker.
 
 Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.

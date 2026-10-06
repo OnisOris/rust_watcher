@@ -1,7 +1,7 @@
 use crate::model::{CallTarget, CallTargets, Diagnostic, Location, Symbol, SymbolSearchResult};
 use crate::project::Project;
 use crate::rust::RustAnalyzer;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 pub(super) enum AnalyzerCommand {
     Search { id: u64, query: String },
     Inspect { id: u64, symbol: Symbol },
+    InspectFile { id: u64, file: PathBuf },
     LoadCalls { id: u64, target: CallTarget },
     Shutdown,
 }
@@ -71,6 +72,16 @@ pub(super) enum AnalyzerEvent {
         incoming: bool,
         message: String,
     },
+    FileSymbols {
+        id: u64,
+        file: PathBuf,
+        symbols: Vec<Symbol>,
+    },
+    FileSymbolsFailed {
+        id: u64,
+        file: PathBuf,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +127,10 @@ enum InteractiveWork {
         target: CallTarget,
         phase: CallsPhase,
     },
+    File {
+        id: u64,
+        file: PathBuf,
+    },
 }
 
 #[derive(Default)]
@@ -135,6 +150,9 @@ impl Scheduler {
                     symbol,
                     phase: InspectPhase::Source,
                 })
+            }
+            AnalyzerCommand::InspectFile { id, file } => {
+                self.work = Some(InteractiveWork::File { id, file })
             }
             AnalyzerCommand::LoadCalls { id, target } => {
                 self.work = Some(InteractiveWork::Calls {
@@ -244,6 +262,23 @@ async fn run_phase(
                 }),
                 CallsPhase::Callees => None,
             }
+        }
+        InteractiveWork::File { id, file } => {
+            match analyzer.symbols_for_file(&file).await {
+                Ok(symbols) => send(events, AnalyzerEvent::FileSymbols { id, file, symbols }).await,
+                Err(error) => {
+                    send(
+                        events,
+                        AnalyzerEvent::FileSymbolsFailed {
+                            id,
+                            file,
+                            message: format!("{error:#}"),
+                        },
+                    )
+                    .await
+                }
+            }
+            None
         }
     }
 }
@@ -442,6 +477,18 @@ mod tests {
         assert!(matches!(
             scheduler.work,
             Some(InteractiveWork::Calls { id: 5, .. })
+        ));
+        scheduler.push(AnalyzerCommand::InspectFile {
+            id: 6,
+            file: "src/app.rs".into(),
+        });
+        scheduler.push(AnalyzerCommand::InspectFile {
+            id: 7,
+            file: "src/worker.rs".into(),
+        });
+        assert!(matches!(
+            scheduler.work,
+            Some(InteractiveWork::File { id: 7, .. })
         ));
         scheduler.push(AnalyzerCommand::Shutdown);
         assert!(scheduler.shutdown);

@@ -3,6 +3,7 @@ mod lsp;
 mod model;
 mod output;
 mod project;
+mod repository;
 mod rust;
 mod tui;
 

@@ -1,3 +1,4 @@
+use super::explorer::{ExplorerRightMode, ExplorerState};
 use super::worker::AnalyzerEvent;
 use crate::model::{CallTarget, CallTargets, Location, Symbol};
 use crate::project::Project;
@@ -16,6 +17,7 @@ pub(super) enum View {
     Overview,
     Symbols,
     Calls,
+    Explorer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,8 @@ pub(super) enum Pane {
     Callers,
     CallCurrent,
     Callees,
+    ExplorerTree,
+    ExplorerFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,11 +134,13 @@ pub(super) struct App {
     pub inspector: Option<Inspector>,
     pub inspect_request: u64,
     pub calls: CallsState,
+    pub explorer: ExplorerState,
     pub notice: Option<String>,
 }
 
 impl App {
     pub(super) fn new(project: Project) -> Self {
+        let explorer = ExplorerState::new(&project);
         Self {
             project,
             analyzer_state: AnalyzerState::Starting,
@@ -152,6 +158,7 @@ impl App {
             inspector: None,
             inspect_request: 0,
             calls: CallsState::default(),
+            explorer,
             notice: None,
         }
     }
@@ -167,6 +174,7 @@ impl App {
             View::Overview => Pane::Project,
             View::Symbols => Pane::Symbols,
             View::Calls => Pane::CallCurrent,
+            View::Explorer => Pane::ExplorerTree,
         };
     }
 
@@ -204,6 +212,16 @@ impl App {
                     delta,
                 );
             }
+            Pane::ExplorerTree => self.explorer.move_tree_selection(delta),
+            Pane::ExplorerFile => {
+                if self.explorer.right_mode == ExplorerRightMode::Inspector {
+                    if let Some(inspector) = &mut self.inspector {
+                        inspector.scroll_by(delta);
+                    }
+                } else {
+                    self.explorer.move_file_selection(delta);
+                }
+            }
             Pane::Details | Pane::CallCurrent => {}
         }
     }
@@ -217,6 +235,8 @@ impl App {
             (View::Calls, Pane::Callers) => Pane::CallCurrent,
             (View::Calls, Pane::CallCurrent) => Pane::Callees,
             (View::Calls, Pane::Callees) => Pane::Callers,
+            (View::Explorer, Pane::ExplorerTree) => Pane::ExplorerFile,
+            (View::Explorer, Pane::ExplorerFile) => Pane::ExplorerTree,
             (_, pane) => pane,
         };
     }
@@ -230,6 +250,8 @@ impl App {
             (View::Calls, Pane::Callers) => Pane::Callees,
             (View::Calls, Pane::CallCurrent) => Pane::Callers,
             (View::Calls, Pane::Callees) => Pane::CallCurrent,
+            (View::Explorer, Pane::ExplorerTree) => Pane::ExplorerFile,
+            (View::Explorer, Pane::ExplorerFile) => Pane::ExplorerTree,
             (_, pane) => pane,
         };
     }
@@ -244,6 +266,8 @@ impl App {
             (View::Calls, Pane::CallCurrent, FocusDirection::Left) => Pane::Callers,
             (View::Calls, Pane::CallCurrent, FocusDirection::Right) => Pane::Callees,
             (View::Calls, Pane::Callees, FocusDirection::Left) => Pane::CallCurrent,
+            (View::Explorer, Pane::ExplorerTree, FocusDirection::Right) => Pane::ExplorerFile,
+            (View::Explorer, Pane::ExplorerFile, FocusDirection::Left) => Pane::ExplorerTree,
             _ => self.pane,
         };
     }
@@ -251,6 +275,13 @@ impl App {
     pub(super) fn escape(&mut self) -> Option<(u64, CallTarget)> {
         match self.overlay {
             Overlay::Help | Overlay::Search => self.overlay = Overlay::None,
+            Overlay::None
+                if self.view == View::Explorer
+                    && self.explorer.right_mode == ExplorerRightMode::Inspector =>
+            {
+                self.explorer.right_mode = ExplorerRightMode::File;
+                self.pane = Pane::ExplorerFile;
+            }
             Overlay::None if self.pane == Pane::Details => self.pane = Pane::Project,
             Overlay::None if self.pane == Pane::Inspector => self.pane = Pane::Symbols,
             Overlay::None if matches!(self.pane, Pane::Callers | Pane::Callees) => {
@@ -308,6 +339,10 @@ impl App {
             View::Overview => Pane::Details,
             View::Symbols => Pane::Inspector,
             View::Calls => Pane::CallCurrent,
+            View::Explorer => {
+                self.explorer.right_mode = ExplorerRightMode::Inspector;
+                Pane::ExplorerFile
+            }
         };
         Some((id, symbol))
     }
@@ -317,6 +352,16 @@ impl App {
         let target = CallTarget::from_symbol(&self.inspector.as_ref()?.symbol);
         self.calls.history.clear();
         Some(self.load_calls(target, false))
+    }
+
+    pub(super) fn begin_explorer_symbol_inspect(&mut self) -> Option<(u64, Symbol)> {
+        let symbol = self.explorer.selected_symbol()?;
+        self.inspect_request += 1;
+        let id = self.inspect_request;
+        self.inspector = Some(Inspector::loading(id, symbol.clone()));
+        self.explorer.right_mode = ExplorerRightMode::Inspector;
+        self.pane = Pane::ExplorerFile;
+        Some((id, symbol))
     }
 
     pub(super) fn follow_selected_call(&mut self) -> Option<(u64, CallTarget)> {
@@ -417,6 +462,12 @@ impl App {
                     self.calls.callees_error = Some(message);
                 }
             }
+            AnalyzerEvent::FileSymbols { id, file, symbols } => {
+                self.explorer.apply_file_symbols(id, &file, symbols);
+            }
+            AnalyzerEvent::FileSymbolsFailed { id, file, message } => {
+                self.explorer.fail_file(id, &file, message)
+            }
             AnalyzerEvent::InspectFailed {
                 id,
                 section,
@@ -494,6 +545,7 @@ mod tests {
     use super::*;
     use crate::model::{Position, Range, SymbolSearchResult};
     use crate::project::{Package, Target};
+    use crate::repository::{RepoEntry, RepoEntryKind, RepositoryTree};
 
     pub(super) fn project() -> Project {
         Project {
@@ -550,6 +602,30 @@ mod tests {
         CallTarget::from_symbol(&symbol)
     }
 
+    fn repository_tree() -> RepositoryTree {
+        RepositoryTree {
+            entries: vec![
+                RepoEntry {
+                    path: "src".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "src/tui".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "src/tui/worker.rs".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(100),
+                },
+            ],
+            truncated: false,
+            skipped_errors: 0,
+        }
+    }
+
     #[test]
     fn views_and_spatial_navigation_are_explicit() {
         let mut app = App::new(project());
@@ -597,6 +673,21 @@ mod tests {
         assert_eq!(app.pane, Pane::Callers);
         app.previous_pane();
         assert_eq!(app.pane, Pane::Callees);
+
+        app.switch_view(View::Explorer);
+        assert_eq!(app.pane, Pane::ExplorerTree);
+        app.focus_direction(FocusDirection::Right);
+        assert_eq!(app.pane, Pane::ExplorerFile);
+        app.focus_direction(FocusDirection::Right);
+        assert_eq!(app.pane, Pane::ExplorerFile);
+        app.focus_direction(FocusDirection::Left);
+        assert_eq!(app.pane, Pane::ExplorerTree);
+        app.next_pane();
+        assert_eq!(app.pane, Pane::ExplorerFile);
+        app.next_pane();
+        assert_eq!(app.pane, Pane::ExplorerTree);
+        app.previous_pane();
+        assert_eq!(app.pane, Pane::ExplorerFile);
     }
 
     #[test]
@@ -729,5 +820,56 @@ mod tests {
         }
         assert_eq!(app.calls.history.len(), CALL_HISTORY_LIMIT);
         assert_eq!(app.calls.history[0].name, "target_1");
+    }
+
+    #[test]
+    fn explorer_state_persists_and_file_events_and_inspector_are_exact() {
+        let mut app = App::new(project());
+        app.explorer.apply_tree(repository_tree());
+        app.switch_view(View::Explorer);
+        assert_eq!(app.pane, Pane::ExplorerTree);
+        assert!(app.explorer.expanded.contains(std::path::Path::new("src")));
+        app.explorer.expanded.insert("src/tui".into());
+        app.explorer.selected = app
+            .explorer
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.path == std::path::Path::new("src/tui/worker.rs"))
+            .unwrap();
+        let (id, file) = app.explorer.open_selected().unwrap();
+        let mut exact = symbol("Scheduler");
+        exact.file = file.clone();
+        exact.selection_range.start.line = 77;
+        exact.selection_range.end.line = 77;
+        app.apply_event(AnalyzerEvent::FileSymbols {
+            id: id.saturating_sub(1),
+            file: file.clone(),
+            symbols: vec![symbol("stale")],
+        });
+        assert!(app.explorer.file.as_ref().unwrap().symbols.is_empty());
+        app.apply_event(AnalyzerEvent::FileSymbols {
+            id,
+            file,
+            symbols: vec![exact.clone()],
+        });
+        let (_, inspected) = app.begin_explorer_symbol_inspect().unwrap();
+        assert_eq!(inspected.selection_range, exact.selection_range);
+        assert_eq!(app.inspector.as_ref().unwrap().symbol, exact);
+        assert_eq!(app.explorer.right_mode, ExplorerRightMode::Inspector);
+        app.pane = Pane::ExplorerTree;
+        assert!(app.escape().is_none());
+        assert_eq!(app.explorer.right_mode, ExplorerRightMode::File);
+        assert_eq!(app.pane, Pane::ExplorerFile);
+
+        app.switch_view(View::Symbols);
+        app.switch_view(View::Explorer);
+        assert!(app
+            .explorer
+            .expanded
+            .contains(std::path::Path::new("src/tui")));
+        assert_eq!(
+            app.explorer.file.as_ref().unwrap().path,
+            std::path::Path::new("src/tui/worker.rs")
+        );
     }
 }

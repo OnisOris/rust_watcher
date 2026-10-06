@@ -1,4 +1,5 @@
-use super::app::{App, FocusDirection, Overlay, View};
+use super::app::{App, FocusDirection, Overlay, Pane, View};
+use super::explorer::ExplorerRightMode;
 use super::ui;
 use super::worker::{AnalyzerCommand, AnalyzerEvent};
 use anyhow::Result;
@@ -21,8 +22,10 @@ pub(super) async fn run_loop(
     app: &mut App,
     commands: &mpsc::Sender<AnalyzerCommand>,
     events: &mut mpsc::Receiver<AnalyzerEvent>,
+    repository: &mut mpsc::Receiver<std::result::Result<crate::repository::RepositoryTree, String>>,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(50));
+    let mut repository_open = true;
     loop {
         tokio::select! {
             event = events.recv() => {
@@ -30,6 +33,15 @@ pub(super) async fn run_loop(
                     app.apply_event(event);
                     terminal.draw(app)?;
                 }
+            }
+            result = repository.recv(), if repository_open => {
+                repository_open = false;
+                match result {
+                    Some(Ok(tree)) => app.explorer.apply_tree(tree),
+                    Some(Err(message)) => app.explorer.fail(message),
+                    None => app.explorer.fail("repository scanner stopped".into()),
+                }
+                terminal.draw(app)?;
             }
             _ = tick.tick() => {
                 while event::poll(Duration::ZERO)? {
@@ -115,7 +127,14 @@ pub(super) async fn handle_key(
             KeyCode::Char('1') => app.switch_view(View::Overview),
             KeyCode::Char('2') => app.switch_view(View::Symbols),
             KeyCode::Char('3') => open_calls(app, commands).await?,
-            KeyCode::Char('c') if app.view == View::Symbols => open_calls(app, commands).await?,
+            KeyCode::Char('4') => app.switch_view(View::Explorer),
+            KeyCode::Char('c')
+                if app.view == View::Symbols
+                    || (app.view == View::Explorer
+                        && app.explorer.right_mode == ExplorerRightMode::Inspector) =>
+            {
+                open_calls(app, commands).await?
+            }
             KeyCode::Char('?') => app.overlay = Overlay::Help,
             KeyCode::Char('/') => app.open_search(),
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -130,6 +149,16 @@ pub(super) async fn handle_key(
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.focus_direction(FocusDirection::Right)
             }
+            KeyCode::Left | KeyCode::Char('h')
+                if app.view == View::Explorer && app.pane == Pane::ExplorerTree =>
+            {
+                app.explorer.collapse_or_parent()
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if app.view == View::Explorer && app.pane == Pane::ExplorerTree =>
+            {
+                app.explorer.expand_or_child()
+            }
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -142,6 +171,9 @@ pub(super) async fn handle_key(
             KeyCode::BackTab => app.previous_pane(),
             KeyCode::Enter if app.view == View::Symbols => begin_inspect(app, commands).await?,
             KeyCode::Enter if app.view == View::Calls => follow_call(app, commands).await?,
+            KeyCode::Enter if app.view == View::Explorer => {
+                activate_explorer(app, commands).await?
+            }
             KeyCode::Enter => app.activate_project_item(),
             _ => {}
         },
@@ -172,6 +204,34 @@ async fn follow_call(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) ->
         commands
             .send(AnalyzerCommand::LoadCalls { id, target })
             .await?;
+    }
+    Ok(())
+}
+
+async fn activate_explorer(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
+    match app.pane {
+        Pane::ExplorerTree => {
+            let opens_file = app
+                .explorer
+                .selected_entry()
+                .is_some_and(|entry| entry.kind != crate::repository::RepoEntryKind::Directory);
+            if let Some((id, file)) = app.explorer.open_selected() {
+                app.pane = Pane::ExplorerFile;
+                commands
+                    .send(AnalyzerCommand::InspectFile { id, file })
+                    .await?;
+            } else if opens_file {
+                app.pane = Pane::ExplorerFile;
+            }
+        }
+        Pane::ExplorerFile if app.explorer.right_mode == ExplorerRightMode::File => {
+            if let Some((id, symbol)) = app.begin_explorer_symbol_inspect() {
+                commands
+                    .send(AnalyzerCommand::Inspect { id, symbol })
+                    .await?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -233,6 +293,7 @@ mod tests {
     use super::*;
     use crate::model::{Position, Range, Symbol};
     use crate::project::Project;
+    use crate::repository::{RepoEntry, RepoEntryKind, RepositoryTree};
 
     fn app() -> App {
         App::new(Project {
@@ -352,5 +413,101 @@ mod tests {
             receiver.try_recv().unwrap(),
             AnalyzerCommand::LoadCalls { .. }
         ));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.view, View::Explorer);
+        assert_eq!(app.pane, Pane::ExplorerTree);
+    }
+
+    #[tokio::test]
+    async fn explorer_opens_files_then_inspects_exact_file_symbols() {
+        let mut app = app();
+        app.explorer.apply_tree(RepositoryTree {
+            entries: vec![
+                RepoEntry {
+                    path: "src".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "src/main.rs".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(10),
+                },
+            ],
+            truncated: false,
+            skipped_errors: 0,
+        });
+        app.explorer.expanded.insert("src".into());
+        app.switch_view(View::Explorer);
+        app.explorer.selected = 2;
+        let (commands, mut receiver) = mpsc::channel(2);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        let (id, file) = match receiver.try_recv().unwrap() {
+            AnalyzerCommand::InspectFile { id, file } => (id, file),
+            command => panic!("unexpected command: {command:?}"),
+        };
+        let mut exact = symbol("main");
+        exact.file = file.clone();
+        exact.selection_range.start.line = 12;
+        app.apply_event(AnalyzerEvent::FileSymbols {
+            id,
+            file,
+            symbols: vec![exact.clone()],
+        });
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &commands,
+        )
+        .await
+        .unwrap();
+        match receiver.try_recv().unwrap() {
+            AnalyzerCommand::Inspect { symbol, .. } => {
+                assert_eq!(symbol.selection_range, exact.selection_range)
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explorer_tree_navigation_does_not_request_semantics() {
+        let mut app = app();
+        app.explorer.apply_tree(RepositoryTree {
+            entries: vec![
+                RepoEntry {
+                    path: "src".into(),
+                    kind: RepoEntryKind::Directory,
+                    size: None,
+                },
+                RepoEntry {
+                    path: "src/main.rs".into(),
+                    kind: RepoEntryKind::File,
+                    size: Some(10),
+                },
+            ],
+            truncated: false,
+            skipped_errors: 0,
+        });
+        app.switch_view(View::Explorer);
+        let (commands, mut receiver) = mpsc::channel(2);
+        for code in [KeyCode::Char('j'), KeyCode::Char('l'), KeyCode::Char('j')] {
+            handle_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE), &commands)
+                .await
+                .unwrap();
+        }
+        assert!(receiver.try_recv().is_err());
     }
 }
