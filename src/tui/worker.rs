@@ -633,4 +633,5 @@ mod tests {
 
         commands.send(AnalyzerCommand::Shutdown).await.unwrap();
         task.await.unwrap();
-    }}
+    }
+}
