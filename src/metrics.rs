@@ -3,10 +3,10 @@ use crate::project::Project;
 use crate::repository::{RepoEntryKind, RepositoryTree};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+pub mod stream;
+use stream::{ReadFailure, MAX_METRIC_FILE_BYTES, MAX_TOTAL_READ_BYTES};
 pub const LARGEST_FILE_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -28,6 +28,8 @@ pub struct RepositoryMetrics {
     pub categories: Vec<CategoryMetrics>,
     pub packages: Vec<PackageMetrics>,
     pub largest_files: Vec<FileMetrics>,
+    pub unmeasured_large_files: Vec<UnmeasuredFile>,
+    pub read_bytes: u64,
     pub skipped: SkippedMetrics,
     pub partial: bool,
 }
@@ -40,6 +42,15 @@ pub struct SkippedMetrics {
     pub oversized: usize,
     pub unreadable: usize,
     pub scan_errors: usize,
+    pub total_read_budget: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmeasuredFile {
+    pub path: PathBuf,
+    pub size_bytes: Option<u64>,
+    pub reason: &'static str,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -69,6 +80,10 @@ pub struct PackageMetrics {
     pub physical_lines: u64,
     pub nonblank_lines: u64,
     pub test_files: usize,
+    pub source_files: usize,
+    pub source_physical_lines: u64,
+    pub source_nonblank_lines: u64,
+    pub test_nonblank_lines: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +107,7 @@ pub enum Category {
     Other,
 }
 
-fn classify(path: &Path) -> (&'static str, Category) {
+pub(crate) fn classify(path: &Path) -> (&'static str, Category) {
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     let (language, mut category) = match extension {
         "rs" => ("Rust", Category::Source),
@@ -137,6 +152,16 @@ pub fn analyze_until(
     project: &Project,
     cancelled: impl Fn() -> bool,
 ) -> RepositoryMetrics {
+    analyze_budget(root, tree, project, cancelled, MAX_TOTAL_READ_BYTES)
+}
+
+fn analyze_budget(
+    root: &Path,
+    tree: &RepositoryTree,
+    project: &Project,
+    cancelled: impl Fn() -> bool,
+    total_budget: u64,
+) -> RepositoryMetrics {
     let mut result = RepositoryMetrics {
         partial: tree.truncated || tree.skipped_errors > 0,
         skipped: SkippedMetrics {
@@ -163,6 +188,7 @@ pub fn analyze_until(
         ..Default::default()
     };
     let mut languages = BTreeMap::<String, LanguageMetrics>::new();
+    let mut read_budget = total_budget;
     result.categories = [
         Category::Source,
         Category::Tests,
@@ -213,6 +239,7 @@ pub fn analyze_until(
         if let Some(p) = package.as_mut() {
             p.files += 1;
             p.test_files += usize::from(category == Category::Tests);
+            p.source_files += usize::from(code);
         }
         let lang = languages
             .entry(language.into())
@@ -221,38 +248,49 @@ pub fn analyze_until(
                 ..Default::default()
             });
         lang.files += 1;
-        if entry.size.is_some_and(|size| size > MAX_FILE_BYTES) {
-            result.skipped.oversized += 1;
-            result.partial = true;
-            continue;
-        }
-        let mut bytes = Vec::new();
-        let read = std::fs::File::open(root.join(&entry.path))
-            .and_then(|f| f.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes));
-        if read.is_err() {
-            result.skipped.unreadable += 1;
-            result.partial = true;
-            continue;
-        }
-        if bytes.len() as u64 > MAX_FILE_BYTES {
-            result.skipped.oversized += 1;
-            result.partial = true;
-            continue;
-        }
-        if bytes
-            .iter()
-            .any(|b| *b == 0 || (*b < 32 && !matches!(*b, b'\n' | b'\r' | b'\t' | 12)))
-        {
-            result.skipped.binary += 1;
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            result.skipped.invalid_utf8 += 1;
-            result.partial = true;
-            continue;
+        let counted = if entry.size.is_some_and(|size| size > MAX_METRIC_FILE_BYTES) {
+            Err(ReadFailure::PerFileBudget)
+        } else {
+            stream::count(&root.join(&entry.path), &mut read_budget, &cancelled)
         };
-        let physical_lines = text.lines().count() as u64;
-        let blank_lines = text.lines().filter(|line| line.trim().is_empty()).count() as u64;
+        let lines = match counted {
+            Ok(lines) => lines,
+            Err(reason) => {
+                result.partial |= reason != ReadFailure::Binary;
+                match reason {
+                    ReadFailure::Binary => result.skipped.binary += 1,
+                    ReadFailure::InvalidUtf8 => result.skipped.invalid_utf8 += 1,
+                    ReadFailure::Unreadable => result.skipped.unreadable += 1,
+                    ReadFailure::PerFileBudget | ReadFailure::TotalReadBudget => {
+                        if reason == ReadFailure::PerFileBudget {
+                            result.skipped.oversized += 1;
+                        } else {
+                            result.skipped.total_read_budget += 1;
+                        }
+                        result.unmeasured_large_files.push(UnmeasuredFile {
+                            path: entry.path.clone(),
+                            size_bytes: std::fs::metadata(root.join(&entry.path))
+                                .ok()
+                                .map(|m| m.len())
+                                .or(entry.size),
+                            reason: if reason == ReadFailure::PerFileBudget {
+                                "perFileBudget"
+                            } else {
+                                "totalReadBudget"
+                            },
+                        });
+                        result.unmeasured_large_files.sort_by(|a, b| {
+                            b.size_bytes.cmp(&a.size_bytes).then(a.path.cmp(&b.path))
+                        });
+                        result.unmeasured_large_files.truncate(LARGEST_FILE_LIMIT);
+                    }
+                    ReadFailure::Cancelled => break,
+                }
+                continue;
+            }
+        };
+        let physical_lines = lines.physical;
+        let blank_lines = lines.blank;
         let nonblank_lines = physical_lines - blank_lines;
         result.text_files += 1;
         result.physical_lines += physical_lines;
@@ -265,6 +303,13 @@ pub fn analyze_until(
         if let Some(p) = package {
             p.physical_lines += physical_lines;
             p.nonblank_lines += nonblank_lines;
+            if code {
+                p.source_physical_lines += physical_lines;
+                p.source_nonblank_lines += nonblank_lines;
+            }
+            if category == Category::Tests {
+                p.test_nonblank_lines += nonblank_lines;
+            }
         }
         if code {
             result.code_physical_lines += physical_lines;
@@ -289,6 +334,7 @@ pub fn analyze_until(
         }
     }
     result.languages = languages.into_values().collect();
+    result.read_bytes = total_budget - read_budget;
     result.packages.sort_by(|a, b| {
         b.physical_lines
             .cmp(&a.physical_lines)
@@ -299,226 +345,4 @@ pub fn analyze_until(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::project::Package;
-    use crate::repository::{scan, RepoEntry};
-
-    fn project(root: &Path) -> Project {
-        Project {
-            workspace_root: root.into(),
-            packages: vec![],
-            rust_files: vec![],
-        }
-    }
-
-    #[test]
-    fn counts_lines_categories_ignores_and_stable_ranking() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        std::fs::create_dir(root.join(".git")).unwrap();
-        std::fs::create_dir(root.join("tests")).unwrap();
-        for (name, text) in [
-            ("empty.rs", ""),
-            ("a.rs", "a\n \nlast"),
-            ("b.rs", "b\r\n \r\nlast"),
-            ("one.py", "x"),
-            ("tests/test.rs", "test\n"),
-            ("README.md", "doc\n"),
-            ("Cargo.toml", "config\n"),
-            (".gitignore", "ignored.rs\n"),
-            ("ignored.rs", "ignored\n"),
-        ] {
-            std::fs::write(root.join(name), text).unwrap();
-        }
-        std::fs::write(root.join("binary.rs"), [0, 1, 2]).unwrap();
-        std::fs::write(root.join("invalid.rs"), [255]).unwrap();
-        let tree = scan(root).unwrap();
-        let m = analyze(root, &tree, &project(root));
-        assert_eq!(m.total_files, 10);
-        assert_eq!(m.text_files, 8);
-        assert_eq!(m.code_files, 7);
-        assert_eq!(m.physical_lines, 11);
-        assert_eq!(m.blank_lines, 2);
-        assert_eq!(m.nonblank_lines, 9);
-        assert_eq!(m.code_nonblank_lines, 6);
-        assert_eq!(m.test_files, 1);
-        assert_eq!(m.test_nonblank_lines, 1);
-        assert_eq!(m.skipped.binary, 1);
-        assert_eq!(m.skipped.invalid_utf8, 1);
-        assert!(m.partial);
-        assert_eq!(m.largest_files[0].path, Path::new("a.rs"));
-        assert_eq!(m.largest_files[1].path, Path::new("b.rs"));
-        assert_eq!(m.largest_files[0].physical_lines, 3);
-        assert_eq!(m.largest_files[1].physical_lines, 3);
-        assert_eq!(
-            m.categories.iter().map(|c| c.files).sum::<usize>(),
-            m.total_files
-        );
-        assert_eq!(m.largest_files.last().unwrap().physical_lines, 0);
-        assert!(m
-            .languages
-            .windows(2)
-            .all(|p| p[0].language < p[1].language));
-        assert_eq!(
-            serde_json::to_value(&m).unwrap(),
-            serde_json::to_value(analyze(root, &tree, &project(root))).unwrap()
-        );
-    }
-
-    #[test]
-    fn skipped_files_and_truncated_tree_remain_explicit() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        std::fs::File::create(root.join("huge.rs"))
-            .unwrap()
-            .set_len(MAX_FILE_BYTES + 1)
-            .unwrap();
-        let mut tree = scan(root).unwrap();
-        tree.entries.push(RepoEntry {
-            path: "missing.rs".into(),
-            kind: RepoEntryKind::File,
-            size: None,
-        });
-        tree.truncated = true;
-        tree.skipped_errors = 2;
-        let m = analyze(root, &tree, &project(root));
-        assert_eq!(m.total_files, 2);
-        assert_eq!(m.skipped.oversized, 1);
-        assert_eq!(m.skipped.unreadable, 1);
-        assert_eq!(m.skipped.scan_errors, 2);
-        assert_eq!(m.physical_lines, 0);
-        assert!(m.partial);
-        let cancelled = analyze_until(root, &tree, &project(root), || true);
-        assert!(cancelled.partial);
-        assert_eq!(cancelled.text_files, 0);
-    }
-
-    #[test]
-    fn nested_packages_own_each_file_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        std::fs::create_dir(root.join("nested")).unwrap();
-        std::fs::write(root.join("a.rs"), "a\n").unwrap();
-        std::fs::write(root.join("nested/b.rs"), "b\n\nb\n").unwrap();
-        let mut p = project(root);
-        for (name, path) in [("outer", "Cargo.toml"), ("inner", "nested/Cargo.toml")] {
-            p.packages.push(Package {
-                name: name.into(),
-                manifest_path: root.join(path),
-                targets: vec![],
-                dependencies: vec![],
-            });
-        }
-        let m = analyze(root, &scan(root).unwrap(), &p);
-        assert_eq!(m.packages[0].name, "inner");
-        assert_eq!(m.packages[0].files, 1);
-        assert_eq!(m.packages[1].files, 1);
-        assert_eq!(
-            m.packages.iter().map(|p| p.physical_lines).sum::<u64>(),
-            m.physical_lines
-        );
-    }
-
-    #[test]
-    fn classification_is_explicit_and_unknown_extensions_stay_other() {
-        for (extension, language) in [
-            ("rs", "Rust"),
-            ("ts", "TypeScript"),
-            ("tsx", "TypeScript"),
-            ("js", "JavaScript"),
-            ("jsx", "JavaScript"),
-            ("py", "Python"),
-            ("c", "C"),
-            ("h", "C"),
-            ("cpp", "C++"),
-            ("cc", "C++"),
-            ("cxx", "C++"),
-            ("hpp", "C++"),
-            ("go", "Go"),
-            ("java", "Java"),
-            ("sh", "Shell"),
-            ("toml", "TOML"),
-            ("json", "JSON"),
-            ("yaml", "YAML"),
-            ("yml", "YAML"),
-            ("md", "Markdown"),
-        ] {
-            assert_eq!(
-                classify(Path::new(&format!("file.{extension}"))).0,
-                language
-            );
-        }
-        assert_eq!(
-            classify(Path::new("unknown.xyz")),
-            ("Other", Category::Other)
-        );
-        assert_eq!(
-            classify(Path::new("tests/config.toml")).1,
-            Category::Configuration
-        );
-        for path in [
-            "tests/unit.rs",
-            "src/unit_test.rs",
-            "unit_test.go",
-            "test_unit.py",
-            "unit.test.ts",
-            "unit.test.tsx",
-            "unit.test.js",
-            "unit.test.jsx",
-        ] {
-            assert_eq!(classify(Path::new(path)).1, Category::Tests);
-        }
-    }
-
-    #[test]
-    fn package_ties_sort_by_name_independently_of_metadata_order() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut p = project(temp.path());
-        for name in ["z", "a"] {
-            p.packages.push(Package {
-                name: name.into(),
-                manifest_path: temp.path().join(name).join("Cargo.toml"),
-                targets: vec![],
-                dependencies: vec![],
-            });
-        }
-        let m = analyze(temp.path(), &RepositoryTree::default(), &p);
-        assert_eq!(
-            m.packages
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "z"]
-        );
-    }
-
-    #[test]
-    #[ignore = "local metrics timing on current repository and synthetic 10k-file workspace"]
-    fn timing() {
-        fn measure(root: &Path) {
-            let project = project(root);
-            let start = std::time::Instant::now();
-            let tree = scan(root).unwrap();
-            let scan_time = start.elapsed();
-            let start = std::time::Instant::now();
-            let m = analyze(root, &tree, &project);
-            eprintln!(
-                "{} files: scan {:?}, metrics {:?}",
-                m.total_files,
-                scan_time,
-                start.elapsed()
-            );
-        }
-        measure(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let temp = tempfile::tempdir().unwrap();
-        for i in 0..10_000 {
-            std::fs::write(
-                temp.path().join(format!("file{i:05}.rs")),
-                "fn example() {}\n".repeat(100),
-            )
-            .unwrap();
-        }
-        measure(temp.path());
-    }
-}
+mod tests;
