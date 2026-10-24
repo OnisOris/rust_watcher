@@ -56,13 +56,21 @@ pub(super) async fn run_loop(
                     Some(super::RepositoryEvent::Tree(tree)) => app.explorer.apply_tree(tree),
                     Some(super::RepositoryEvent::Metrics(metrics)) => app.metrics = Some(metrics),
                     Some(super::RepositoryEvent::Maintainability(report)) => app.maintainability = Some(report),
+                    Some(super::RepositoryEvent::Hotspots(report)) => {
+                        if app.project_selection > 0 { app.project_selection += report.rows().len(); }
+                        app.hotspots = Some(report);
+                    }
                     Some(super::RepositoryEvent::Error(message)) => {
                         app.metrics_error = Some(message.clone());
+                        app.hotspots_error = Some(message.clone());
                         app.maintainability_error = Some(message.clone());
                         app.explorer.fail(message);
                     }
                     None => {
                         repository_open = false;
+                        if app.hotspots.is_none() && app.hotspots_error.is_none() {
+                            app.hotspots_error = Some("background Git analyzer stopped".into());
+                        }
                         if app.metrics.is_none() && app.metrics_error.is_none() {
                             app.metrics_error = Some("repository metrics worker stopped".into());
                         }
@@ -216,7 +224,7 @@ pub(super) async fn handle_key(
                     .get(app.project_selection)
                     .cloned();
                 let (path, anchor) = match target {
-                    Some(Target::File(path, _)) => (Some(path), None),
+                    Some(Target::File(path, _) | Target::Hotspot(path)) => (Some(path), None),
                     Some(Target::Unmeasured(f)) => (Some(f.path), None),
                     Some(Target::Longest(f) | Target::Deepest(f)) => {
                         (Some(f.path.clone()), Some(f))

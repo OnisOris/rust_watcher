@@ -429,3 +429,109 @@ fn maintainability_has_exact_counts_positions_and_never_starts_ra() {
         assert!(!marker.exists());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn hotspots_are_headless_with_or_without_git_and_validate_days() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["cargo", "rustc", "git"] {
+        let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        symlink(executable, temp.path().join(name)).unwrap();
+    }
+    let marker = temp.path().join("ra-started");
+    let trap = temp.path().join("rust-analyzer");
+    std::fs::write(
+        &trap,
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&trap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='hotspot_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new(temp.path().join("git"))
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init"]);
+    git(&["add", "."]);
+    git(&["commit", "-m", "fixture"]);
+    for absent in [false, true] {
+        if absent {
+            std::fs::remove_file(temp.path().join("git")).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_wt"))
+            .env("PATH", temp.path())
+            .arg(&root)
+            .args(["hotspots", "--days", "30", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(v["schemaVersion"], 1);
+        assert_eq!(v["ok"], true);
+        let r = &v["data"];
+        assert_eq!(r["sinceDays"], 30);
+        assert_eq!(r["available"], !absent);
+        if absent {
+            assert_eq!(r["reason"]["code"], "gitNotFound");
+            assert!(r["commitsAnalyzed"].is_null());
+        } else {
+            assert_eq!(r["commitsAnalyzed"], 1);
+            assert_eq!(r["changedFiles"], 2);
+            let f = r["mostChangedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == "src/lib.rs")
+                .unwrap();
+            assert_eq!(f["changeCommits"], 1);
+            assert_eq!(f["addedLines"], 1);
+            assert_eq!(f["deletedLines"], 0);
+            assert_eq!(f["sourceNonblankLines"], 1);
+            assert_eq!(f["functions"], 1);
+        }
+        assert!(!marker.exists());
+    }
+    for days in ["0", "3651", "-1", "abc"] {
+        assert!(!Command::new(env!("CARGO_BIN_EXE_wt"))
+            .args(["hotspots", "--days", days])
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+}

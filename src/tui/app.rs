@@ -119,6 +119,8 @@ pub(super) struct CallsState {
 }
 
 pub(super) struct App {
+    pub hotspots: Option<crate::git_analysis::HotspotReport>,
+    pub hotspots_error: Option<String>,
     pub maintainability: Option<crate::maintainability::MaintainabilityReport>,
     pub maintainability_error: Option<String>,
     pub metrics: Option<crate::metrics::RepositoryMetrics>,
@@ -148,6 +150,8 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            hotspots: None,
+            hotspots_error: None,
             maintainability: None,
             maintainability_error: None,
             metrics: None,
@@ -197,6 +201,7 @@ impl App {
         }
         match self.pane {
             Pane::Project => {
+                self.metrics_scroll = 0;
                 self.project_selection =
                     move_index(self.project_selection, self.project_item_count(), delta);
             }
@@ -316,18 +321,11 @@ impl App {
     }
 
     pub(super) fn activate_project_item(&mut self) {
-        let entrypoints = self.project.binary_entrypoints();
-        let label = if self.project_selection == 0 {
-            format!("Workspace: {}", project_name(&self.project))
-        } else if let Some(path) = entrypoints.get(self.project_selection - 1) {
-            format!("Entrypoint: {}", path.display())
-        } else {
-            let package_index = self.project_selection - 1 - entrypoints.len();
-            self.project
-                .packages
-                .get(package_index)
-                .map(|package| format!("Crate: {}", package.name))
-                .unwrap_or_else(|| "Workspace".into())
+        use super::overview::Target;
+        let label = match super::overview::targets(self).get(self.project_selection) {
+            Some(Target::Entrypoint(path)) => format!("Entrypoint: {}", path.display()),
+            Some(Target::Package(name)) => format!("Crate: {name}"),
+            _ => format!("Workspace: {}", project_name(&self.project)),
         };
         self.pane = Pane::Details;
         self.notice = Some(label);

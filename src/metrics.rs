@@ -12,6 +12,8 @@ pub const LARGEST_FILE_LIMIT: usize = 10;
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryMetrics {
+    #[serde(skip)]
+    pub(crate) source_files: Vec<FileMetrics>,
     pub total_files: usize,
     pub total_directories: usize,
     pub symlinks: usize,
@@ -317,14 +319,16 @@ fn analyze_budget(
             if category == Category::Tests {
                 result.test_nonblank_lines += nonblank_lines;
             }
-            result.largest_files.push(FileMetrics {
+            let file = FileMetrics {
                 path: entry.path.clone(),
                 language: language.into(),
                 category,
                 physical_lines,
                 blank_lines,
                 nonblank_lines,
-            });
+            };
+            result.source_files.push(file.clone());
+            result.largest_files.push(file);
             result.largest_files.sort_by(|a, b| {
                 b.nonblank_lines
                     .cmp(&a.nonblank_lines)

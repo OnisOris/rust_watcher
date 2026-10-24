@@ -15,6 +15,7 @@ use std::path::PathBuf;
 #[derive(Clone)]
 pub(super) enum Target {
     Workspace,
+    Hotspot(PathBuf),
     Entrypoint(PathBuf),
     Package(String),
     File(PathBuf, u64),
@@ -25,6 +26,14 @@ pub(super) enum Target {
 
 pub(super) fn targets(app: &App) -> Vec<Target> {
     let mut items = vec![Target::Workspace];
+    if let Some(report) = &app.hotspots {
+        items.extend(
+            report
+                .rows()
+                .iter()
+                .map(|f| Target::Hotspot(f.path.clone())),
+        );
+    }
     items.extend(
         app.project
             .binary_entrypoints()
@@ -63,6 +72,7 @@ pub(super) fn render_project(frame: &mut Frame<'_>, area: Rect, app: &App) {
     for target in targets(app) {
         let (section, text) = match target {
             Target::Workspace => ("", format!("▼ Project\n  {}", project_name(&app.project))),
+            Target::Hotspot(path) => ("GIT HOTSPOTS", super::hotspots::label(app, &path)),
             Target::Entrypoint(p) => ("", format!("Entrypoint\n  {}", p.display())),
             Target::Package(name) => ("", format!("Crate\n  {name}")),
             Target::File(path, lines) => (
@@ -126,7 +136,11 @@ pub(super) fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .scroll((app.metrics_scroll.min(u16::MAX as usize) as u16, 0))
             .wrap(Wrap { trim: false })
             .block(pane_block(
-                " REPOSITORY METRICS · j/k scroll ",
+                if super::hotspots::selected(app).is_some() {
+                    " HOTSPOT DETAILS · j/k scroll "
+                } else {
+                    " REPOSITORY METRICS · j/k scroll "
+                },
                 app.pane == Pane::Details,
             )),
         area,
@@ -134,7 +148,11 @@ pub(super) fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 pub(super) fn details(app: &App) -> Vec<Line<'static>> {
+    if let Some(file) = super::hotspots::selected(app) {
+        return super::hotspots::details(app, file);
+    }
     let mut lines = vec![heading("Workspace")];
+    lines.extend(super::hotspots::status(app));
     if let Some(notice) = &app.notice {
         lines.push(Line::styled(
             notice.clone(),

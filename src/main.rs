@@ -1,4 +1,5 @@
 mod cli;
+mod git_analysis;
 mod lsp;
 mod maintainability;
 mod metrics;
@@ -42,6 +43,26 @@ async fn execute(cli: &Cli) -> Result<()> {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
+    if let Some(Command::Hotspots { days }) = cli.command {
+        let options = git_analysis::Options {
+            days,
+            ..Default::default()
+        };
+        let tree = repository::scan(&project.workspace_root)?;
+        let metrics = metrics::analyze(&project.workspace_root, &tree, &project);
+        let ast = maintainability::analyze(&project.workspace_root, &tree, &project);
+        let history = git_analysis::analyze(
+            &project.workspace_root,
+            &options,
+            &git_analysis::GitRunner::default(),
+        );
+        let report = git_analysis::correlate(history, &metrics, &ast, &tree);
+        if cli.json {
+            return output::json(&report);
+        }
+        git_analysis::print(&report);
+        return Ok(());
+    }
     if matches!(cli.command, Some(Command::Maintainability)) {
         let tree = repository::scan(&project.workspace_root)?;
         let report = maintainability::analyze(&project.workspace_root, &tree, &project);
@@ -132,7 +153,9 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
                 Ok(())
             }
         }
-        Some(Command::Doctor | Command::Stats | Command::Maintainability) => unreachable!(),
+        Some(
+            Command::Doctor | Command::Stats | Command::Maintainability | Command::Hotspots { .. },
+        ) => unreachable!(),
     }
 }
 

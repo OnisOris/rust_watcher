@@ -71,6 +71,135 @@ fn symbol(anchor: &FunctionMetrics) -> Symbol {
     }
 }
 
+fn load_hotspot(app: &mut App, path: &Path) {
+    let tree = crate::repository::scan(&app.project.workspace_root).unwrap();
+    let metrics = crate::metrics::analyze(&app.project.workspace_root, &tree, &app.project);
+    let ast = app.maintainability.as_ref().unwrap();
+    let mut history = crate::git_analysis::History::default();
+    history.since_days = 90;
+    history.as_of_utc = "2026-10-25T00:00:00Z".into();
+    history.commits_analyzed = 4;
+    history.files.insert(
+        path.into(),
+        crate::git_analysis::Change {
+            commits: 4,
+            added: Some(12),
+            deleted: Some(2),
+            last: 1792886400,
+        },
+    );
+    let mut report = crate::git_analysis::correlate(history, &metrics, ast, &tree);
+    report.most_changed_files[0]
+        .co_changed
+        .push(crate::git_analysis::CoChanged {
+            path: "src/lib.rs".into(),
+            commits: 3,
+        });
+    app.hotspots = Some(report);
+    app.project_selection = 1;
+}
+
+#[tokio::test]
+async fn hotspot_reveals_exact_file_then_reuses_symbols_inspector_and_calls() {
+    let (_temp, mut app, anchor) = fixture();
+    load_hotspot(&mut app, &anchor.path);
+    let (tx, mut rx, id) = open_candidate(&mut app).await;
+    let exact = symbol(&anchor);
+    app.apply_event(AnalyzerEvent::FileSymbols {
+        id,
+        file: anchor.path.clone(),
+        symbols: vec![exact],
+    });
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert!(app.inspector.is_some());
+    assert_eq!(app.inspector.as_ref().unwrap().symbol.file, anchor.path);
+    // File inspection is never dispatched as a name search.
+    while let Ok(command) = rx.try_recv() {
+        assert!(!matches!(command, AnalyzerCommand::Search { .. }));
+    }
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.view, View::Calls);
+}
+
+#[tokio::test]
+async fn hotspot_missing_file_is_a_notice_not_a_panic() {
+    let (temp, mut app, anchor) = fixture();
+    load_hotspot(&mut app, &anchor.path);
+    std::fs::remove_file(temp.path().join(&anchor.path)).unwrap();
+    let (tx, mut rx) = mpsc::channel(16);
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.view, View::Overview);
+    assert!(app.notice.as_ref().unwrap().contains("unavailable"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn hotspot_states_and_details_render_without_ra_including_small_terminal() {
+    use ratatui::{backend::TestBackend, Terminal};
+    fn render(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| super::ui::render(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+    let (_temp, mut app, anchor) = fixture();
+    app.project_selection = 0;
+    assert!(render(&app, 160, 48).contains("Git history: analyzing..."));
+    app.hotspots_error = Some("Git executable not found".into());
+    assert!(render(&app, 160, 48).contains("Git executable not found"));
+    app.hotspots_error = None;
+    load_hotspot(&mut app, &anchor.path);
+    app.analyzer_state = AnalyzerState::Error("RA unavailable".into());
+    let text = render(&app, 160, 48);
+    for part in [
+        "GIT HOTSPOTS",
+        "HOTSPOT DETAILS",
+        "Changes / 90d",
+        "Added lines",
+        "Max control depth",
+        "Co-changed with",
+        "src/lib.rs",
+        "RA",
+    ] {
+        assert!(text.contains(part), "missing {part}: {text}");
+    }
+    assert!(render(&app, 80, 20).contains("HOTSPOT DETAILS"));
+    app.hotspots.as_mut().unwrap().partial = true;
+    app.project_selection = 0;
+    assert!(render(&app, 160, 48).contains("partial"));
+    let r = app.hotspots.as_mut().unwrap();
+    r.available = false;
+    r.most_changed_files.clear();
+    r.reason = Some(crate::git_analysis::Unavailable {
+        code: "gitError".into(),
+        message: "corrupt history".into(),
+    });
+    assert!(render(&app, 160, 48).contains("Git history unavailable: corrupt history"));
+}
+
 async fn open_candidate(
     app: &mut App,
 ) -> (

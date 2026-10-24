@@ -46,6 +46,8 @@ pub struct FunctionMetrics {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintainabilityReport {
+    #[serde(skip)]
+    pub(crate) files: Vec<FileMaintainability>,
     pub analyzed_files: usize,
     pub parsed_files: usize,
     pub parse_failures: usize,
@@ -60,6 +62,20 @@ pub struct MaintainabilityReport {
     pub deepest_functions: Vec<FunctionMetrics>,
     pub packages: Vec<PackageFunctionMetrics>,
     pub partial: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileMaintainability {
+    pub path: PathBuf,
+    pub structure: Option<FileStructure>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileStructure {
+    pub functions: usize,
+    pub longest_function_lines: usize,
+    pub max_control_depth: usize,
+    pub control_flow_nodes: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +142,11 @@ pub fn analyze_until(
             continue;
         }
         report.analyzed_files += 1;
+        let file_index = report.files.len();
+        report.files.push(FileMaintainability {
+            path: entry.path.clone(),
+            structure: None,
+        });
         let source = match read_source(&root.join(&entry.path), &mut budget, &cancelled) {
             Ok(source) => source,
             Err(reason) => {
@@ -164,6 +185,22 @@ pub fn analyze_until(
             }
         };
         report.parsed_files += 1;
+        if report.functions + functions.len() < FUNCTION_LIMIT {
+            report.files[file_index].structure = Some(FileStructure {
+                functions: functions.len(),
+                longest_function_lines: functions
+                    .iter()
+                    .map(|f| f.physical_lines)
+                    .max()
+                    .unwrap_or(0),
+                max_control_depth: functions
+                    .iter()
+                    .map(|f| f.max_control_depth)
+                    .max()
+                    .unwrap_or(0),
+                control_flow_nodes: functions.iter().map(|f| f.control_flow_nodes).sum(),
+            });
+        }
         for function in functions {
             *lengths.entry(function.physical_lines).or_default() += 1;
             if let Some(owner) = &owner {

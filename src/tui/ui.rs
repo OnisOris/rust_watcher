@@ -1344,6 +1344,16 @@ mod tests {
             &tree,
             &project,
         ));
+        app.hotspots = Some(crate::git_analysis::correlate(
+            crate::git_analysis::analyze(
+                &project.workspace_root,
+                &Default::default(),
+                &Default::default(),
+            ),
+            app.metrics.as_ref().unwrap(),
+            app.maintainability.as_ref().unwrap(),
+            &tree,
+        ));
         app.project = project;
         let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
         let start = std::time::Instant::now();
@@ -1351,6 +1361,12 @@ mod tests {
             terminal.draw(|f| render(f, &app)).unwrap();
         }
         eprintln!("Overview render average {:?}", start.elapsed() / 100);
+        app.project_selection = 1;
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            terminal.draw(|f| render(f, &app)).unwrap();
+        }
+        eprintln!("Hotspot details render average {:?}", start.elapsed() / 100);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod app;
 mod event;
 mod explorer;
+mod hotspots;
 #[cfg(test)]
 mod navigation_tests;
 mod overview;
@@ -17,6 +18,7 @@ pub(super) enum RepositoryEvent {
     Tree(crate::repository::RepositoryTree),
     Metrics(crate::metrics::RepositoryMetrics),
     Maintainability(crate::maintainability::MaintainabilityReport),
+    Hotspots(crate::git_analysis::HotspotReport),
     Error(String),
 }
 
@@ -34,6 +36,8 @@ pub async fn run(project: Project) -> Result<()> {
     let analyzer_task = tokio::spawn(worker::analyzer_worker(project, command_rx, event_tx));
     let repository_root = app.project.workspace_root.clone();
     let metrics_project = app.project.clone();
+    let git_runner = crate::git_analysis::GitRunner::default();
+    let background_git = git_runner.clone();
     std::thread::spawn(move || match crate::repository::scan(&repository_root) {
         Ok(tree) => {
             if repository_tx
@@ -47,7 +51,7 @@ pub async fn run(project: Project) -> Result<()> {
                     repository_tx.is_closed()
                 });
             if repository_tx
-                .blocking_send(RepositoryEvent::Metrics(metrics))
+                .blocking_send(RepositoryEvent::Metrics(metrics.clone()))
                 .is_err()
             {
                 return;
@@ -58,7 +62,19 @@ pub async fn run(project: Project) -> Result<()> {
                 &metrics_project,
                 || repository_tx.is_closed(),
             );
-            let _ = repository_tx.blocking_send(RepositoryEvent::Maintainability(report));
+            if repository_tx
+                .blocking_send(RepositoryEvent::Maintainability(report.clone()))
+                .is_err()
+            {
+                return;
+            }
+            let history = crate::git_analysis::analyze(
+                &repository_root,
+                &Default::default(),
+                &background_git,
+            );
+            let hotspots = crate::git_analysis::correlate(history, &metrics, &report, &tree);
+            let _ = repository_tx.blocking_send(RepositoryEvent::Hotspots(hotspots));
         }
         Err(error) => {
             let _ = repository_tx.blocking_send(RepositoryEvent::Error(format!("{error:#}")));
@@ -73,6 +89,7 @@ pub async fn run(project: Project) -> Result<()> {
     )
     .await;
     drop(repository_rx);
+    git_runner.cancel();
     stop_analyzer(analyzer_task, &command_tx).await;
     result
 }
