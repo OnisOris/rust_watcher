@@ -238,6 +238,102 @@ Direct additions are `syn 2.0.118` (`full`, `visit`) and `proc-macro2 1.0.106`
 (`span-locations`), both already in the lockfile; no new transitive packages or
 semantic backend were added.
 
+## Git hotspots
+
+```bash
+wt hotspots
+wt hotspots --days 30
+wt hotspots --json
+wt /path/to/project hotspots --days 180
+```
+
+Passive local Git history + current file metrics + current Rust structure. No RA,
+checks, build scripts, tests, services or new dependencies. Git 2.37+ is required
+for this analysis (`--since-as-filter`); other views work without Git.
+
+One UTC `asOfUtc` and `headSha` are fixed at Git-analysis start. The default is 90
+days (`--days`: 1–3650), an inclusive window `[asOfUtc − days × 86400, asOfUtc]`
+using **committer** timestamps. Tests inject a fixed timestamp. `rev-parse` finds
+the true worktree, including linked worktrees. Literal top-level pathspecs and
+component-checked paths restrict monorepo history to the Cargo workspace.
+
+`git log --full-history --no-merges --no-renames --numstat -z` supplies NUL-delimited
+commit metadata and paths. Argument arrays are used, never a shell; external
+diff/textconv, pagers, fsmonitor and prompts are disabled. Only the first two tabs
+of numstat delimit numbers, preserving tabs/newlines/Unicode/metacharacters in
+paths. Non-UTF-8 paths are omitted with an explicit partial reason, not mangled.
+
+`changeCommits` counts distinct commits touching a path, once per commit;
+`addedLines`/`deletedLines` sum numstat and `churnLines` is their sum.
+`lastChangedAt` is the latest change **inside the selected window**. Binary
+numstat produces unknown (`null`) line counts, not zero. Renames are deliberately
+not followed: the new path starts its own history and the old path can show a
+deletion. Merge diffs are excluded; reachable non-merge ancestors remain eligible.
+No blame, author attribution, bug-fix prediction or historical function tracking.
+
+Review candidates require **≥3 change commits AND at least one** current signal:
+
+| Signal | Named-constant threshold |
+| --- | --- |
+| `frequently_changed` | ≥3 commits, for any selected day window |
+| `large_source` | ≥400 nonblank source/test lines |
+| `long_function` | ≥80 physical Rust function lines |
+| `deep_nesting` | Rust maxControlDepth ≥4 |
+
+These are explainable review priorities, not a score or proof of defects.
+Candidates and most-changed files sort by changes DESC, churn DESC (unknown last),
+path ASC; each list returns at most 10. Empty candidates are normal. With fewer
+than 3 commits and complete history, status says insufficient change history.
+Most-changed files remain available independently of candidate eligibility.
+
+All measured source files and Rust file aggregates are retained during existing
+LOC/AST analysis; no second scan or AST pass. Rust aggregates are function count,
+longest function, maximum control depth and total control-flow nodes. Failed or
+skipped AST files and non-Rust files have unknown structure; successfully parsed
+files with no named functions have known zeros. Current uncommitted structure is
+not claimed to describe earlier commits. Deleted/ignored paths may have history
+but unknown current structure. Working-tree changes are flagged, not counted.
+
+Co-change means both workspace paths changed in the same commit, **not** an LSP
+or runtime dependency. A commit with >100 paths still contributes churn but is
+skipped for co-change (explicit partial reason). Only top-10 neighbors of reported
+files are computed; no global pair graph is stored.
+
+Limits: **1,000 commits**, **10,000 changed paths**, **64 MiB total Git stdout**,
+8 KiB retained stderr per child, **10 seconds per entire Git session**. A sentinel
+commit detects truncation. Interrupted output contributes only complete commits;
+a file-budget-overflowing commit is discarded atomically. Shallow history is
+explicitly flagged as partial. Timeout/cancellation kills and reaps the Git child;
+the TUI exit handle also prevents a new spawn racing with quit. Existing LOC/AST
+budgets remain unchanged.
+
+JSON uses the v1 envelope. `data` includes `available`, nullable structured
+`reason {code,message}`, `sinceDays`, `asOfUtc`, `headSha`, nullable
+`commitsAnalyzed`, `changedFiles`, `candidateFiles`, `historyShallow`,
+`workingTreeDirty`, `historyPartial`, `partial`, `partialReasons`, `hotspots` and
+`mostChangedFiles`. File records contain `path`, `changeCommits`, nullable
+`addedLines`, `deletedLines`, `churnLines`, `lastChangedAt`, `presentInTree`,
+nullable `sourceNonblankLines`, `functions`, `longestFunctionLines`,
+`maxControlDepth`, `controlFlowNodes`, `signals`, `reviewCandidate` and `coChanged`
+neighbors (`path`, `commits`). Paths are workspace-relative; null differs from 0.
+Existing commands' JSON contracts are unchanged. Git-not-found, non-worktree,
+unborn HEAD and Git errors return `ok:true` but `available:false` with a reason,
+never an empty supposedly measured history. Cargo discovery errors still fail.
+
+`partialReasons` identifies commit/file/output budgets, timeout, cancellation,
+co-change file limits, shallow history, path omissions or incomplete current
+LOC/AST analysis. `historyPartial` covers Git limitations; `partial` also covers
+incomplete current metrics. Unknown non-Rust structure is expected, not a failure.
+
+Overview loads Git after Metrics and Maintainability, independently of RA. Its
+top-10 section precedes long file/function lists; fallback rows are marked
+`[most changed]`. Select with `j/k` for history, current structure, signals and
+co-change in the right pane. Ctrl+l then `j/k` scrolls; Ctrl+h returns. Select
+Workspace to restore global metrics. Enter reuses `ExplorerState::reveal_file`
+for the exact file and metadata, then existing Rust symbols → Inspector → `c`
+Calls. No symbol name-only resolution. Missing/ignored paths show a notice.
+Git unavailability and RA errors are independent and do not close Overview.
+
 ## Headless semantic summary
 
 Produce the complete textual summary:
@@ -306,7 +402,7 @@ Failures keep a non-zero exit status while writing one valid JSON value to stdou
 
 Ambiguity errors also include deterministic candidates and a `truncated` flag. Missing project paths use `project_not_found`; a missing rust-analyzer executable uses `analyzer_not_found` and is the only error that triggers installation advice.
 
-JSON contains normalized semantic records with repository-relative paths for workspace files. Summary JSON reports `"workspaceRoot":"."`, so equivalent checkouts serialize identically; terminal summary output still shows the absolute workspace path. JSON contains no layout, UI, session, timestamp, or graph-snapshot fields. The envelope remains schema version 1 because this pre-production contract is being refined before its first stable release.
+JSON contains normalized semantic records with repository-relative paths for workspace files. Summary JSON reports `"workspaceRoot":"."`, so equivalent checkouts serialize identically; terminal summary output still shows the absolute workspace path. JSON contains no layout, UI, session or graph-snapshot fields. Git reports alone include explicit UTC analysis and commit timestamps. The envelope remains schema version 1 because this pre-production contract is being refined before its first stable release.
 
 ## Architecture
 
@@ -341,6 +437,7 @@ The implementation is one binary crate:
 - `metrics.rs` calculates deterministic passive file, language and package statistics from that tree.
 - `metrics/stream.rs` counts UTF-8 text lines with fixed memory and read budgets.
 - `maintainability.rs` and `maintainability/syntax.rs` measure bounded Rust function structure.
+- `git_analysis/` reads bounded local history and correlates it with current file/AST metrics without RA.
 - `tui/` separates interactive state, terminal events, rendering, and the single-session analyzer worker.
 
 Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.
