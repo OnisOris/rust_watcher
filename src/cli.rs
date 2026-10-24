@@ -22,6 +22,7 @@ pub struct Cli {
 pub enum Command {
     Doctor,
     Summary,
+    Stats,
     Symbol {
         name: String,
     },

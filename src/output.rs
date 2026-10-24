@@ -108,6 +108,33 @@ pub fn summary(value: &ProjectSummary) {
     }
 }
 
+pub fn metrics(m: &crate::metrics::RepositoryMetrics) {
+    println!("Repository Metrics{}\n\nFiles                {}\nSource files         {}\nPhysical LOC         {}\nNonblank LOC         {}\nSource physical LOC  {}\nSource nonblank LOC  {}\nTest files           {}\nTest nonblank LOC    {}", if m.partial { " (partial)" } else { "" }, m.total_files, m.code_files, m.physical_lines, m.nonblank_lines, m.code_physical_lines, m.code_nonblank_lines, m.test_files, m.test_nonblank_lines);
+    println!("\nLanguages (nonblank lines)");
+    for l in &m.languages {
+        println!(
+            "  {:16} {:8}  {} files",
+            l.language, l.nonblank_lines, l.files
+        );
+    }
+    println!("\nCargo packages (physical lines)");
+    for p in &m.packages {
+        println!("  {:16} {:8}  {} files", p.name, p.physical_lines, p.files);
+    }
+    println!("\nLargest source files (nonblank lines)");
+    for f in &m.largest_files {
+        println!("  {}  {}", f.path.display(), f.nonblank_lines);
+    }
+    println!(
+        "\nSkipped: binary {}, invalid UTF-8 {}, oversized {}, unreadable {}, scan errors {}",
+        m.skipped.binary,
+        m.skipped.invalid_utf8,
+        m.skipped.oversized,
+        m.skipped.unreadable,
+        m.skipped.scan_errors
+    );
+}
+
 pub fn symbols(result: &SymbolSearchResult) {
     if result.items.is_empty() {
         println!("No symbols found.");

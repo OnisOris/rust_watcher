@@ -1,5 +1,6 @@
 mod cli;
 mod lsp;
+mod metrics;
 mod model;
 mod output;
 mod project;
@@ -40,6 +41,15 @@ async fn execute(cli: &Cli) -> Result<()> {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
+    if matches!(cli.command, Some(Command::Stats)) {
+        let tree = repository::scan(&project.workspace_root)?;
+        let metrics = metrics::analyze(&project.workspace_root, &tree, &project);
+        if cli.json {
+            return output::json(&metrics);
+        }
+        output::metrics(&metrics);
+        return Ok(());
+    }
     if cli.command.is_none() && !cli.json {
         return tui::run(project).await;
     }
@@ -112,7 +122,7 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
                 Ok(())
             }
         }
-        Some(Command::Doctor) => unreachable!(),
+        Some(Command::Doctor | Command::Stats) => unreachable!(),
     }
 }
 

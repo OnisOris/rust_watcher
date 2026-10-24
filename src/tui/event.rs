@@ -22,7 +22,7 @@ pub(super) async fn run_loop(
     app: &mut App,
     commands: &mpsc::Sender<AnalyzerCommand>,
     events: &mut mpsc::Receiver<AnalyzerEvent>,
-    repository: &mut mpsc::Receiver<std::result::Result<crate::repository::RepositoryTree, String>>,
+    repository: &mut mpsc::Receiver<super::RepositoryEvent>,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     let mut repository_open = true;
@@ -44,11 +44,19 @@ pub(super) async fn run_loop(
                 terminal.draw(app)?;
             }
             result = repository.recv(), if repository_open => {
-                repository_open = false;
                 match result {
-                    Some(Ok(tree)) => app.explorer.apply_tree(tree),
-                    Some(Err(message)) => app.explorer.fail(message),
-                    None => app.explorer.fail("repository scanner stopped".into()),
+                    Some(super::RepositoryEvent::Tree(tree)) => app.explorer.apply_tree(tree),
+                    Some(super::RepositoryEvent::Metrics(metrics)) => app.metrics = Some(metrics),
+                    Some(super::RepositoryEvent::Error(message)) => {
+                        app.metrics_error = Some(message.clone());
+                        app.explorer.fail(message);
+                    }
+                    None => {
+                        repository_open = false;
+                        if app.metrics.is_none() && app.metrics_error.is_none() {
+                            app.metrics_error = Some("repository metrics worker stopped".into());
+                        }
+                    }
                 }
                 terminal.draw(app)?;
             }
@@ -189,7 +197,30 @@ pub(super) async fn handle_key(
             KeyCode::Enter if app.view == View::Explorer => {
                 activate_explorer(app, commands).await?
             }
-            KeyCode::Enter => app.activate_project_item(),
+            KeyCode::Enter => {
+                let offset =
+                    1 + app.project.binary_entrypoints().len() + app.project.packages.len();
+                let path = app
+                    .project_selection
+                    .checked_sub(offset)
+                    .and_then(|i| app.metrics.as_ref()?.largest_files.get(i))
+                    .map(|f| f.path.clone());
+                if let Some(path) = path {
+                    if app.project.workspace_root.join(&path).is_file()
+                        && app.explorer.reveal_file(&path)
+                    {
+                        app.switch_view(View::Explorer);
+                        activate_explorer(app, commands).await?;
+                    } else {
+                        app.notice = Some(format!(
+                            "File unavailable in repository tree: {}",
+                            path.display()
+                        ));
+                    }
+                } else {
+                    app.activate_project_item();
+                }
+            }
             _ => {}
         },
     }
@@ -363,6 +394,50 @@ mod tests {
     use crate::model::{Position, Range, Symbol};
     use crate::project::Project;
     use crate::repository::{RepoEntry, RepoEntryKind, RepositoryTree};
+
+    #[tokio::test]
+    async fn largest_file_drill_down_and_missing_file_notice() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
+        std::fs::write(temp.path().join("src/nested/main.rs"), "fn main() {}\n").unwrap();
+        let mut app = app();
+        app.project.workspace_root = temp.path().into();
+        let tree = crate::repository::scan(temp.path()).unwrap();
+        app.metrics = Some(crate::metrics::analyze(temp.path(), &tree, &app.project));
+        app.explorer.apply_tree(tree);
+        app.move_selection(1);
+        assert_eq!(app.project_selection, 1);
+        let (tx, mut rx) = mpsc::channel(16);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.view, View::Explorer);
+        assert_eq!(
+            app.explorer.selected_entry().unwrap().path,
+            std::path::Path::new("src/nested/main.rs")
+        );
+        assert!(app.explorer.is_expanded(std::path::Path::new("src/nested")));
+        assert_eq!(app.explorer.file.as_ref().unwrap().size, Some(13));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AnalyzerCommand::InspectFile { .. })
+        ));
+        app.switch_view(View::Overview);
+        std::fs::remove_file(temp.path().join("src/nested/main.rs")).unwrap();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.view, View::Overview);
+        assert!(app.notice.as_ref().unwrap().contains("File unavailable"));
+    }
 
     fn app() -> App {
         App::new(Project {

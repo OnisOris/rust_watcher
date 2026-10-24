@@ -72,6 +72,30 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let idle = Style::default().fg(Color::DarkGray);
+    if area.width < 100 {
+        let mut spans = vec![Span::raw(" wt ")];
+        for (view, label) in [
+            (View::Overview, "[1 Overview]"),
+            (View::Symbols, "[2 Symbols]"),
+            (View::Calls, "[3 Calls]"),
+            (View::Explorer, "[4 Explorer]"),
+        ] {
+            spans.push(Span::styled(
+                label,
+                if app.view == view { active } else { idle },
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("RA {status}"),
+            Style::default().fg(color),
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)),
+            area,
+        );
+        return;
+    }
     let title = Line::from(vec![
         Span::styled(" wt ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!("{}  ", truncate(workspace, 20))),
@@ -611,9 +635,20 @@ fn render_project(frame: &mut Frame<'_>, area: Rect, app: &App) {
     for package in &app.project.packages {
         items.push(ListItem::new(format!("Crate\n  {}", package.name)));
     }
+    if let Some(metrics) = &app.metrics {
+        for (index, file) in metrics.largest_files.iter().enumerate() {
+            items.push(ListItem::new(format!(
+                "Largest #{} · {} nonblank\n  {}",
+                index + 1,
+                file.nonblank_lines,
+                file.path.display()
+            )));
+        }
+    }
     let mut state = ListState::default().with_selected(Some(app.project_selection));
     frame.render_stateful_widget(
         List::new(items)
+            .highlight_symbol("> ")
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
             .block(pane_block(" PROJECT ", app.pane == Pane::Project)),
         area,
@@ -624,26 +659,84 @@ fn render_project(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(overview_details(app))
+            .scroll((app.metrics_scroll as u16, 0))
             .wrap(Wrap { trim: false })
-            .block(pane_block(" DETAILS ", app.pane == Pane::Details)),
+            .block(pane_block(
+                " REPOSITORY METRICS ",
+                app.pane == Pane::Details,
+            )),
         area,
     );
 }
 
 fn overview_details(app: &App) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        heading("Workspace"),
-        Line::raw(""),
-        Line::raw(format!("crates       {}", app.project.packages.len())),
-        Line::raw(format!("rust files   {}", app.project.rust_files.len())),
-        Line::raw(""),
-        heading("Entrypoints"),
-    ];
+    let mut lines = vec![heading("Workspace")];
+    if let Some(notice) = &app.notice {
+        lines.push(Line::styled(
+            notice.clone(),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if let Some(m) = &app.metrics {
+        lines.push(Line::raw(if m.partial {
+            "Metrics ready · PARTIAL"
+        } else {
+            "Metrics ready"
+        }));
+        lines.push(Line::raw(format!(
+            "Files {} · source {} · dirs {}",
+            m.total_files, m.code_files, m.total_directories
+        )));
+        lines.push(Line::raw(format!(
+            "Physical LOC {} · nonblank {}",
+            m.physical_lines, m.nonblank_lines
+        )));
+        lines.push(Line::raw(format!(
+            "Source LOC {} · nonblank {}",
+            m.code_physical_lines, m.code_nonblank_lines
+        )));
+        lines.push(Line::raw(format!(
+            "Test files {} · nonblank {} ({:.1}%)",
+            m.test_files,
+            m.test_nonblank_lines,
+            100.0 * m.test_nonblank_lines as f64 / m.code_nonblank_lines.max(1) as f64
+        )));
+        lines.push(heading("Languages · nonblank lines"));
+        for l in &m.languages {
+            lines.push(Line::raw(format!(
+                "{}  {} · {} files",
+                l.language, l.nonblank_lines, l.files
+            )));
+        }
+        lines.push(heading("Largest Packages · physical lines"));
+        for p in m.packages.iter().take(5) {
+            lines.push(Line::raw(format!(
+                "{}  {} · {} files",
+                p.name, p.physical_lines, p.files
+            )));
+        }
+        lines.push(Line::raw(format!(
+            "Skipped: binary {} · UTF8 {} · large {} · read {} · scan {}",
+            m.skipped.binary,
+            m.skipped.invalid_utf8,
+            m.skipped.oversized,
+            m.skipped.unreadable,
+            m.skipped.scan_errors
+        )));
+        lines.push(Line::raw(
+            "Tests: file heuristics; inline tests not separated.",
+        ));
+    } else if let Some(error) = &app.metrics_error {
+        lines.push(Line::raw(format!("Metrics error: {error}")));
+    } else {
+        lines.push(Line::raw("Repository Metrics: loading..."));
+    }
+    lines.push(heading("Entrypoints"));
     lines.extend(
         app.project
             .binary_entrypoints()
-            .into_iter()
-            .map(|path| Line::raw(path.display().to_string())),
+            .iter()
+            .map(|p| Line::raw(p.display().to_string())),
     );
     lines.push(Line::raw(""));
     lines.push(heading("Analyzer"));
@@ -887,6 +980,12 @@ fn footer_text(app: &App) -> &'static str {
             } else {
                 "j/k move   Enter follow   e workspace-only   Ctrl+h current   Esc center   q quit"
             }
+        }
+        Overlay::None if app.view == View::Overview && app.pane == Pane::Details => {
+            "j/k scroll metrics   Ctrl+h project   1/2/3/4 views   ? help   q quit"
+        }
+        Overlay::None if app.view == View::Overview => {
+            "j/k select   Enter explore   Ctrl+l metrics   1/2/3/4 views   ? help   q quit"
         }
         Overlay::None => {
             "1 Overview   2 Symbols   3 Calls   4 Explorer   / search   Ctrl+h/l panes   q quit"
@@ -1319,6 +1418,58 @@ mod tests {
         ] {
             assert!(help.contains(expected), "missing {expected} in help");
         }
+    }
+
+    #[test]
+    fn metrics_loading_ready_partial_and_errors_render_independently() {
+        let mut app = app();
+        assert!(render_text(&app).contains("Repository Metrics: loading..."));
+        app.metrics_error = Some("cannot read repository".into());
+        assert!(render_text(&app).contains("Metrics error: cannot read repository"));
+        app.metrics_error = None;
+        app.metrics = Some(crate::metrics::RepositoryMetrics {
+            total_files: 42,
+            code_nonblank_lines: 100,
+            partial: true,
+            ..Default::default()
+        });
+        app.analyzer_state = AnalyzerState::Error("analyzer unavailable".into());
+        let text = render_text(&app);
+        assert!(text.contains("Metrics ready · PARTIAL"));
+        assert!(text.contains("Files 42"));
+        assert!(text.contains("Source LOC 0 · nonblank 100"));
+        assert!(text.contains("analyzer unavailable"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Files 42"));
+        assert!(text.contains("RA"));
+    }
+
+    #[test]
+    #[ignore = "local Overview rendering timing"]
+    fn metrics_render_timing() {
+        let mut app = app();
+        let project = Project::discover(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let tree = crate::repository::scan(&project.workspace_root).unwrap();
+        app.metrics = Some(crate::metrics::analyze(
+            &project.workspace_root,
+            &tree,
+            &project,
+        ));
+        app.project = project;
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            terminal.draw(|f| render(f, &app)).unwrap();
+        }
+        eprintln!("Overview render average {:?}", start.elapsed() / 100);
     }
 
     #[test]

@@ -9,7 +9,7 @@ The `wt` binary opens an interactive terminal UI for a Cargo workspace. It shows
 ## Requirements
 
 - Rust and Cargo
-- rust-analyzer
+- rust-analyzer for semantic commands and Rust symbol inspection (metrics work without it)
 
 Install rust-analyzer through rustup:
 
@@ -74,7 +74,69 @@ The tree includes useful dotfiles, honors `.gitignore`, never follows symlinks, 
 
 In every view, press `?` for help and `q` or `Ctrl+C` to quit. One rust-analyzer process serves search, Inspector, and Calls for the entire UI session. Interactive work is scheduled between semantic phases, so a newer inspection or Calls target replaces stale remaining work and search does not wait for a complete old Inspector pipeline.
 
-## Headless summary
+## Repository metrics
+
+```bash
+wt stats
+wt stats --json
+wt /path/to/project stats
+```
+
+`stats` uses Cargo metadata and the same repository tree as Explorer. It never starts
+or probes rust-analyzer; Rust and Cargo suffice. Overview loads these metrics on one
+background thread after its first frame, independently of analyzer readiness or errors.
+In Overview, select a `Largest #` row with `j/k` and press Enter to reveal that exact
+file in Explorer, expanding its parents and opening its metadata. Rust files use the
+existing document-symbol Inspector when the analyzer is available. A missing file
+produces a notice. Existing workspace, crate, and entrypoint rows remain selectable.
+Use `Ctrl+l` then `j/k` to scroll metrics; `Ctrl+h` returns to the project list.
+
+Physical lines include comments and blanks; blank lines contain only Unicode
+whitespace; nonblank lines are physical lines minus blank lines. These are **not
+syntactic SLOC**, complexity, or evidence of code quality. Empty files have zero
+lines; a final unterminated line counts once; LF and CRLF count identically.
+
+The JSON v1 success envelope is unchanged. Its new `stats` data uses camelCase:
+
+- `totalFiles` counts scanned regular files, including files skipped for line counting;
+  `totalDirectories` excludes the workspace root; `symlinks` counts unfollowed links.
+- `textFiles` counts successfully decoded text files; `codeFiles` counts recognized
+  source and test files, including skipped ones. `physicalLines`, `blankLines`, and
+  `nonblankLines` sum all accepted text. `codePhysicalLines` and
+  `codeNonblankLines` sum only source and test files.
+- `testFiles` and `testNonblankLines` describe file-level tests. Recognized source
+  files below a `tests/` component, `*_test.rs`, `*_test.go`, `test_*.py`, and
+  `*.test.{ts,tsx,js,jsx}` are classified as tests. Inline `#[cfg(test)]` modules
+  remain part of ordinary source files; this is not a count of test functions or coverage.
+- `languages` sorts by language name and includes files, physical and nonblank lines.
+  Extensions: Rust `.rs`; TypeScript `.ts/.tsx`; JavaScript `.js/.jsx`; Python `.py`;
+  C `.c/.h`; C++ `.cpp/.cc/.cxx/.hpp`; Go `.go`; Java `.java`; Shell `.sh`;
+  configuration TOML `.toml`, JSON `.json`, YAML `.yaml/.yml`; documentation Markdown
+  `.md`. Unknown extensions are `Other`. Classification adds no semantic backends.
+- `categories` lists source, tests, configuration, documentation, other in that order,
+  with file and line totals. Configuration and documentation never count as code.
+- `packages` attributes each scanned file to the deepest workspace manifest root,
+  once only, and reports name, relative root, files, physical/nonblank lines and test
+  files. Files outside package roots remain in repository totals. External Cargo
+  dependencies are not packages. Packages sort by physical lines descending, then
+  name and root. `largestFiles` holds up to 10 source/test files, ordered by nonblank
+  lines descending then relative path, with language, category and line totals.
+- `skipped` reports binary, invalid UTF-8, oversized, unreadable, and scan-error
+  counts. `partial` is true for truncation, scan errors, invalid UTF-8, unreadable or
+  oversized files; ordinary binary exclusions alone do not imply incomplete source
+  statistics. Counts describe the scan snapshot, not an atomic filesystem snapshot.
+
+Reading is bounded to `MAX_FILE_BYTES = 2 MiB` per file, plus one byte to detect
+growth. At most one file buffer is held at a time; known oversized files are never
+opened. NUL or control bytes other than tab, LF, CR and form feed classify a file as
+binary. Other non-UTF-8 input is skipped, never lossily decoded. No symlinks are
+traversed. The existing scan respects git/global ignores and excludes `.git`,
+`target`, `node_modules`, `.next`, `.cache`, `dist`, with a 50,000-entry limit.
+Skipped files retain their file/language/package counts but contribute no lines.
+Quitting closes the metrics channel and cancels further file reads; it does not wait
+for metrics to finish or leave a daemon.
+
+## Headless semantic summary
 
 Produce the complete textual summary:
 
@@ -160,7 +222,10 @@ Small normalized Rust structures
 Terminal or JSON output
 ```
 
-The interactive UI also starts one independent, language-neutral repository metadata scan after its first frame. That scan feeds Explorer without coupling filesystem traversal to rust-analyzer or semantic output.
+The interactive UI also starts one independent, language-neutral repository metadata
+scan after its first frame. Its `RepositoryTree` feeds both Explorer and a bounded
+metrics calculation on the same background thread. The headless `stats` branch
+returns after this pipeline, before any rust-analyzer startup.
 
 The implementation is one binary crate:
 
@@ -171,6 +236,7 @@ The implementation is one binary crate:
 - `model.rs` contains transport-neutral result structures.
 - `output.rs` renders those structures.
 - `repository.rs` builds the bounded, gitignore-aware physical repository tree.
+- `metrics.rs` calculates deterministic passive file, language and package statistics from that tree.
 - `tui/` separates interactive state, terminal events, rendering, and the single-session analyzer worker.
 
 Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.

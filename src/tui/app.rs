@@ -119,6 +119,9 @@ pub(super) struct CallsState {
 }
 
 pub(super) struct App {
+    pub metrics: Option<crate::metrics::RepositoryMetrics>,
+    pub metrics_error: Option<String>,
+    pub metrics_scroll: usize,
     pub project: Project,
     pub analyzer_state: AnalyzerState,
     pub view: View,
@@ -143,6 +146,9 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            metrics: None,
+            metrics_error: None,
+            metrics_scroll: 0,
             project,
             analyzer_state: AnalyzerState::Starting,
             view: View::Overview,
@@ -165,7 +171,9 @@ impl App {
     }
 
     fn project_item_count(&self) -> usize {
-        1 + self.project.binary_entrypoints().len() + self.project.packages.len()
+        1 + self.project.binary_entrypoints().len()
+            + self.project.packages.len()
+            + self.metrics.as_ref().map_or(0, |m| m.largest_files.len())
     }
 
     pub(super) fn switch_view(&mut self, view: View) {
@@ -223,7 +231,15 @@ impl App {
                     self.explorer.move_file_selection(delta);
                 }
             }
-            Pane::Details | Pane::CallCurrent => {}
+            Pane::Details => {
+                let lines = self
+                    .metrics
+                    .as_ref()
+                    .map_or(8, |m| 18 + m.languages.len() + m.packages.len().min(5))
+                    + self.project.binary_entrypoints().len();
+                self.metrics_scroll = move_index(self.metrics_scroll, lines, delta);
+            }
+            Pane::CallCurrent => {}
         }
     }
 

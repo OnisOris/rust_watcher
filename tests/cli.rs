@@ -290,3 +290,76 @@ fn contains_cycle(nodes: &Value) -> bool {
             .any(|node| node["cycle"] == true || contains_cycle(&node["children"]))
     })
 }
+
+#[cfg(unix)]
+#[test]
+fn stats_counts_fixture_without_ever_starting_analyzer() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("ra-started");
+    let trap = temp.path().join("rust-analyzer");
+    std::fs::write(
+        &trap,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&trap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname='stats_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n\n// comment\n").unwrap();
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", &path)
+        .arg(&project)
+        .args(["stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["schemaVersion"], 1);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["codeFiles"], 1);
+    assert_eq!(v["data"]["codePhysicalLines"], 3);
+    assert_eq!(v["data"]["codeNonblankLines"], 2);
+    assert_eq!(v["data"]["packages"][0]["name"], "stats_fixture");
+    assert!(!marker.exists());
+    std::fs::remove_file(trap).unwrap();
+    for name in ["cargo", "rustc"] {
+        let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(executable, temp.path().join(name)).unwrap();
+    }
+    let absent = Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", temp.path())
+        .arg(&project)
+        .args(["stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        absent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&absent.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&absent.stdout).unwrap()["data"]["codeNonblankLines"],
+        2
+    );
+    let fixture = json_success("workspace_project", &["stats", "--json"]);
+    assert_eq!(fixture["packages"].as_array().unwrap().len(), 2);
+    assert_eq!(fixture["codeFiles"], 2);
+}

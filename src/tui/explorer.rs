@@ -250,6 +250,21 @@ impl ExplorerState {
         }
     }
 
+    pub fn reveal_file(&mut self, path: &Path) -> bool {
+        if !self.tree.as_ref().is_some_and(|tree| {
+            tree.entries
+                .iter()
+                .any(|e| e.path == path && e.kind == RepoEntryKind::File)
+        }) {
+            return false;
+        }
+        for parent in path.ancestors().skip(1) {
+            self.expanded.insert(parent.to_path_buf());
+        }
+        self.rebuild_visible(Some(path));
+        true
+    }
+
     fn rebuild_index(&mut self) {
         self.children_by_parent.clear();
         let Some(tree) = &self.tree else {

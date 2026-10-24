@@ -10,6 +10,12 @@ use app::App;
 use tokio::sync::mpsc;
 use worker::{AnalyzerCommand, AnalyzerEvent};
 
+pub(super) enum RepositoryEvent {
+    Tree(crate::repository::RepositoryTree),
+    Metrics(crate::metrics::RepositoryMetrics),
+    Error(String),
+}
+
 pub async fn run(project: Project) -> Result<()> {
     event::install_panic_hook();
     let mut terminal = event::TerminalSession::enter()?;
@@ -23,10 +29,24 @@ pub async fn run(project: Project) -> Result<()> {
     let (repository_tx, mut repository_rx) = mpsc::channel(1);
     let analyzer_task = tokio::spawn(worker::analyzer_worker(project, command_rx, event_tx));
     let repository_root = app.project.workspace_root.clone();
-    std::thread::spawn(move || {
-        let result =
-            crate::repository::scan(&repository_root).map_err(|error| format!("{error:#}"));
-        let _ = repository_tx.blocking_send(result);
+    let metrics_project = app.project.clone();
+    std::thread::spawn(move || match crate::repository::scan(&repository_root) {
+        Ok(tree) => {
+            if repository_tx
+                .blocking_send(RepositoryEvent::Tree(tree.clone()))
+                .is_err()
+            {
+                return;
+            }
+            let metrics =
+                crate::metrics::analyze_until(&repository_root, &tree, &metrics_project, || {
+                    repository_tx.is_closed()
+                });
+            let _ = repository_tx.blocking_send(RepositoryEvent::Metrics(metrics));
+        }
+        Err(error) => {
+            let _ = repository_tx.blocking_send(RepositoryEvent::Error(format!("{error:#}")));
+        }
     });
     let result = event::run_loop(
         &mut terminal,
@@ -36,6 +56,7 @@ pub async fn run(project: Project) -> Result<()> {
         &mut repository_rx,
     )
     .await;
+    drop(repository_rx);
     let _ = command_tx.send(AnalyzerCommand::Shutdown).await;
     let _ = analyzer_task.await;
     result
