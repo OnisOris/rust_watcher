@@ -119,6 +119,8 @@ pub(super) struct CallsState {
 }
 
 pub(super) struct App {
+    pub maintainability: Option<crate::maintainability::MaintainabilityReport>,
+    pub maintainability_error: Option<String>,
     pub metrics: Option<crate::metrics::RepositoryMetrics>,
     pub metrics_error: Option<String>,
     pub metrics_scroll: usize,
@@ -146,6 +148,8 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            maintainability: None,
+            maintainability_error: None,
             metrics: None,
             metrics_error: None,
             metrics_scroll: 0,
@@ -171,9 +175,7 @@ impl App {
     }
 
     fn project_item_count(&self) -> usize {
-        1 + self.project.binary_entrypoints().len()
-            + self.project.packages.len()
-            + self.metrics.as_ref().map_or(0, |m| m.largest_files.len())
+        super::overview::targets(self).len()
     }
 
     pub(super) fn switch_view(&mut self, view: View) {
@@ -232,11 +234,7 @@ impl App {
                 }
             }
             Pane::Details => {
-                let lines = self
-                    .metrics
-                    .as_ref()
-                    .map_or(8, |m| 18 + m.languages.len() + m.packages.len().min(5))
-                    + self.project.binary_entrypoints().len();
+                let lines = super::overview::details(self).len();
                 self.metrics_scroll = move_index(self.metrics_scroll, lines, delta);
             }
             Pane::CallCurrent => {}

@@ -55,6 +55,14 @@ pub struct LspClient {
 
 impl LspClient {
     pub async fn start(binary: &Path, root: &Path) -> Result<Self> {
+        Self::start_configured(binary, root, false).await
+    }
+
+    pub async fn start_passive(binary: &Path, root: &Path) -> Result<Self> {
+        Self::start_configured(binary, root, true).await
+    }
+
+    async fn start_configured(binary: &Path, root: &Path, passive: bool) -> Result<Self> {
         let mut command = Command::new(binary);
         command
             .stdin(Stdio::piped())
@@ -119,6 +127,7 @@ impl LspClient {
                 json!({
                     "processId": std::process::id(),
                     "rootUri": root_uri,
+                    "initializationOptions": if passive { passive_options() } else { Value::Null },
                     "workspaceFolders": [{"uri": root_uri, "name": root.file_name().and_then(|name| name.to_str()).unwrap_or("workspace")}],
                     "capabilities": {
                         "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}, "callHierarchy": {}, "hover": {}, "references": {}, "definition": {}, "publishDiagnostics": {}},
@@ -343,6 +352,10 @@ impl LspClient {
             format!("{message}\nrust-analyzer stderr (tail):\n{tail}")
         }
     }
+}
+
+fn passive_options() -> Value {
+    json!({"check": {"enable": false}, "cargo": {"buildScripts": {"enable": false}}, "procMacro": {"enable": false}})
 }
 
 fn spawn_reader(
@@ -598,6 +611,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(response["id"], "abc-123");
+    }
+
+    #[test]
+    fn passive_tui_does_not_enable_checks_build_scripts_or_proc_macros() {
+        let options = passive_options();
+        assert_eq!(options["check"]["enable"], false);
+        assert_eq!(options["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(options["procMacro"]["enable"], false);
     }
 
     #[test]

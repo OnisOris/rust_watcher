@@ -23,6 +23,7 @@ pub enum Command {
     Doctor,
     Summary,
     Stats,
+    Maintainability,
     Symbol {
         name: String,
     },

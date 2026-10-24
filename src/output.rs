@@ -125,13 +125,65 @@ pub fn metrics(m: &crate::metrics::RepositoryMetrics) {
     for f in &m.largest_files {
         println!("  {}  {}", f.path.display(), f.nonblank_lines);
     }
+    if !m.unmeasured_large_files.is_empty() {
+        println!("\nUnmeasured files (LOC unknown)");
+    }
+    for f in &m.unmeasured_large_files {
+        println!(
+            "  {}  {} bytes  {}",
+            f.path.display(),
+            f.size_bytes
+                .map_or_else(|| "unknown".into(), |n| n.to_string()),
+            f.reason
+        );
+    }
     println!(
-        "\nSkipped: binary {}, invalid UTF-8 {}, oversized {}, unreadable {}, scan errors {}",
+        "\nSkipped: binary {}, invalid UTF-8 {}, oversized {}, unreadable {}, scan errors {}, total-read budget {}",
         m.skipped.binary,
         m.skipped.invalid_utf8,
         m.skipped.oversized,
         m.skipped.unreadable,
-        m.skipped.scan_errors
+        m.skipped.scan_errors,
+        m.skipped.total_read_budget
+    );
+}
+
+pub fn maintainability(r: &crate::maintainability::MaintainabilityReport) {
+    println!("Rust Maintainability{}\n\nFunctions {}\nMedian length {} lines\nP95 length {} lines\nMax control depth {}\nParsed files {} / {}\nParse failures {} · skipped {}", if r.partial { " (partial)" } else { "" }, r.functions, r.median_function_lines, r.p95_function_lines, r.max_control_depth, r.parsed_files, r.analyzed_files, r.parse_failures, r.skipped_files);
+    for (title, functions) in [
+        ("LONGEST FUNCTIONS", &r.longest_functions),
+        ("DEEPEST CONTROL FLOW", &r.deepest_functions),
+    ] {
+        println!("\n{title}");
+        for f in functions {
+            println!(
+                "  {}{}  {}:{}  {} lines · depth {} · {} control nodes",
+                f.qualified_name,
+                if f.test_classified { " [test]" } else { "" },
+                f.path.display(),
+                f.start_line,
+                f.physical_lines,
+                f.max_control_depth,
+                f.control_flow_nodes
+            );
+        }
+    }
+    println!("\nCargo packages");
+    for p in &r.packages {
+        println!(
+            "  {}: {} functions · median {} · p95 {} · depth {}",
+            p.name,
+            p.function_count,
+            p.median_function_lines,
+            p.p95_function_lines,
+            p.max_control_depth
+        );
+    }
+    for f in &r.failures {
+        println!("  {}: {}", f.file.display(), f.reason);
+    }
+    println!(
+        "\nSize and nesting are review signals, not defect or quality scores. Lines are 1-based."
     );
 }
 

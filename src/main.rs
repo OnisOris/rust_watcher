@@ -1,5 +1,6 @@
 mod cli;
 mod lsp;
+mod maintainability;
 mod metrics;
 mod model;
 mod output;
@@ -41,6 +42,15 @@ async fn execute(cli: &Cli) -> Result<()> {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
+    if matches!(cli.command, Some(Command::Maintainability)) {
+        let tree = repository::scan(&project.workspace_root)?;
+        let report = maintainability::analyze(&project.workspace_root, &tree, &project);
+        if cli.json {
+            return output::json(&report);
+        }
+        output::maintainability(&report);
+        return Ok(());
+    }
     if matches!(cli.command, Some(Command::Stats)) {
         let tree = repository::scan(&project.workspace_root)?;
         let metrics = metrics::analyze(&project.workspace_root, &tree, &project);
@@ -122,7 +132,7 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
                 Ok(())
             }
         }
-        Some(Command::Doctor | Command::Stats) => unreachable!(),
+        Some(Command::Doctor | Command::Stats | Command::Maintainability) => unreachable!(),
     }
 }
 

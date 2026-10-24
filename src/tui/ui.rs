@@ -164,8 +164,8 @@ fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
-    render_project(frame, panes[0], app);
-    render_details(frame, panes[1], app);
+    super::overview::render_project(frame, panes[0], app);
+    super::overview::render_details(frame, panes[1], app);
 }
 
 fn render_symbols_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -316,7 +316,7 @@ fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     };
 
-    let details_height = 9;
+    let details_height = if file.anchor.is_some() { 12 } else { 9 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(details_height), Constraint::Min(3)])
@@ -325,16 +325,27 @@ fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|package| package.name.as_str())
         .unwrap_or("—");
     let role = file_role(&app.project, &file.path).unwrap_or("file");
+    let mut file_details = vec![
+        heading(&file.path.display().to_string()),
+        Line::raw(""),
+        Line::raw(format!("type      {}", file_type(&file.path))),
+        Line::raw(format!("size      {}", format_size(file.size))),
+        Line::raw(format!("package   {package}")),
+        Line::raw(format!("role      {role}")),
+    ];
+    if let Some(anchor) = &file.anchor {
+        file_details.push(Line::raw(format!(
+            "anchor    {}:{} · {}",
+            anchor.identifier_line, anchor.identifier_column, anchor.qualified_name
+        )));
+        if let Some(notice) = &file.anchor_notice {
+            file_details.push(Line::raw(notice.clone()));
+        }
+    }
     frame.render_widget(
-        Paragraph::new(vec![
-            heading(&file.path.display().to_string()),
-            Line::raw(""),
-            Line::raw(format!("type      {}", file_type(&file.path))),
-            Line::raw(format!("size      {}", format_size(file.size))),
-            Line::raw(format!("package   {package}")),
-            Line::raw(format!("role      {role}")),
-        ])
-        .block(pane_block(" FILE ", active)),
+        Paragraph::new(file_details)
+            .wrap(Wrap { trim: false })
+            .block(pane_block(" FILE ", active)),
         rows[0],
     );
     if file
@@ -619,141 +630,6 @@ fn call_count(loading: bool, error: Option<&String>, count: usize) -> String {
     } else {
         count.to_string()
     }
-}
-
-fn render_project(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let mut items = vec![ListItem::new(vec![
-        Line::styled("▼ Project", Style::default().add_modifier(Modifier::BOLD)),
-        Line::raw(format!("  {}", project_name(&app.project))),
-    ])];
-    for entrypoint in app.project.binary_entrypoints() {
-        items.push(ListItem::new(format!(
-            "Entrypoint\n  {}",
-            entrypoint.display()
-        )));
-    }
-    for package in &app.project.packages {
-        items.push(ListItem::new(format!("Crate\n  {}", package.name)));
-    }
-    if let Some(metrics) = &app.metrics {
-        for (index, file) in metrics.largest_files.iter().enumerate() {
-            items.push(ListItem::new(format!(
-                "Largest #{} · {} nonblank\n  {}",
-                index + 1,
-                file.nonblank_lines,
-                file.path.display()
-            )));
-        }
-    }
-    let mut state = ListState::default().with_selected(Some(app.project_selection));
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("> ")
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-            .block(pane_block(" PROJECT ", app.pane == Pane::Project)),
-        area,
-        &mut state,
-    );
-}
-
-fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    frame.render_widget(
-        Paragraph::new(overview_details(app))
-            .scroll((app.metrics_scroll as u16, 0))
-            .wrap(Wrap { trim: false })
-            .block(pane_block(
-                " REPOSITORY METRICS ",
-                app.pane == Pane::Details,
-            )),
-        area,
-    );
-}
-
-fn overview_details(app: &App) -> Vec<Line<'static>> {
-    let mut lines = vec![heading("Workspace")];
-    if let Some(notice) = &app.notice {
-        lines.push(Line::styled(
-            notice.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    if let Some(m) = &app.metrics {
-        lines.push(Line::raw(if m.partial {
-            "Metrics ready · PARTIAL"
-        } else {
-            "Metrics ready"
-        }));
-        lines.push(Line::raw(format!(
-            "Files {} · source {} · dirs {}",
-            m.total_files, m.code_files, m.total_directories
-        )));
-        lines.push(Line::raw(format!(
-            "Physical LOC {} · nonblank {}",
-            m.physical_lines, m.nonblank_lines
-        )));
-        lines.push(Line::raw(format!(
-            "Source LOC {} · nonblank {}",
-            m.code_physical_lines, m.code_nonblank_lines
-        )));
-        lines.push(Line::raw(format!(
-            "Test files {} · nonblank {} ({:.1}%)",
-            m.test_files,
-            m.test_nonblank_lines,
-            100.0 * m.test_nonblank_lines as f64 / m.code_nonblank_lines.max(1) as f64
-        )));
-        lines.push(heading("Languages · nonblank lines"));
-        for l in &m.languages {
-            lines.push(Line::raw(format!(
-                "{}  {} · {} files",
-                l.language, l.nonblank_lines, l.files
-            )));
-        }
-        lines.push(heading("Largest Packages · physical lines"));
-        for p in m.packages.iter().take(5) {
-            lines.push(Line::raw(format!(
-                "{}  {} · {} files",
-                p.name, p.physical_lines, p.files
-            )));
-        }
-        lines.push(Line::raw(format!(
-            "Skipped: binary {} · UTF8 {} · large {} · read {} · scan {}",
-            m.skipped.binary,
-            m.skipped.invalid_utf8,
-            m.skipped.oversized,
-            m.skipped.unreadable,
-            m.skipped.scan_errors
-        )));
-        lines.push(Line::raw(
-            "Tests: file heuristics; inline tests not separated.",
-        ));
-    } else if let Some(error) = &app.metrics_error {
-        lines.push(Line::raw(format!("Metrics error: {error}")));
-    } else {
-        lines.push(Line::raw("Repository Metrics: loading..."));
-    }
-    lines.push(heading("Entrypoints"));
-    lines.extend(
-        app.project
-            .binary_entrypoints()
-            .iter()
-            .map(|p| Line::raw(p.display().to_string())),
-    );
-    lines.push(Line::raw(""));
-    lines.push(heading("Analyzer"));
-    lines.push(Line::raw(match &app.analyzer_state {
-        AnalyzerState::Starting => "starting...".into(),
-        AnalyzerState::Indexing => "indexing...".into(),
-        AnalyzerState::Ready => "ready".into(),
-        AnalyzerState::Error(message) => format!("error: {message}"),
-    }));
-    if let Some(notice) = &app.notice {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            notice.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    lines
 }
 
 fn render_symbols(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -1060,14 +936,14 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn pane_block<'a>(title: &'a str, active: bool) -> Block<'a> {
+pub(super) fn pane_block<'a>(title: &'a str, active: bool) -> Block<'a> {
     Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if active { Color::Cyan } else { Color::DarkGray }))
 }
 
-fn heading(value: &str) -> Line<'static> {
+pub(super) fn heading(value: &str) -> Line<'static> {
     Line::styled(
         value.to_owned(),
         Style::default().add_modifier(Modifier::BOLD),
@@ -1459,6 +1335,11 @@ mod tests {
         let project = Project::discover(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
         let tree = crate::repository::scan(&project.workspace_root).unwrap();
         app.metrics = Some(crate::metrics::analyze(
+            &project.workspace_root,
+            &tree,
+            &project,
+        ));
+        app.maintainability = Some(crate::maintainability::analyze(
             &project.workspace_root,
             &tree,
             &project,

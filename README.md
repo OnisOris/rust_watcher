@@ -2,7 +2,8 @@
 
 rust_watcher is a small semantic CLI for understanding Rust codebases.
 
-It uses cargo metadata and rust-analyzer instead of implementing its own Rust parser or compiler frontend.
+It uses cargo metadata and rust-analyzer for semantics. A separate, passive `syn`
+analysis measures Rust function structure without resolving semantic identities.
 
 The `wt` binary opens an interactive terminal UI for a Cargo workspace. It shows project structure immediately after Cargo metadata is available, then starts one rust-analyzer process that remains alive for the entire UI session. Headless semantic commands print compact terminal output or stable JSON. There is no web server, database, daemon, parser fallback, or frontend.
 
@@ -117,24 +118,125 @@ The JSON v1 success envelope is unchanged. Its new `stats` data uses camelCase:
   with file and line totals. Configuration and documentation never count as code.
 - `packages` attributes each scanned file to the deepest workspace manifest root,
   once only, and reports name, relative root, files, physical/nonblank lines and test
-  files. Files outside package roots remain in repository totals. External Cargo
+  files. Additive source-only fields are `sourceFiles`, `sourcePhysicalLines`,
+  `sourceNonblankLines`, and `testNonblankLines`; source includes source and test
+  categories. Files outside package roots remain in repository totals. External Cargo
   dependencies are not packages. Packages sort by physical lines descending, then
   name and root. `largestFiles` holds up to 10 source/test files, ordered by nonblank
   lines descending then relative path, with language, category and line totals.
 - `skipped` reports binary, invalid UTF-8, oversized, unreadable, and scan-error
   counts. `partial` is true for truncation, scan errors, invalid UTF-8, unreadable or
   oversized files; ordinary binary exclusions alone do not imply incomplete source
-  statistics. Counts describe the scan snapshot, not an atomic filesystem snapshot.
+  statistics. `totalReadBudget` counts files excluded by the session read budget.
+  `readBytes` includes bytes read from rejected input. `unmeasuredLargeFiles` keeps
+  up to 10 budget-excluded files, ordered by size descending then path, with
+  `path`, `sizeBytes`, and `reason` (`perFileBudget` or `totalReadBudget`). Their LOC
+  is unknown, never fabricated. Counts describe the scan snapshot, not an atomic
+  filesystem snapshot. TUI languages sort by nonblank lines descending; TUI packages
+  sort by source nonblank lines descending, then name/root. JSON ordering is unchanged.
 
-Reading is bounded to `MAX_FILE_BYTES = 2 MiB` per file, plus one byte to detect
-growth. At most one file buffer is held at a time; known oversized files are never
-opened. NUL or control bytes other than tab, LF, CR and form feed classify a file as
+Line counting streams up to `MAX_METRIC_FILE_BYTES = 64 MiB` per file and
+`MAX_TOTAL_READ_BYTES = 512 MiB` per analysis. `READ_BUFFER = 64 KiB` plus at most
+four UTF-8 carry bytes is fixed memory, even for an unterminated 64 MiB line. Reads
+never exceed either budget. Known oversized files are never opened; files that
+cannot fit the remaining total budget are skipped without consuming it, so smaller
+later files can still be measured. NUL or control bytes other than tab, LF, CR,
+vertical tab and form feed classify a file as
 binary. Other non-UTF-8 input is skipped, never lossily decoded. No symlinks are
 traversed. The existing scan respects git/global ignores and excludes `.git`,
 `target`, `node_modules`, `.next`, `.cache`, `dist`, with a 50,000-entry limit.
 Skipped files retain their file/language/package counts but contribute no lines.
 Quitting closes the metrics channel and cancels further file reads; it does not wait
 for metrics to finish or leave a daemon.
+
+## Rust maintainability
+
+```bash
+wt maintainability
+wt maintainability --json
+wt /path/to/project maintainability
+```
+
+These commands use Cargo metadata, the existing `RepositoryTree`, and Rust syntax
+analysis; they never start or probe rust-analyzer. Opening the TUI draws first, then
+progressively publishes the repository tree, basic metrics, and maintainability on
+one background pipeline. Analyzer status is independent. TUI rust-analyzer disables
+automatic checks, build scripts and proc macros; opening another checkout does not
+automatically run cargo check/test/Clippy or build scripts. Explicit headless semantic
+commands retain their existing analyzer configuration.
+
+Overview retains workspace/crates, entrypoints, languages, packages and a separate
+LARGEST SOURCE FILES section. LONGEST FUNCTIONS and DEEPEST CONTROL FLOW are two
+separate top-10 lists, with `[test]` markers. Use `j/k` (or `Ctrl+d/u` for ten rows),
+select a function and press Enter to reveal its exact file in Explorer. The FILE pane
+retains the identifier line/column. After `documentSymbol`, the anchor must match
+file, normalized identifier name, function/method kind, exact UTF-16 identifier
+position and enclosing declaration range. Exactly one match selects that RA symbol;
+Enter opens the existing Inspector and `c` opens Calls. No `find_symbol("name")`
+lookup is used. A matching symbol beyond the normal 200-symbol window is retained.
+Missing, stale or ambiguous anchors do not select an arbitrary symbol; a notice
+explains that the Inspector is unavailable. `j/k` can explicitly select a different
+symbol manually. RA errors retain file metadata and the source anchor; an anchored
+request that failed during indexing is retried when RA first becomes ready.
+`Ctrl+l`, `j/k` scrolls the metrics pane, including at 80x20.
+
+The new report has the existing v1 JSON envelope and camelCase data:
+`analyzedFiles` (Rust file attempts), `parsedFiles`, `parseFailures`, `skippedFiles`,
+`readBytes`, bounded `failures` (relative file, short reason), `functions`,
+`medianFunctionLines`, `p95FunctionLines`, `maxControlDepth`, `longestFunctions`,
+`deepestFunctions`, `packages`, and `partial`. Malformed files increment parse
+failures and do not stop other files. Resource/read/UTF-8 exclusions increment
+skipped files. Failures and skipped input, scan errors/truncation and cancellation
+make the result partial. At most 20 failure details are retained.
+
+Each `FunctionMetrics` contains relative `path`, simple `name`, syntactic
+`qualifiedName`, `kind` (`function`, `method`, `associatedFunction`, `traitDefault`),
+`startLine`, `endLine`, `identifierLine`, `identifierColumn`, `physicalLines`,
+`maxControlDepth`, `controlFlowNodes`, optional package name, and `testClassified`.
+All lines and the UTF-16 identifier column are **1-based**; navigation subtracts one
+for LSP. Function length spans the `fn` keyword through the body's closing brace,
+inclusive, excluding preceding attributes. Multiline signatures, comments and blanks
+inside that range count. Nested functions are measured separately; their source
+still occupies physical lines in the containing function's extent.
+
+Depth increases for `if`/`if let`, `match`, `for`, `while`/`while let`, and `loop`.
+The outermost such construct has depth 1. `else if` continues at the same depth;
+an `if` inside a branch adds a level. Match arms add no levels. Ordinary/unsafe
+blocks, `?` and await add none. `controlFlowNodes` counts those constructs once
+each, including each `else if`; it is **not cyclomatic complexity**. Closures are not
+separate named functions and their control flow is excluded from the containing
+function. Control flow in nested named functions is also excluded from the parent.
+Named functions inside closures are still found as named functions.
+
+Coverage includes ordinary/async functions, generic impl methods and associated
+functions, default trait methods, nested modules and nested named functions. Trait
+declarations without a body are excluded. Function-like macros are opaque: no
+expansion is performed, including control flow inside macro inputs and functions
+generated by macros. No cfg evaluation, type checking or semantic resolution is
+performed. File-level test heuristics plus direct `#[test]` and inherited exact
+`#[cfg(test)]` attributes classify tests; complex cfg predicates are not evaluated.
+Names are syntax labels, not semantic IDs. RA remains the sole semantic authority.
+
+Median and P95 use nearest rank: sorted lengths at `ceil(n * p / 100)`, with p=50
+and p=95 respectively (the lower middle value for an even-sized median). Empty
+sets return 0. Package reports contain name, relative root, function count,
+median/P95 length and maximum depth; deepest workspace manifest root owns each
+function once. Packages sort by name/root. Ratings sort by length or depth
+descending, then relative path, start line, name and identifier column. There is
+no combined score, quality gate or claim that a candidate contains a defect.
+
+AST budgets are deliberately smaller than streaming LOC budgets: 1 MiB per Rust
+file, 128 MiB read per analysis, 200,000 tokens per file, token-group nesting 128,
+and 100,000 functions per report. Syntax input requires a bounded complete file;
+oversized generated sources remain visible in basic metrics even when AST analysis
+is partial. One file AST is held at a time. Reading/token traversal/collection check
+cancellation, and subsequent files stop on quit. A single bounded `syn` parse is
+not interruptible, but quitting does not join the background thread or wait for it.
+The analyzer gets a 250 ms shutdown grace period, then its task is aborted and
+its child is killed on drop, so an in-flight semantic RPC cannot delay quitting.
+Direct additions are `syn 2.0.118` (`full`, `visit`) and `proc-macro2 1.0.106`
+(`span-locations`), both already in the lockfile; no new transitive packages or
+semantic backend were added.
 
 ## Headless semantic summary
 
@@ -237,6 +339,8 @@ The implementation is one binary crate:
 - `output.rs` renders those structures.
 - `repository.rs` builds the bounded, gitignore-aware physical repository tree.
 - `metrics.rs` calculates deterministic passive file, language and package statistics from that tree.
+- `metrics/stream.rs` counts UTF-8 text lines with fixed memory and read budgets.
+- `maintainability.rs` and `maintainability/syntax.rs` measure bounded Rust function structure.
 - `tui/` separates interactive state, terminal events, rendering, and the single-session analyzer worker.
 
 Business logic returns serializable Rust values; output formatting is separate. A future MCP server can therefore remain a thin adapter without moving semantic behavior into a second implementation.

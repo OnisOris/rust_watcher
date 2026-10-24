@@ -16,6 +16,10 @@ pub(super) enum ExplorerRightMode {
 
 #[derive(Debug, Clone)]
 pub(super) struct FileState {
+    pub anchor: Option<crate::maintainability::FunctionMetrics>,
+    pub anchor_matched: bool,
+    pub anchor_notice: Option<String>,
+    manual_selection: bool,
     pub path: PathBuf,
     pub size: Option<u64>,
     pub symbols: Vec<Symbol>,
@@ -97,6 +101,7 @@ impl ExplorerState {
     pub fn move_file_selection(&mut self, delta: isize) {
         if let Some(file) = &mut self.file {
             file.selection = super::app::move_index(file.selection, file.symbols.len(), delta);
+            file.manual_selection = true;
         }
     }
 
@@ -162,6 +167,10 @@ impl ExplorerState {
         let request_id = self.next_file_request;
         let rust = entry.path.extension().is_some_and(|value| value == "rs");
         self.file = Some(FileState {
+            anchor: None,
+            anchor_matched: false,
+            anchor_notice: None,
+            manual_selection: false,
             path: entry.path.clone(),
             size: entry.size,
             symbols: Vec::new(),
@@ -173,6 +182,34 @@ impl ExplorerState {
         });
         self.right_mode = ExplorerRightMode::File;
         rust.then_some((request_id, entry.path))
+    }
+
+    pub fn set_anchor(&mut self, anchor: crate::maintainability::FunctionMetrics) {
+        if let Some(file) = &mut self.file {
+            file.anchor_matched = false;
+            file.manual_selection = false;
+            file.anchor_notice = Some(format!(
+                "{}:{} · waiting for exact RA symbol",
+                anchor.path.display(),
+                anchor.identifier_line
+            ));
+            file.anchor = Some(anchor);
+        }
+    }
+
+    pub fn retry_anchor(&mut self) -> Option<(u64, PathBuf)> {
+        let file = self.file.as_mut()?;
+        if file.anchor.is_none() || file.error.is_none() {
+            return None;
+        }
+        self.next_file_request += 1;
+        file.request_id = self.next_file_request;
+        file.error = None;
+        file.loading = true;
+        file.symbols.clear();
+        file.anchor_matched = false;
+        file.manual_selection = false;
+        Some((file.request_id, file.path.clone()))
     }
 
     pub fn apply_file_symbols(&mut self, id: u64, file: &Path, mut symbols: Vec<Symbol>) {
@@ -187,10 +224,38 @@ impl ExplorerState {
                 .cmp(&b.selection_range)
                 .then(a.name.cmp(&b.name))
         });
+        let matched = state.anchor.as_ref().and_then(|anchor| {
+            let matches: Vec<_> = symbols
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| anchor_matches(anchor, s))
+                .map(|(i, _)| i)
+                .collect();
+            if matches.len() == 1 {
+                Some(matches[0])
+            } else {
+                None
+            }
+        });
+        state.anchor_matched = matched.is_some();
+        if state.anchor.is_some() {
+            state.anchor_notice = Some(
+                if matched.is_some() {
+                    "Exact RA symbol selected; Enter Inspector, c Calls"
+                } else {
+                    "No unique symbol at anchor; Inspector unavailable. j/k selects manually."
+                }
+                .into(),
+            );
+        }
         state.truncated = symbols.len() > FILE_SYMBOL_LIMIT;
-        symbols.truncate(FILE_SYMBOL_LIMIT);
-        state.symbols = symbols;
-        state.selection = 0;
+        let start = matched.map_or(0, |i| i.saturating_sub(FILE_SYMBOL_LIMIT / 2));
+        state.symbols = symbols
+            .into_iter()
+            .skip(start)
+            .take(FILE_SYMBOL_LIMIT)
+            .collect();
+        state.selection = matched.map_or(0, |i| i - start);
         state.loading = false;
         state.error = None;
     }
@@ -202,11 +267,21 @@ impl ExplorerState {
         if state.request_id == id && state.path == file {
             state.loading = false;
             state.error = Some(message);
+            if state.anchor.is_some() {
+                state.anchor_notice =
+                    Some("Semantic Inspector unavailable; source anchor retained".into());
+            }
         }
     }
 
     pub fn selected_symbol(&self) -> Option<Symbol> {
         let file = self.file.as_ref()?;
+        if file.error.is_some() || file.loading {
+            return None;
+        }
+        if file.anchor.is_some() && !file.anchor_matched && !file.manual_selection {
+            return None;
+        }
         file.symbols.get(file.selection).cloned()
     }
 
@@ -309,6 +384,19 @@ impl ExplorerState {
             self.visible_rebuilds += 1;
         }
     }
+}
+
+fn anchor_matches(anchor: &crate::maintainability::FunctionMetrics, symbol: &Symbol) -> bool {
+    anchor.path == symbol.file
+        && anchor.name == symbol.name.trim_start_matches("r#")
+        && matches!(symbol.kind.as_str(), "function" | "method")
+        && anchor.identifier_line.checked_sub(1) == Some(symbol.selection_range.start.line as usize)
+        && anchor.identifier_column.checked_sub(1)
+            == Some(symbol.selection_range.start.character as usize)
+        && anchor.start_line > 0
+        && anchor.end_line >= anchor.start_line
+        && (symbol.range.start.line as usize) < anchor.start_line
+        && symbol.range.end.line as usize >= anchor.end_line - 1
 }
 
 fn root_entry() -> VisibleEntry {

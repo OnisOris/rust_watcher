@@ -89,6 +89,15 @@ struct NormalizedCall {
 }
 
 impl RustAnalyzer {
+    pub async fn start_passive(project: Project, binary: &Path) -> Result<Self> {
+        let client = LspClient::start_passive(binary, &project.workspace_root).await?;
+        Ok(Self {
+            project,
+            client,
+            opened: HashSet::new(),
+        })
+    }
+
     pub async fn start(project: Project, binary: &Path) -> Result<Self> {
         let client = LspClient::start(binary, &project.workspace_root).await?;
         Ok(Self {

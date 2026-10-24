@@ -300,7 +300,7 @@ fn stats_counts_fixture_without_ever_starting_analyzer() {
     let trap = temp.path().join("rust-analyzer");
     std::fs::write(
         &trap,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
     )
     .unwrap();
     std::fs::set_permissions(&trap, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -362,4 +362,70 @@ fn stats_counts_fixture_without_ever_starting_analyzer() {
     let fixture = json_success("workspace_project", &["stats", "--json"]);
     assert_eq!(fixture["packages"].as_array().unwrap().len(), 2);
     assert_eq!(fixture["codeFiles"], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn maintainability_has_exact_counts_positions_and_never_starts_ra() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("ra-started");
+    let trap = temp.path().join("rust-analyzer");
+    std::fs::write(
+        &trap,
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&trap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for name in ["cargo", "rustc"] {
+        let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        symlink(executable, temp.path().join(name)).unwrap();
+    }
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='structural_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"),"pub fn one() {}\nstruct A;\nimpl A {\n fn run(&self) {\n  if true { loop { break; } }\n }\n}\nstruct B;\nimpl B { fn run(&self) {} }\ntrait T { fn missing(); fn defaulted() {} }\n").unwrap();
+    for absent in [false, true] {
+        if absent {
+            std::fs::remove_file(&trap).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_wt"))
+            .env("PATH", temp.path())
+            .arg(&root)
+            .args(["maintainability", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(v["schemaVersion"], 1);
+        assert_eq!(v["ok"], true);
+        let r = &v["data"];
+        assert_eq!(r["functions"], 4);
+        assert_eq!(r["parsedFiles"], 1);
+        assert_eq!(r["parseFailures"], 0);
+        assert_eq!(r["partial"], false);
+        assert_eq!(r["medianFunctionLines"], 1);
+        assert_eq!(r["p95FunctionLines"], 3);
+        let top = &r["longestFunctions"][0];
+        assert_eq!(top["qualifiedName"], "A::run");
+        assert_eq!(top["startLine"], 4);
+        assert_eq!(top["endLine"], 6);
+        assert_eq!(top["identifierLine"], 4);
+        assert_eq!(top["identifierColumn"], 5);
+        assert_eq!(top["maxControlDepth"], 2);
+        assert_eq!(top["controlFlowNodes"], 2);
+        assert_eq!(r["packages"][0]["functionCount"], 4);
+        assert!(!marker.exists());
+    }
 }

@@ -31,7 +31,15 @@ pub(super) async fn run_loop(
         tokio::select! {
             event = events.recv(), if analyzer_events_open => {
                 match event {
-                    Some(event) => app.apply_event(event),
+                    Some(event) => {
+                        let ready = matches!(&event, AnalyzerEvent::Ready);
+                        app.apply_event(event);
+                        if ready {
+                            if let Some((id, file)) = app.explorer.retry_anchor() {
+                                send_command(app, commands, AnalyzerCommand::InspectFile { id, file }).await;
+                            }
+                        }
+                    }
                     None => {
                         analyzer_events_open = false;
                         if !matches!(app.analyzer_state, super::app::AnalyzerState::Error(_)) {
@@ -47,14 +55,19 @@ pub(super) async fn run_loop(
                 match result {
                     Some(super::RepositoryEvent::Tree(tree)) => app.explorer.apply_tree(tree),
                     Some(super::RepositoryEvent::Metrics(metrics)) => app.metrics = Some(metrics),
+                    Some(super::RepositoryEvent::Maintainability(report)) => app.maintainability = Some(report),
                     Some(super::RepositoryEvent::Error(message)) => {
                         app.metrics_error = Some(message.clone());
+                        app.maintainability_error = Some(message.clone());
                         app.explorer.fail(message);
                     }
                     None => {
                         repository_open = false;
                         if app.metrics.is_none() && app.metrics_error.is_none() {
                             app.metrics_error = Some("repository metrics worker stopped".into());
+                        }
+                        if app.maintainability.is_none() && app.maintainability_error.is_none() {
+                            app.maintainability_error = Some("background analyzer stopped".into());
                         }
                     }
                 }
@@ -198,19 +211,33 @@ pub(super) async fn handle_key(
                 activate_explorer(app, commands).await?
             }
             KeyCode::Enter => {
-                let offset =
-                    1 + app.project.binary_entrypoints().len() + app.project.packages.len();
-                let path = app
-                    .project_selection
-                    .checked_sub(offset)
-                    .and_then(|i| app.metrics.as_ref()?.largest_files.get(i))
-                    .map(|f| f.path.clone());
+                use super::overview::Target;
+                let target = super::overview::targets(app)
+                    .get(app.project_selection)
+                    .cloned();
+                let (path, anchor) = match target {
+                    Some(Target::File(path, _)) => (Some(path), None),
+                    Some(Target::Unmeasured(f)) => (Some(f.path), None),
+                    Some(Target::Longest(f) | Target::Deepest(f)) => {
+                        (Some(f.path.clone()), Some(f))
+                    }
+                    _ => (None, None),
+                };
                 if let Some(path) = path {
                     if app.project.workspace_root.join(&path).is_file()
                         && app.explorer.reveal_file(&path)
                     {
                         app.switch_view(View::Explorer);
-                        activate_explorer(app, commands).await?;
+                        if let Some((id, file)) = app.explorer.open_selected() {
+                            if let Some(anchor) = anchor {
+                                app.explorer.set_anchor(anchor);
+                            }
+                            app.pane = Pane::ExplorerFile;
+                            send_command(app, commands, AnalyzerCommand::InspectFile { id, file })
+                                .await;
+                        } else {
+                            app.pane = Pane::ExplorerFile;
+                        }
                     } else {
                         app.notice = Some(format!(
                             "File unavailable in repository tree: {}",

@@ -198,7 +198,8 @@ pub(super) async fn analyzer_worker(
     mut commands: mpsc::Receiver<AnalyzerCommand>,
     events: mpsc::Sender<AnalyzerEvent>,
 ) {
-    let mut analyzer = match RustAnalyzer::start(project, Path::new("rust-analyzer")).await {
+    let mut analyzer = match RustAnalyzer::start_passive(project, Path::new("rust-analyzer")).await
+    {
         Ok(analyzer) => analyzer,
         Err(error) => {
             let message = format!("{error:#}");
