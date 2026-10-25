@@ -61,10 +61,16 @@ pub struct HotspotReport {
     pub history_shallow: Option<bool>,
     pub working_tree_dirty: Option<bool>,
     pub history_partial: bool,
+    pub co_change_partial: bool,
+    pub current_metrics_partial: bool,
     pub partial: bool,
     pub partial_reasons: Vec<String>,
     pub hotspots: Vec<FileHotspot>,
     pub most_changed_files: Vec<FileHotspot>,
+    pub historical_files: Vec<FileHotspot>,
+    pub historical_changed_files: Option<usize>,
+    #[serde(skip)]
+    pub(crate) candidate_paths: Vec<PathBuf>,
 }
 
 pub fn correlate(
@@ -83,7 +89,12 @@ pub fn correlate(
         .iter()
         .map(|f| (&f.path, f.structure.as_ref()))
         .collect();
-    let paths: BTreeSet<_> = tree.entries.iter().map(|f| &f.path).collect();
+    let paths: BTreeSet<_> = tree
+        .entries
+        .iter()
+        .filter(|f| f.kind == crate::repository::RepoEntryKind::File)
+        .map(|f| &f.path)
+        .collect();
     let mut files = Vec::new();
     for (path, change) in &history.files {
         let structure = structures.get(path).copied().flatten();
@@ -101,7 +112,8 @@ pub fn correlate(
         if structure.is_some_and(|s| s.max_control_depth >= DEEP_CONTROL) {
             signals.push(HotspotSignal::DeepNesting);
         }
-        let candidate = change.commits >= FREQUENT_CHANGES && signals.len() >= 2;
+        let candidate =
+            paths.contains(path) && change.commits >= FREQUENT_CHANGES && signals.len() >= 2;
         files.push(FileHotspot {
             path: path.clone(),
             change_commits: change.commits,
@@ -124,12 +136,26 @@ pub fn correlate(
         });
     }
     files.sort_by(|a, b| {
-        b.change_commits
-            .cmp(&a.change_commits)
-            .then(b.churn_lines.cmp(&a.churn_lines))
-            .then(a.path.cmp(&b.path))
+        b.present_in_tree.cmp(&a.present_in_tree).then(
+            b.change_commits
+                .cmp(&a.change_commits)
+                .then(b.churn_lines.cmp(&a.churn_lines))
+                .then(a.path.cmp(&b.path)),
+        )
     });
     let candidate_files = files.iter().filter(|f| f.review_candidate).count();
+    let candidate_paths = files
+        .iter()
+        .filter(|f| f.review_candidate)
+        .map(|f| f.path.clone())
+        .collect();
+    let historical_changed_files = files.iter().filter(|f| !f.present_in_tree).count();
+    let mut historical_files: Vec<_> = files
+        .iter()
+        .filter(|f| !f.present_in_tree)
+        .take(RANKING_LIMIT)
+        .cloned()
+        .collect();
     let mut hotspots: Vec<_> = files
         .iter()
         .filter(|f| f.review_candidate)
@@ -137,7 +163,11 @@ pub fn correlate(
         .cloned()
         .collect();
     files.truncate(RANKING_LIMIT);
-    for file in hotspots.iter_mut().chain(files.iter_mut()) {
+    for file in hotspots
+        .iter_mut()
+        .chain(files.iter_mut())
+        .chain(historical_files.iter_mut())
+    {
         let mut neighbors = BTreeMap::new();
         for commit in &history.cochanges {
             if commit.binary_search(&file.path).is_ok() {
@@ -157,7 +187,15 @@ pub fn correlate(
         file.co_changed = neighbors;
     }
     let available = history.reason.is_none();
-    let history_partial = !history.partial_reasons.is_empty();
+    let history_partial = history
+        .partial_reasons
+        .iter()
+        .any(|r| r != "coChangeCommitFileBudget");
+    let co_change_partial = history_partial
+        || history
+            .partial_reasons
+            .iter()
+            .any(|r| r == "coChangeCommitFileBudget");
     let mut partial_reasons = history.partial_reasons;
     if metrics.partial {
         partial_reasons.push("currentFileMetricsPartial".into());
@@ -177,10 +215,19 @@ pub fn correlate(
         history_shallow: history.history_shallow,
         working_tree_dirty: history.working_tree_dirty,
         history_partial,
+        co_change_partial,
+        current_metrics_partial: metrics.partial || ast.partial,
         partial: !partial_reasons.is_empty(),
         partial_reasons,
         hotspots: if available { hotspots } else { Vec::new() },
         most_changed_files: if available { files } else { Vec::new() },
+        historical_files: if available {
+            historical_files
+        } else {
+            Vec::new()
+        },
+        historical_changed_files: available.then_some(historical_changed_files),
+        candidate_paths,
     }
 }
 
@@ -218,7 +265,24 @@ impl HotspotReport {
         } else {
             "Git Hotspots ready"
         };
-        format!("{label}{}", if self.partial { " · partial" } else { "" })
+        format!(
+            "{label}{}{}{}",
+            if self.history_partial {
+                " · history partial"
+            } else {
+                ""
+            },
+            if self.co_change_partial {
+                " · co-change partial"
+            } else {
+                ""
+            },
+            if self.current_metrics_partial {
+                " · current metrics partial"
+            } else {
+                ""
+            }
+        )
     }
 }
 
@@ -242,6 +306,19 @@ pub fn print(report: &HotspotReport) {
             "complete"
         }
     );
+    println!(
+        "Co-change          {}\nCurrent metrics    {}",
+        if report.co_change_partial {
+            "partial"
+        } else {
+            "complete"
+        },
+        if report.current_metrics_partial {
+            "partial"
+        } else {
+            "complete"
+        }
+    );
     if report.working_tree_dirty == Some(true) {
         println!("Working tree has uncommitted changes");
     }
@@ -251,6 +328,10 @@ pub fn print(report: &HotspotReport) {
     for (title, files) in [
         ("Review Candidates", &report.hotspots),
         ("Most Changed Files", &report.most_changed_files),
+        (
+            "Historical paths · absent from current tree",
+            &report.historical_files,
+        ),
     ] {
         println!("\n{title}");
         for (i, f) in files.iter().enumerate() {

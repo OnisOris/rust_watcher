@@ -4,6 +4,7 @@ use crate::repository::scan;
 
 fn project(root: &Path) -> Project {
     Project {
+        architecture: Default::default(),
         workspace_root: root.into(),
         packages: vec![],
         rust_files: vec![],

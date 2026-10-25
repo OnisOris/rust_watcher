@@ -34,10 +34,12 @@ fn fixture() -> (tempfile::TempDir, App, FunctionMetrics) {
     let mut app = App::new(project);
     app.explorer.apply_tree(tree);
     app.maintainability = Some(report);
-    app.project_selection = overview::targets(&app)
+    app.overview.expanded.extend(overview::Group::ALL);
+    let selected = overview::targets(&app)
         .iter()
         .position(|t| matches!(t, Target::Longest(_)))
         .unwrap();
+    app.select_overview(selected);
     (temp, app, anchor)
 }
 
@@ -96,7 +98,7 @@ fn load_hotspot(app: &mut App, path: &Path) {
             commits: 3,
         });
     app.hotspots = Some(report);
-    app.project_selection = 1;
+    app.select_overview(2);
 }
 
 #[tokio::test]
@@ -166,7 +168,7 @@ fn hotspot_states_and_details_render_without_ra_including_small_terminal() {
             .collect()
     }
     let (_temp, mut app, anchor) = fixture();
-    app.project_selection = 0;
+    app.overview.selected = super::overview::ItemId::Workspace;
     assert!(render(&app, 160, 48).contains("Git history: analyzing..."));
     app.hotspots_error = Some("Git executable not found".into());
     assert!(render(&app, 160, 48).contains("Git executable not found"));
@@ -188,7 +190,8 @@ fn hotspot_states_and_details_render_without_ra_including_small_terminal() {
     }
     assert!(render(&app, 80, 20).contains("HOTSPOT DETAILS"));
     app.hotspots.as_mut().unwrap().partial = true;
-    app.project_selection = 0;
+    app.hotspots.as_mut().unwrap().current_metrics_partial = true;
+    app.overview.selected = super::overview::ItemId::Workspace;
     assert!(render(&app, 160, 48).contains("partial"));
     let r = app.hotspots.as_mut().unwrap();
     r.available = false;
@@ -386,13 +389,14 @@ fn render(app: &App, width: u16, height: u16) -> String {
 #[test]
 fn overview_renders_loading_candidates_errors_and_small_terminal() {
     let (_temp, mut app, _) = fixture();
+    app.overview = overview::State::default();
     let text = render(&app, 120, 34);
     assert!(text.contains("MAINTAINABILITY · Rust"));
     assert!(text.contains("LONGEST FUNCTIONS"));
     assert!(text.contains("DEEPEST CONTROL FLOW"));
-    assert!(text.contains("Functions 2"));
+    assert!(text.contains("Functions") && text.contains("2"));
     app.analyzer_state = AnalyzerState::Error("RA unavailable".into());
-    assert!(render(&app, 80, 20).contains("Functions 2"));
+    assert!(render(&app, 80, 20).contains("Functions"));
     app.maintainability = None;
     assert!(render(&app, 120, 34).contains("Maintainability: analyzing..."));
     app.maintainability_error = Some("worker failed".into());

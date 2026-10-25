@@ -535,3 +535,60 @@ fn hotspots_are_headless_with_or_without_git_and_validate_days() {
             .success());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn architecture_uses_cargo_identity_without_git_or_analyzer() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["cargo", "rustc"] {
+        let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        symlink(executable, temp.path().join(name)).unwrap();
+    }
+    let marker = temp.path().join("unexpected-process");
+    for name in ["git", "rust-analyzer"] {
+        let trap = temp.path().join(name);
+        std::fs::write(
+            &trap,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(trap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", temp.path())
+        .arg(fixture("workspace_project"))
+        .args(["architecture", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["schemaVersion"], 1);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["data"]["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(v["data"]["edges"].as_array().unwrap().len(), 1);
+    let edge = &v["data"]["edges"][0];
+    assert_eq!(edge["from"], "crate:app/Cargo.toml");
+    assert_eq!(edge["to"], "crate:core/Cargo.toml");
+    assert_eq!(edge["kind"], "normal");
+    assert_eq!(v["data"]["partial"], false);
+    assert!(!marker.exists());
+    for name in ["git", "rust-analyzer"] {
+        std::fs::remove_file(temp.path().join(name)).unwrap();
+    }
+    assert!(Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", temp.path())
+        .arg(fixture("workspace_project"))
+        .arg("architecture")
+        .output()
+        .unwrap()
+        .status
+        .success());
+}

@@ -109,6 +109,7 @@ fn precise_history_windows_paths_binary_and_cochange() {
     assert_eq!(h.files[Path::new(odd)].commits, 2);
     assert_eq!(h.files[Path::new("binary")].added, None);
     let project = Project {
+        architecture: Default::default(),
         workspace_root: r.path().into(),
         packages: vec![],
         rust_files: vec![],
@@ -370,6 +371,7 @@ fn candidates_use_independent_explainable_signals_and_unknown_structure() {
     }
     let tree = repository::scan(r.path()).unwrap();
     let project = Project {
+        architecture: Default::default(),
         workspace_root: r.path().into(),
         packages: vec![],
         rust_files: vec![],
@@ -407,6 +409,7 @@ fn all_file_summaries_survive_top_ten_truncation_without_old_json_changes() {
     r.write("empty.rs", "");
     let tree = repository::scan(r.path()).unwrap();
     let project = Project {
+        architecture: Default::default(),
         workspace_root: r.path().into(),
         packages: vec![],
         rust_files: vec![],
@@ -440,6 +443,59 @@ fn all_file_summaries_survive_top_ten_truncation_without_old_json_changes() {
         .get("sourceFiles")
         .is_none());
     assert!(serde_json::to_value(ast).unwrap().get("files").is_none());
+}
+
+#[test]
+fn cochange_limits_do_not_invalidate_churn_and_current_paths_rank_before_deleted() {
+    let r = Repo::new();
+    r.write("current.rs", "fn item() {}\n".repeat(400));
+    let tree = repository::scan(r.path()).unwrap();
+    let project = Project {
+        architecture: Default::default(),
+        workspace_root: r.path().into(),
+        packages: vec![],
+        rust_files: vec![],
+    };
+    let mut metrics = metrics::analyze(r.path(), &tree, &project);
+    let ast = maintainability::analyze(r.path(), &tree, &project);
+    let mut h = History {
+        commits_analyzed: 15,
+        ..History::default()
+    };
+    h.partial_reasons.push("coChangeCommitFileBudget".into());
+    h.files.insert(
+        "current.rs".into(),
+        Change {
+            commits: 3,
+            added: Some(400),
+            deleted: Some(0),
+            last: NOW,
+        },
+    );
+    h.files.insert(
+        "deleted.rs".into(),
+        Change {
+            commits: 12,
+            added: Some(1500),
+            deleted: Some(1500),
+            last: NOW,
+        },
+    );
+    let report = correlate(h, &metrics, &ast, &tree);
+    assert!(!report.history_partial);
+    assert!(report.co_change_partial);
+    assert!(!report.current_metrics_partial);
+    assert_eq!(report.hotspots[0].path, Path::new("current.rs"));
+    assert_eq!(report.most_changed_files[0].path, Path::new("current.rs"));
+    assert_eq!(report.historical_files[0].path, Path::new("deleted.rs"));
+    assert_eq!(report.historical_changed_files, Some(1));
+    assert!(!report.historical_files[0].present_in_tree);
+    assert_eq!(report.historical_files[0].churn_lines, Some(3000));
+    metrics.partial = true;
+    let report = correlate(History::default(), &metrics, &ast, &tree);
+    assert!(!report.history_partial);
+    assert!(!report.co_change_partial);
+    assert!(report.current_metrics_partial);
 }
 
 #[test]

@@ -510,6 +510,7 @@ mod tests {
 
     fn project() -> Project {
         Project {
+            architecture: Default::default(),
             workspace_root: "/workspace/demo".into(),
             packages: Vec::new(),
             rust_files: Vec::new(),
@@ -589,6 +590,7 @@ mod tests {
     #[test]
     fn cargo_roles_and_deepest_package_membership_come_from_metadata() {
         let project = Project {
+            architecture: Default::default(),
             workspace_root: "/workspace/demo".into(),
             packages: vec![
                 Package {

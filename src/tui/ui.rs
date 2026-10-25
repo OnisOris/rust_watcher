@@ -1,29 +1,41 @@
+mod calls;
+mod explorer;
+mod symbols;
 use super::app::{
     project_name, qualified_symbol, AnalyzerState, App, Inspector, Overlay, Pane, View,
 };
 use super::explorer::{file_role, package_for_file, ExplorerRightMode};
+use super::{components, theme};
 use crate::model::CallTarget;
 use crate::repository::RepoEntryKind;
+use calls::*;
+use explorer::*;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use symbols::*;
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 20;
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::TEXT)),
+        area,
+    );
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         frame.render_widget(
             Paragraph::new(format!(
                 "Terminal too small\nMinimum: {MIN_WIDTH}x{MIN_HEIGHT}"
             ))
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).title(" wt ")),
+            .block(pane_block(" wt ", true)),
             area,
         );
+        theme::apply(frame.buffer_mut(), app.color_mode);
         return;
     }
     let rows = Layout::default()
@@ -31,7 +43,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(area);
     render_header(frame, rows[0], app);
@@ -40,11 +52,12 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         View::Symbols => render_symbols_view(frame, rows[1], app),
         View::Calls => render_calls_view(frame, rows[1], app),
         View::Explorer => render_explorer_view(frame, rows[1], app),
+        View::Map => super::map::render(frame, rows[1], app),
     }
     frame.render_widget(
         Paragraph::new(footer_text(app))
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL)),
+            .alignment(Alignment::Left)
+            .style(Style::default().fg(theme::MUTED)),
         rows[2],
     );
     match app.overlay {
@@ -52,836 +65,154 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         Overlay::Search => render_search(frame, area, app),
         Overlay::None => {}
     }
+    theme::apply(frame.buffer_mut(), app.color_mode);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let workspace = app
-        .project
-        .workspace_root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("workspace");
-    let (status, color) = match &app.analyzer_state {
-        AnalyzerState::Starting => ("◌ starting".to_owned(), Color::Yellow),
-        AnalyzerState::Indexing => ("◐ indexing".to_owned(), Color::Yellow),
-        AnalyzerState::Ready => ("● ready".to_owned(), Color::Green),
-        AnalyzerState::Error(message) => (format!("× {}", truncate(message, 18)), Color::Red),
-    };
-    let active = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let idle = Style::default().fg(Color::DarkGray);
-    if area.width < 100 {
-        let mut spans = vec![Span::raw(" wt ")];
-        for (view, label) in [
-            (View::Overview, "[1 Overview]"),
-            (View::Symbols, "[2 Symbols]"),
-            (View::Calls, "[3 Calls]"),
-            (View::Explorer, "[4 Explorer]"),
-        ] {
-            spans.push(Span::styled(
-                label,
-                if app.view == view { active } else { idle },
-            ));
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            format!("RA {status}"),
-            Style::default().fg(color),
+    let views = [
+        (View::Overview, "1 Overview", "1 OVR"),
+        (View::Symbols, "2 Symbols", "2 SYM"),
+        (View::Calls, "3 Calls", "3 CALL"),
+        (View::Explorer, "4 Explorer", "4 FILE"),
+        (View::Map, "5 Map", "5 MAP"),
+    ];
+    let short = area.width < 110;
+    let mut tabs = vec![components::status_label(" wt ", theme::ACCENT)];
+    tabs.push(Span::styled(
+        format!(
+            "{}  ",
+            truncate(project_name(&app.project), if short { 12 } else { 24 })
+        ),
+        Style::default().fg(theme::TEXT),
+    ));
+    for (view, full, compact) in views {
+        tabs.push(Span::styled(
+            format!(
+                "{}{}  ",
+                if app.view == view { ">" } else { " " },
+                if short { compact } else { full }
+            ),
+            if app.view == view {
+                components::selectable_row()
+            } else {
+                Style::default().fg(theme::MUTED)
+            },
         ));
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)),
-            area,
-        );
-        return;
     }
-    let title = Line::from(vec![
-        Span::styled(" wt ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(format!("{}  ", truncate(workspace, 20))),
-        Span::raw(if app.view == View::Overview {
-            "▶"
-        } else {
-            " "
-        }),
-        Span::styled(
-            "[1 Overview]",
-            if app.view == View::Overview {
-                active
-            } else {
-                idle
-            },
-        ),
-        Span::raw(" "),
-        Span::raw(if app.view == View::Symbols {
-            "▶"
-        } else {
-            " "
-        }),
-        Span::styled(
-            "[2 Symbols]",
-            if app.view == View::Symbols {
-                active
-            } else {
-                idle
-            },
-        ),
-        Span::raw(" "),
-        Span::raw(if app.view == View::Calls { "▶" } else { " " }),
-        Span::styled(
-            "[3 Calls]",
-            if app.view == View::Calls {
-                active
-            } else {
-                idle
-            },
-        ),
-        Span::raw(" "),
-        Span::raw(if app.view == View::Explorer {
-            "▶"
-        } else {
-            " "
-        }),
-        Span::styled(
-            "[4 Explorer]",
-            if app.view == View::Explorer {
-                active
-            } else {
-                idle
-            },
-        ),
-        Span::raw("  "),
-        Span::styled(format!("RA {status}"), Style::default().fg(color)),
-    ]);
+    let (ra, color) = match &app.analyzer_state {
+        AnalyzerState::Starting => ("RA ◌ Starting", theme::ACCENT),
+        AnalyzerState::Indexing => ("RA ◐ Indexing", theme::WARNING),
+        AnalyzerState::Ready => ("RA ● Ready", theme::SUCCESS),
+        AnalyzerState::Error(_) => ("RA × Error · see Analysis", theme::ERROR),
+    };
+    let (git, gcolor) = match &app.hotspots {
+        None => ("Git ◐ Analyzing", theme::ACCENT),
+        Some(r) if !r.available => ("Git – Unavailable", theme::MUTED),
+        Some(r) if r.history_partial => ("Git ◐ Partial", theme::WARNING),
+        _ => ("Git ● Complete", theme::SUCCESS),
+    };
+    let mut statuses = vec![
+        components::status_label(ra, color),
+        Span::raw("   "),
+        components::status_label(git, gcolor),
+    ];
+    if app
+        .hotspots
+        .as_ref()
+        .is_some_and(|r| r.available && r.co_change_partial)
+    {
+        statuses.push(components::status_label(
+            "   Co-change ◐ Partial",
+            theme::WARNING,
+        ));
+    }
+    if let Some(notice) = &app.notice {
+        statuses.push(Span::styled(
+            format!("   {notice}"),
+            Style::default().fg(theme::WARNING),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(title).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(vec![Line::from(tabs), Line::from(statuses)]).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme::BORDER)),
+        ),
         area,
     );
 }
 
 fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
+    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(5)]).split(area);
+    super::overview::render_summary(frame, rows[0], app);
+    let panes = Layout::horizontal([
+        Constraint::Percentage(if area.width < 100 { 42 } else { 36 }),
+        Constraint::Min(25),
+    ])
+    .split(rows[1]);
     super::overview::render_project(frame, panes[0], app);
     super::overview::render_details(frame, panes[1], app);
 }
 
-fn render_symbols_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-    render_symbols(frame, panes[0], app);
-    render_inspector(frame, panes[1], app);
-}
-
-fn render_calls_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    if app.calls.center.is_none() {
-        frame.render_widget(
-            Paragraph::new("No symbol selected\n\nOpen Symbols with 2,\nsearch for a symbol,\nthen press Enter or c.")
-                .alignment(Alignment::Center)
-                .block(Block::default().title(" CALLS ").borders(Borders::ALL)),
-            area,
-        );
-        return;
-    }
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(32),
-            Constraint::Percentage(36),
-            Constraint::Percentage(32),
-        ])
-        .split(area);
-    render_call_list(frame, panes[0], app, true);
-    render_call_current(frame, panes[1], app);
-    render_call_list(frame, panes[2], app, false);
-}
-
-fn render_explorer_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(area);
-    render_explorer_tree(frame, panes[0], app);
-    if app.explorer.right_mode == ExplorerRightMode::Inspector {
-        render_inspector_block(frame, panes[1], app, app.pane == Pane::ExplorerFile);
-    } else {
-        render_explorer_file(frame, panes[1], app);
-    }
-}
-
-fn render_explorer_tree(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let title = match &app.explorer.tree {
-        Some(tree) if tree.truncated => " PROJECT TREE · truncated ".to_owned(),
-        Some(tree) if tree.skipped_errors > 0 => {
-            format!(" PROJECT TREE · {} skipped ", tree.skipped_errors)
-        }
-        _ if app.explorer.loading => " PROJECT TREE · scanning… ".to_owned(),
-        _ => " PROJECT TREE ".to_owned(),
-    };
-    if let Some(error) = &app.explorer.error {
-        frame.render_widget(
-            Paragraph::new(format!("Repository scan failed\n\n{error}"))
-                .wrap(Wrap { trim: false })
-                .block(pane_block(&title, app.pane == Pane::ExplorerTree)),
-            area,
-        );
-        return;
-    }
-    let workspace = project_name(&app.project);
-    let rows: Vec<_> = app
-        .explorer
-        .visible_entries()
-        .iter()
-        .map(|entry| {
-            let indent = "  ".repeat(entry.depth);
-            let name = if entry.path.as_os_str().is_empty() {
-                workspace.to_owned()
-            } else {
-                entry
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("?")
-                    .to_owned()
-            };
-            let marker = match entry.kind {
-                RepoEntryKind::Directory if entry.path.as_os_str().is_empty() => "▼ ",
-                RepoEntryKind::Directory if app.explorer.is_expanded(&entry.path) => "▼ ",
-                RepoEntryKind::Directory => "▶ ",
-                RepoEntryKind::Symlink => "@ ",
-                RepoEntryKind::File => "  ",
-            };
-            let role = file_role(&app.project, &entry.path)
-                .map(|role| format!(" [{role}]"))
-                .unwrap_or_default();
-            let line = format!("{indent}{marker}{name}{role}");
-            ListItem::new(if entry.kind == RepoEntryKind::Directory {
-                Line::styled(line, Style::default().add_modifier(Modifier::BOLD))
-            } else {
-                Line::raw(line)
-            })
-        })
-        .collect();
-    let mut state = ListState::default().with_selected(Some(app.explorer.selected));
-    frame.render_stateful_widget(
-        List::new(rows)
-            .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(Color::Cyan))
-            .block(pane_block(&title, app.pane == Pane::ExplorerTree)),
-        area,
-        &mut state,
-    );
-}
-
-fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let active = app.pane == Pane::ExplorerFile;
-    let Some(file) = &app.explorer.file else {
-        let selected = app.explorer.selected_entry();
-        let text = selected.map_or_else(
-            || {
-                vec![
-                    heading("Repository"),
-                    Line::raw(""),
-                    Line::raw("Scanning repository…"),
-                ]
-            },
-            |entry| {
-                if entry.kind == RepoEntryKind::Directory {
-                    let (directories, files) = app.explorer.direct_child_counts(&entry.path);
-                    vec![
-                        heading("Directory"),
-                        Line::raw(""),
-                        Line::raw(if entry.path.as_os_str().is_empty() {
-                            ".".into()
-                        } else {
-                            entry.path.display().to_string()
-                        }),
-                        Line::raw(""),
-                        Line::raw(format!("directories   {directories}")),
-                        Line::raw(format!("files         {files}")),
-                    ]
-                } else {
-                    vec![heading("Select a file and press Enter")]
-                }
-            },
-        );
-        frame.render_widget(
-            Paragraph::new(text).block(pane_block(" FILE ", active)),
-            area,
-        );
-        return;
-    };
-
-    let details_height = if file.anchor.is_some() { 12 } else { 9 };
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(details_height), Constraint::Min(3)])
-        .split(area);
-    let package = package_for_file(&app.project, &file.path)
-        .map(|package| package.name.as_str())
-        .unwrap_or("—");
-    let role = file_role(&app.project, &file.path).unwrap_or("file");
-    let mut file_details = vec![
-        heading(&file.path.display().to_string()),
-        Line::raw(""),
-        Line::raw(format!("type      {}", file_type(&file.path))),
-        Line::raw(format!("size      {}", format_size(file.size))),
-        Line::raw(format!("package   {package}")),
-        Line::raw(format!("role      {role}")),
-    ];
-    if let Some(anchor) = &file.anchor {
-        file_details.push(Line::raw(format!(
-            "anchor    {}:{} · {}",
-            anchor.identifier_line, anchor.identifier_column, anchor.qualified_name
-        )));
-        if let Some(notice) = &file.anchor_notice {
-            file_details.push(Line::raw(notice.clone()));
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(file_details)
-            .wrap(Wrap { trim: false })
-            .block(pane_block(" FILE ", active)),
-        rows[0],
-    );
-    if file
-        .path
-        .extension()
-        .is_none_or(|extension| extension != "rs")
-    {
-        frame.render_widget(
-            Paragraph::new("Semantic symbols unavailable for this file type")
-                .wrap(Wrap { trim: false })
-                .block(Block::default().title(" SYMBOLS ").borders(Borders::ALL)),
-            rows[1],
-        );
-        return;
-    }
-    if let Some(error) = &file.error {
-        frame.render_widget(
-            Paragraph::new(format!("error: {error}"))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().title(" SYMBOLS ").borders(Borders::ALL)),
-            rows[1],
-        );
-        return;
-    }
-    if file.loading {
-        frame.render_widget(
-            Paragraph::new("Loading file symbols…")
-                .block(Block::default().title(" SYMBOLS ").borders(Borders::ALL)),
-            rows[1],
-        );
-        return;
-    }
-    let symbols: Vec<_> = file
-        .symbols
-        .iter()
-        .map(|symbol| {
-            ListItem::new(format!(
-                "{:<10} {}",
-                truncate(&symbol.kind, 10),
-                qualified_symbol(symbol)
-            ))
-        })
-        .collect();
-    let title = if file.truncated {
-        " SYMBOLS · first 200 "
-    } else if file.symbols.is_empty() {
-        " NO SYMBOLS "
-    } else {
-        " SYMBOLS "
-    };
-    let mut state =
-        ListState::default().with_selected((!file.symbols.is_empty()).then_some(file.selection));
-    frame.render_stateful_widget(
-        List::new(symbols)
-            .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(Color::Cyan))
-            .block(Block::default().title(title).borders(Borders::ALL)),
-        rows[1],
-        &mut state,
-    );
-}
-
-fn file_type(path: &std::path::Path) -> String {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("rs") => "Rust source".into(),
-        Some("toml") => "TOML".into(),
-        Some("md") => "Markdown".into(),
-        Some("yaml" | "yml") => "YAML".into(),
-        Some("json") => "JSON".into(),
-        Some(extension) => format!("{extension} file"),
-        None => "file".into(),
-    }
-}
-
-fn format_size(size: Option<u64>) -> String {
-    match size {
-        Some(size) if size >= 1024 => format!("{:.1} KiB", size as f64 / 1024.0),
-        Some(size) => format!("{size} B"),
-        None => "—".into(),
-    }
-}
-
-fn render_call_list(frame: &mut Frame<'_>, area: Rect, app: &App, incoming: bool) {
-    let (items, selection, loading, truncated, error, pane, label) = if incoming {
-        (
-            &app.calls.callers,
-            app.calls.callers_selection,
-            app.calls.callers_loading,
-            app.calls.callers_truncated,
-            app.calls.callers_error.as_deref(),
-            Pane::Callers,
-            "CALLERS",
-        )
-    } else {
-        (
-            &app.calls.callees,
-            app.calls.callees_selection,
-            app.calls.callees_loading,
-            app.calls.callees_truncated,
-            app.calls.callees_error.as_deref(),
-            Pane::Callees,
-            "CALLEES",
-        )
-    };
-    let title = if truncated {
-        format!(" {label} (first 20) ")
-    } else {
-        format!(" {label} ")
-    };
-    if let Some(error) = error {
-        frame.render_widget(
-            Paragraph::new(format!("error: {error}"))
-                .wrap(Wrap { trim: false })
-                .block(pane_block(&title, app.pane == pane)),
-            area,
-        );
-        return;
-    }
-    if loading && items.is_empty() {
-        frame.render_widget(
-            Paragraph::new(format!("Loading {}...", label.to_lowercase()))
-                .block(pane_block(&title, app.pane == pane)),
-            area,
-        );
-        return;
-    }
-    if items.is_empty() {
-        frame.render_widget(
-            Paragraph::new(format!("No {}", label.to_lowercase()))
-                .block(pane_block(&title, app.pane == pane)),
-            area,
-        );
-        return;
-    }
-    let rows: Vec<_> = items
-        .iter()
-        .map(|target| call_target_row(target, &app.project.workspace_root))
-        .collect();
-    let mut state = ListState::default().with_selected(Some(selection));
-    frame.render_stateful_widget(
-        List::new(rows)
-            .highlight_symbol("> ")
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(pane_block(&title, app.pane == pane)),
-        area,
-        &mut state,
-    );
-}
-
-fn call_target_row(target: &CallTarget, workspace_root: &std::path::Path) -> ListItem<'static> {
-    let external = !target.is_workspace_local(workspace_root);
-    let name = if external {
-        format!("[ext] {}", call_target_name(target))
-    } else {
-        call_target_name(target)
-    };
-    ListItem::new(vec![
-        Line::raw(name),
-        Line::styled(
-            format!(
-                "  {}:{}",
-                compact_call_path(&target.file, workspace_root),
-                target.selection_range.start.line + 1
-            ),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
-}
-
-fn render_call_current(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let target = app.calls.center.as_ref().expect("checked by calls view");
-    let mut text = vec![heading(&call_target_name(target))];
-    if target
-        .detail
-        .as_deref()
-        .is_some_and(|detail| !detail.is_empty() && !detail_is_container(detail))
-    {
-        text.push(Line::styled(
-            target.detail.clone().unwrap_or_default(),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    text.extend([
-        Line::raw(""),
-        Line::raw(format!("kind      {}", target.kind)),
-        Line::raw(format!(
-            "location  {}:{}",
-            compact_call_path(&target.file, &app.project.workspace_root),
-            target.selection_range.start.line + 1
-        )),
-        Line::raw(""),
-        Line::raw(format!(
-            "callers   {}",
-            call_count(
-                app.calls.callers_loading,
-                app.calls.callers_error.as_ref(),
-                app.calls.callers.len()
-            )
-        )),
-        Line::raw(format!(
-            "callees   {}",
-            call_count(
-                app.calls.callees_loading,
-                app.calls.callees_error.as_ref(),
-                app.calls.callees.len()
-            )
-        )),
-        Line::raw(""),
-        Line::raw(format!("history   {}", app.calls.history.len())),
-    ]);
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(pane_block(
-                &format!(" CURRENT · {} ", app.calls.scope.label()),
-                app.pane == Pane::CallCurrent,
-            )),
-        area,
-    );
-}
-
-fn compact_call_path(path: &std::path::Path, workspace_root: &std::path::Path) -> String {
-    if let Ok(relative) = path.strip_prefix(workspace_root) {
-        return relative.display().to_string();
-    }
-    if !path.is_absolute() {
-        return path.display().to_string();
-    }
-    let components: Vec<_> = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect();
-    if let Some(index) = components
-        .iter()
-        .position(|component| *component == "library")
-    {
-        return components[index + 1..].join("/");
-    }
-    if let Some(registry) = components
-        .iter()
-        .position(|component| *component == "registry")
-    {
-        if let Some(source) = components[registry + 1..]
-            .iter()
-            .position(|component| *component == "src")
-        {
-            let start = registry + source + 3;
-            if start < components.len() {
-                return components[start..].join("/");
-            }
-        }
-    }
-    components[components.len().saturating_sub(4)..].join("/")
-}
-
-fn call_target_name(target: &CallTarget) -> String {
-    target
-        .detail
-        .as_deref()
-        .filter(|detail| detail_is_container(detail))
-        .map_or_else(
-            || target.name.clone(),
-            |detail| format!("{detail}::{}", target.name),
-        )
-}
-
-fn detail_is_container(detail: &str) -> bool {
-    detail
-        .chars()
-        .all(|character| character.is_alphanumeric() || matches!(character, '_' | ':'))
-}
-
-fn call_count(loading: bool, error: Option<&String>, count: usize) -> String {
-    if error.is_some() {
-        "error".into()
-    } else if loading {
-        "loading...".into()
-    } else {
-        count.to_string()
-    }
-}
-
-fn render_symbols(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let active = app.pane == Pane::Symbols;
-    if app.symbols_query.is_empty() && app.symbols_results.is_empty() {
-        frame.render_widget(
-            Paragraph::new(vec![
-                heading("Search-first symbol browser"),
-                Line::raw(""),
-                Line::raw("Press / and start typing"),
-                Line::raw(""),
-                Line::raw("Examples:"),
-                Line::raw("  LspClient"),
-                Line::raw("  Engine::run"),
-                Line::raw("  request"),
-            ])
-            .block(pane_block(" SYMBOLS ", active)),
-            area,
-        );
-        return;
-    }
-
-    if app.symbols_results.is_empty() {
-        let message = if app.symbols_loading {
-            "Searching..."
-        } else {
-            "No symbols found"
-        };
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::raw(format!("query: {}", app.symbols_query)),
-                Line::raw(""),
-                Line::raw(message),
-            ])
-            .block(pane_block(" SYMBOLS ", active)),
-            area,
-        );
-        return;
-    }
-
-    let inner_width = area.width.saturating_sub(4) as usize;
-    let items: Vec<_> = app
-        .symbols_results
-        .iter()
-        .map(|symbol| {
-            let kind = truncate(&symbol.kind, 8);
-            let file = format!(
-                "{}:{}",
-                symbol.file.display(),
-                symbol.selection_range.start.line + 1
-            );
-            let fixed = 8 + 2 + file.chars().count().min(18) + 1;
-            let name_width = inner_width.saturating_sub(fixed).max(8);
-            ListItem::new(format!(
-                "{kind:<8} {:<name_width$} {}",
-                truncate(&qualified_symbol(symbol), name_width),
-                truncate(&file, 18)
-            ))
-        })
-        .collect();
-    let title = if app.symbols_loading {
-        format!(" SYMBOLS · {} · searching… ", app.symbols_query)
-    } else if app.symbols_truncated {
-        format!(" SYMBOLS · {} · first 50 ", app.symbols_query)
-    } else {
-        format!(" SYMBOLS · {} ", app.symbols_query)
-    };
-    let mut state = ListState::default().with_selected(Some(app.symbols_selection));
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("> ")
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(pane_block(&title, active)),
-        area,
-        &mut state,
-    );
-}
-
-fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    render_inspector_block(frame, area, app, app.pane == Pane::Inspector);
-}
-
-fn render_inspector_block(frame: &mut Frame<'_>, area: Rect, app: &App, active: bool) {
-    let (text, scroll) = app.inspector.as_ref().map_or_else(
-        || {
-            (
-                vec![
-                    heading("No symbol selected"),
-                    Line::raw(""),
-                    Line::raw("Choose a symbol and press Enter."),
-                ],
-                0,
-            )
-        },
-        |inspector| (inspector_text(inspector), inspector.scroll as u16),
-    );
-    frame.render_widget(
-        Paragraph::new(text)
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false })
-            .block(pane_block(" INSPECTOR ", active)),
-        area,
-    );
-}
-
-fn inspector_text(inspector: &Inspector) -> Vec<Line<'static>> {
-    let definition = match &inspector.definition {
-        None => "loading...".into(),
-        Some(None) => "—".into(),
-        Some(Some(location)) => format!(
-            "{}:{}",
-            location.file.display(),
-            location.range.start.line + 1
-        ),
-    };
-    let mut lines = vec![
-        heading(&qualified_symbol(&inspector.symbol)),
-        Line::raw(format!("Kind         {}", inspector.symbol.kind)),
-        Line::raw(format!(
-            "Location     {}:{}",
-            inspector.symbol.file.display(),
-            inspector.symbol.selection_range.start.line + 1
-        )),
-        Line::raw(format!(
-            "Container    {}",
-            inspector.symbol.container.as_deref().unwrap_or("—")
-        )),
-        Line::raw(format!("Definition   {definition}")),
-        Line::raw(""),
-        Line::raw(format!(
-            "References   {}",
-            section_count(inspector, "references", inspector.references)
-        )),
-        Line::raw(format!(
-            "Callers      {}",
-            section_count(inspector, "calls", inspector.callers)
-        )),
-        Line::raw(format!(
-            "Callees      {}",
-            section_count(inspector, "calls", inspector.callees)
-        )),
-        Line::raw(format!(
-            "Problems     {}",
-            section_count(inspector, "diagnostics", inspector.diagnostics)
-        )),
-        Line::raw(""),
-        heading("Hover"),
-    ];
-    lines.extend(
-        inspector
-            .hover
-            .as_ref()
-            .map(|value| value.as_deref().unwrap_or("—"))
-            .unwrap_or("loading...")
-            .lines()
-            .map(|line| Line::raw(line.to_owned())),
-    );
-    lines.push(Line::raw(""));
-    lines.push(heading("Source"));
-    lines.extend(
-        inspector
-            .source
-            .as_deref()
-            .unwrap_or("loading...")
-            .lines()
-            .map(|line| Line::raw(line.to_owned())),
-    );
-    if !inspector.errors.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(heading("Errors"));
-        lines.extend(inspector.errors.iter().map(|(section, error)| {
-            Line::styled(
-                format!("{section}: {error}"),
-                Style::default().fg(Color::Red),
-            )
-        }));
-    }
-    lines
-}
-
 fn footer_text(app: &App) -> &'static str {
     match app.overlay {
-        Overlay::Search => "type search   ↑/↓ or Ctrl+j/k results   Enter inspect   Esc close",
-        Overlay::Help => "Esc / ? close help",
-        Overlay::None
-            if app.pane == Pane::ExplorerFile
-                && app.explorer.right_mode == ExplorerRightMode::Inspector =>
-        {
-            "j/k scroll   c calls   Ctrl+h tree   Esc file   1/2/3/4 views   q quit"
-        }
-        Overlay::None if app.pane == Pane::ExplorerFile => {
-            "j/k move   Enter inspect   Ctrl+h tree   Esc back   1/2/3/4 views   q quit"
-        }
-        Overlay::None if app.pane == Pane::ExplorerTree => {
-            "j/k move   h/l collapse/expand   Enter open   Ctrl+l file   1/2/3/4 views   q quit"
-        }
-        Overlay::None if app.pane == Pane::Inspector => {
-            "j/k scroll   c calls   Ctrl+h symbols   Esc back   1/2/3/4 views   q quit"
-        }
-        Overlay::None if app.pane == Pane::Symbols => {
-            "j/k move   Enter inspect   c calls   / search   Ctrl+l inspector   1/2/3/4 views   q quit"
-        }
-        Overlay::None if app.pane == Pane::Callers => {
-            if app.calls.scope == crate::model::CallScope::Workspace {
-                "j/k move   Enter follow   e external   Ctrl+l current   Esc center   q quit"
-            } else {
-                "j/k move   Enter follow   e workspace-only   Ctrl+l current   Esc center   q quit"
+        Overlay::Search => " type search · ↑/↓ results · Enter inspect · Esc close · Ctrl+c quit",
+        Overlay::Help => " ? / Esc close help · q quit",
+        Overlay::None => match app.view {
+            View::Map => {
+                " j/k nodes · Enter focus · o source · Tab pane · Esc back · ? help · q quit"
             }
-        }
-        Overlay::None if app.pane == Pane::CallCurrent => {
-            if app.calls.scope == crate::model::CallScope::Workspace {
-                "Ctrl+h callers   Ctrl+l callees   e external   Esc back   1/2/3/4 views   q quit"
-            } else {
-                "Ctrl+h callers   Ctrl+l callees   e workspace-only   Esc back   q quit"
+            View::Overview if app.pane == Pane::Details => {
+                " j/k scroll · Ctrl+h exploration · 1–5 views · ? help · q quit"
             }
-        }
-        Overlay::None if app.pane == Pane::Callees => {
-            if app.calls.scope == crate::model::CallScope::Workspace {
-                "j/k move   Enter follow   e external   Ctrl+h current   Esc center   q quit"
-            } else {
-                "j/k move   Enter follow   e workspace-only   Ctrl+h current   Esc center   q quit"
+            View::Overview => {
+                " j/k select · Enter expand/open · Tab pane · 1–5 views · ? help · q quit"
             }
-        }
-        Overlay::None if app.view == View::Overview && app.pane == Pane::Details => {
-            "j/k scroll metrics   Ctrl+h project   1/2/3/4 views   ? help   q quit"
-        }
-        Overlay::None if app.view == View::Overview => {
-            "j/k select   Enter explore   Ctrl+l metrics   1/2/3/4 views   ? help   q quit"
-        }
-        Overlay::None => {
-            "1 Overview   2 Symbols   3 Calls   4 Explorer   / search   Ctrl+h/l panes   q quit"
-        }
+            View::Symbols => {
+                " / search · j/k select · Enter inspect · c calls · Tab pane · ? help · q quit"
+            }
+            View::Calls => {
+                " j/k select · Enter follow · Tab pane · e scope · Esc back · ? help · q quit"
+            }
+            View::Explorer if app.explorer.right_mode == ExplorerRightMode::Inspector => {
+                " j/k scroll · c calls · Esc file symbols · Tab pane · ? help · q quit"
+            }
+            View::Explorer => {
+                " j/k select · h/l tree · Enter open/inspect · Tab pane · ? help · q quit"
+            }
+        },
     }
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered(area, 62, 90);
+    let popup = centered(area, 90, 90);
     frame.render_widget(Clear, popup);
+    let text = vec![
+        heading("Views"),
+        Line::raw("1 Overview · 2 Symbols · 3 Calls · 4 Explorer · 5 Map"),
+        heading("Navigation"),
+        Line::raw("j/k move or scroll · Ctrl+h/l focus panes"),
+        Line::raw("Tab / Shift+Tab next / previous pane"),
+        heading("Explore"),
+        Line::raw("Overview: Enter expands a group or opens a file"),
+        Line::raw("Symbols: / search · Enter Inspector · c Calls"),
+        Line::raw("Calls: Enter follow · e external scope · Esc back"),
+        Line::raw("Explorer: h/l directories · Enter file / symbol"),
+        Line::raw("Map: j/k nodes · Enter focus · o Cargo source target"),
+        Line::raw("Map: Esc previous neighborhood / cancel target choice"),
+        heading("Session"),
+        Line::raw("? / Esc close help · q / Ctrl+C quit"),
+    ];
     frame.render_widget(
-        Paragraph::new(
-            "Views\n\n  1              Overview\n  2              Symbols\n  3              Calls\n  4              Explorer\n\nNavigation\n\n  j / k          move or scroll\n  Ctrl+h/l       focus left/right\n  Tab / Shift+Tab next / previous pane\n\nExplorer\n\n  j / k          move\n  h / l          collapse / expand\n  Enter          open directory / file / symbol\n\nActions\n\n  c              calls for inspected symbol\n  e              toggle external calls\n  Esc            back\n  /              search\n  ?              close help\n  q / Ctrl+C     quit",
-        )
-        .block(Block::default().title(" Help ").borders(Borders::ALL)),
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(pane_block(" HELP · keyboard reference ", true)),
         popup,
     );
 }
 
 fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let active = app.overlay == Overlay::Search;
     let popup = centered(area, 72, 70);
     frame.render_widget(Clear, popup);
     let rows = Layout::default()
@@ -894,25 +225,14 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ""
     };
     frame.render_widget(
-        Paragraph::new(format!("> {}{status}", app.symbols_query)).block(
-            Block::default()
-                .title(" Search symbols ")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(format!("> {}{status}", app.symbols_query))
+            .block(pane_block(" Search symbols ", active)),
         rows[0],
     );
     let items: Vec<_> = app
         .symbols_results
         .iter()
-        .map(|symbol| {
-            ListItem::new(format!(
-                "{:<10} {:<30} {}:{}",
-                symbol.kind,
-                truncate(&qualified_symbol(symbol), 30),
-                symbol.file.display(),
-                symbol.selection_range.start.line + 1
-            ))
-        })
+        .map(|s| symbol_row(s, popup.width.saturating_sub(6) as usize))
         .collect();
     let title = if app.symbols_truncated {
         " Results (first 50) "
@@ -929,25 +249,19 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_stateful_widget(
         List::new(items)
             .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(Color::Cyan))
-            .block(Block::default().title(title).borders(Borders::ALL)),
+            .highlight_style(Style::default().fg(theme::ACTIVE))
+            .block(pane_block(title, active)),
         rows[1],
         &mut state,
     );
 }
 
 pub(super) fn pane_block<'a>(title: &'a str, active: bool) -> Block<'a> {
-    Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if active { Color::Cyan } else { Color::DarkGray }))
+    components::styled_panel(title, active)
 }
 
 pub(super) fn heading(value: &str) -> Line<'static> {
-    Line::styled(
-        value.to_owned(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )
+    components::section_header(value)
 }
 
 fn centered(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
@@ -967,13 +281,6 @@ fn centered(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
             Constraint::Percentage((100 - width_percent) / 2),
         ])
         .split(vertical[1])[1]
-}
-
-fn section_count(inspector: &Inspector, section: &str, value: Option<usize>) -> String {
-    if inspector.errors.iter().any(|(name, _)| name == section) {
-        return "error".into();
-    }
-    value.map_or_else(|| "loading...".into(), |value| value.to_string())
 }
 
 fn truncate(value: &str, maximum: usize) -> String {
@@ -996,6 +303,7 @@ mod tests {
 
     fn app() -> App {
         App::new(Project {
+            architecture: Default::default(),
             workspace_root: "/workspace/rust_watcher".into(),
             packages: Vec::new(),
             rust_files: Vec::new(),
@@ -1080,6 +388,7 @@ mod tests {
             diagnostics: Some(0),
             errors: Vec::new(),
             scroll: 0,
+            scroll_limit: Default::default(),
         });
         app
     }
@@ -1150,6 +459,7 @@ mod tests {
 
     fn explorer_app() -> App {
         let project = Project {
+            architecture: Default::default(),
             workspace_root: "/workspace/rust_watcher".into(),
             packages: vec![Package {
                 name: "rust_watcher".into(),
@@ -1276,10 +586,10 @@ mod tests {
         app.analyzer_state = AnalyzerState::Ready;
         app.inspector = inspected_app().inspector;
         let overview = render_text(&app);
-        assert!(overview.contains("[1 Overview]"));
-        assert!(overview.contains("[2 Symbols]"));
+        assert!(overview.contains("1 Overview"));
+        assert!(overview.contains("2 Symbols"));
         assert!(overview.contains("Workspace"));
-        assert!(overview.contains("Entrypoints"));
+        assert!(overview.contains("ENTRYPOINTS"));
         assert!(!overview.contains("LspClient::request"));
         app.overlay = Overlay::Help;
         let help = render_text(&app);
@@ -1312,8 +622,8 @@ mod tests {
         app.analyzer_state = AnalyzerState::Error("analyzer unavailable".into());
         let text = render_text(&app);
         assert!(text.contains("Metrics ready · PARTIAL"));
-        assert!(text.contains("Files 42"));
-        assert!(text.contains("Source LOC 0 · nonblank 100"));
+        assert!(text.contains("Files") && text.contains("42"));
+        assert!(text.contains("Source nonblank LOC") && text.contains("100"));
         assert!(text.contains("analyzer unavailable"));
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal.draw(|f| render(f, &app)).unwrap();
@@ -1324,7 +634,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(text.contains("Files 42"));
+        assert!(text.contains("Files") && text.contains("42"));
         assert!(text.contains("RA"));
     }
 
@@ -1361,7 +671,7 @@ mod tests {
             terminal.draw(|f| render(f, &app)).unwrap();
         }
         eprintln!("Overview render average {:?}", start.elapsed() / 100);
-        app.project_selection = 1;
+        app.select_overview(2);
         let start = std::time::Instant::now();
         for _ in 0..100 {
             terminal.draw(|f| render(f, &app)).unwrap();
@@ -1577,6 +887,7 @@ mod tests {
             diagnostics: Some(0),
             errors: Vec::new(),
             scroll: 0,
+            scroll_limit: Default::default(),
         });
         std::fs::write(
             directory.join("14-explorer-inspector.txt"),

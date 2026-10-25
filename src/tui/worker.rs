@@ -372,6 +372,11 @@ async fn run_inspect_phase(
     events: &mpsc::Sender<AnalyzerEvent>,
 ) {
     let error = match phase {
+        InspectPhase::Callers | InspectPhase::Callees
+            if !crate::model::is_callable_kind(&symbol.kind) =>
+        {
+            return
+        }
         InspectPhase::Source => match analyzer.source_preview_for_symbol(symbol) {
             Ok(value) => return send(events, AnalyzerEvent::Source { id, value }).await,
             Err(error) => error,

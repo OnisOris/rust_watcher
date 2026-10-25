@@ -20,6 +20,8 @@ impl std::error::Error for ProjectNotFound {}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Project {
+    #[serde(skip)]
+    pub architecture: crate::architecture::Architecture,
     pub workspace_root: PathBuf,
     pub packages: Vec<Package>,
     pub rust_files: Vec<PathBuf>,
@@ -52,6 +54,7 @@ impl Project {
     }
 
     fn from_metadata(metadata: Metadata) -> Result<Self> {
+        let architecture = crate::architecture::Architecture::from_metadata(&metadata);
         let workspace_root = metadata.workspace_root.into_std_path_buf();
         let mut packages: Vec<_> = metadata
             .packages
@@ -94,6 +97,7 @@ impl Project {
         rust_files.sort();
         rust_files.dedup();
         Ok(Self {
+            architecture,
             workspace_root,
             packages,
             rust_files,

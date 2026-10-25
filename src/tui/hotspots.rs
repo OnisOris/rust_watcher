@@ -1,51 +1,51 @@
 //! Presentation only; Git I/O lives in git_analysis.
-use super::{app::App, overview::Target, ui::heading};
+use super::{app::App, components, overview::Target, theme, ui::heading};
 use crate::git_analysis::FileHotspot;
 use ratatui::text::Line;
-use std::path::Path;
 
 pub(super) fn selected(app: &App) -> Option<&FileHotspot> {
-    let targets = super::overview::targets(app);
-    let Target::Hotspot(path) = targets.get(app.project_selection)? else {
+    let (Target::Hotspot(path) | Target::Historical(path)) = super::overview::selected(app)? else {
         return None;
     };
     app.hotspots
         .as_ref()?
         .rows()
         .iter()
-        .find(|f| &f.path == path)
-}
-pub(super) fn label(app: &App, path: &Path) -> String {
-    let report = app.hotspots.as_ref().unwrap();
-    let f = report.rows().iter().find(|f| f.path == path).unwrap();
-    format!(
-        "{} changes / {}d{} · {}\n  {:?}",
-        f.change_commits,
-        report.since_days,
-        if f.review_candidate {
-            ""
-        } else {
-            " [most changed]"
-        },
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        path
-    )
+        .chain(app.hotspots.as_ref()?.historical_files.iter())
+        .find(|f| f.path == path)
 }
 pub(super) fn status(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![heading("Git history")];
     if let Some(r) = &app.hotspots {
         lines.push(Line::raw(r.status()));
+        if r.available {
+            for (label, partial) in [
+                ("History", r.history_partial),
+                ("Co-change", r.co_change_partial),
+                ("Current metrics", r.current_metrics_partial),
+            ] {
+                lines.push(Line::from(vec![
+                    ratatui::text::Span::styled(
+                        format!("{label:<21}"),
+                        ratatui::style::Style::default().fg(theme::MUTED),
+                    ),
+                    components::status_label(
+                        if partial { "partial" } else { "complete" },
+                        if partial {
+                            theme::WARNING
+                        } else {
+                            theme::SUCCESS
+                        },
+                    ),
+                ]));
+            }
+        }
         if r.history_shallow == Some(true) {
             lines.push(Line::raw("Shallow history · incomplete clone"));
         }
         if r.working_tree_dirty == Some(true) {
             lines.push(Line::raw("Working tree has uncommitted changes"));
         }
-        lines.extend(
-            r.partial_reasons
-                .iter()
-                .map(|s| Line::raw(format!("Limitation: {s}"))),
-        );
     } else {
         lines.push(Line::raw(app.hotspots_error.as_ref().map_or_else(
             || "Git history: analyzing...".into(),

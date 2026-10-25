@@ -14,7 +14,7 @@ anyhow = "1.0"
 cargo_metadata = "0.23"
 clap = { version = "4.5", features = ["derive"] }
 lsp-types = "0.97"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 crossterm = "0.29"
 ignore = "0.4"
 serde = { version = "1.0", features = ["derive"] }

@@ -53,19 +53,7 @@ pub(super) async fn run_loop(
             }
             result = repository.recv(), if repository_open => {
                 match result {
-                    Some(super::RepositoryEvent::Tree(tree)) => app.explorer.apply_tree(tree),
-                    Some(super::RepositoryEvent::Metrics(metrics)) => app.metrics = Some(metrics),
-                    Some(super::RepositoryEvent::Maintainability(report)) => app.maintainability = Some(report),
-                    Some(super::RepositoryEvent::Hotspots(report)) => {
-                        if app.project_selection > 0 { app.project_selection += report.rows().len(); }
-                        app.hotspots = Some(report);
-                    }
-                    Some(super::RepositoryEvent::Error(message)) => {
-                        app.metrics_error = Some(message.clone());
-                        app.hotspots_error = Some(message.clone());
-                        app.maintainability_error = Some(message.clone());
-                        app.explorer.fail(message);
-                    }
+                    Some(event)=>apply_repository(app,event),
                     None => {
                         repository_open = false;
                         if app.hotspots.is_none() && app.hotspots_error.is_none() {
@@ -114,6 +102,22 @@ pub(super) async fn run_loop(
     }
 }
 
+pub(super) fn apply_repository(app: &mut App, event: super::RepositoryEvent) {
+    use super::RepositoryEvent;
+    match event {
+        RepositoryEvent::Tree(tree) => app.explorer.apply_tree(tree),
+        RepositoryEvent::Metrics(metrics) => app.metrics = Some(metrics),
+        RepositoryEvent::Maintainability(report) => app.maintainability = Some(report),
+        RepositoryEvent::Hotspots(report) => app.hotspots = Some(report),
+        RepositoryEvent::Error(message) => {
+            app.metrics_error = Some(message.clone());
+            app.hotspots_error = Some(message.clone());
+            app.maintainability_error = Some(message.clone());
+            app.explorer.fail(message);
+        }
+    }
+}
+
 pub(super) async fn handle_key(
     app: &mut App,
     key: KeyEvent,
@@ -121,6 +125,39 @@ pub(super) async fn handle_key(
 ) -> Result<bool> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(true);
+    }
+    if app.view == View::Map && app.overlay == Overlay::None {
+        if let Some(index) = app.map.target_picker {
+            let count = app
+                .project
+                .architecture
+                .node(&app.map.selected)
+                .map_or(0, |n| n.targets.len());
+            match key.code {
+                KeyCode::Char('q') => return Ok(true),
+                KeyCode::Esc => app.map.target_picker = None,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.map.target_picker = Some((index + 1).min(count.saturating_sub(1)))
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.map.target_picker = Some(index.saturating_sub(1))
+                }
+                KeyCode::Enter => {
+                    let path = app
+                        .project
+                        .architecture
+                        .node(&app.map.selected)
+                        .and_then(|n| n.targets.get(index))
+                        .map(|t| t.path.clone());
+                    app.map.target_picker = None;
+                    if let Some(path) = path {
+                        open_exact_file(app, commands, path, None).await;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
     }
     if key.code == KeyCode::Esc {
         if let Some((id, target, scope)) = app.escape() {
@@ -135,6 +172,9 @@ pub(super) async fn handle_key(
     }
     match app.overlay {
         Overlay::Help => {
+            if key.code == KeyCode::Char('q') {
+                return Ok(true);
+            }
             if key.code == KeyCode::Char('?') {
                 app.overlay = Overlay::None;
             }
@@ -169,6 +209,22 @@ pub(super) async fn handle_key(
             KeyCode::Char('2') => app.switch_view(View::Symbols),
             KeyCode::Char('3') => open_calls(app, commands).await?,
             KeyCode::Char('4') => app.switch_view(View::Explorer),
+            KeyCode::Char('5') => app.switch_view(View::Map),
+            KeyCode::Char('o') if app.view == View::Map => {
+                let targets = app
+                    .project
+                    .architecture
+                    .node(&app.map.selected)
+                    .map(|n| n.targets.clone())
+                    .unwrap_or_default();
+                if targets.len() == 1 {
+                    open_exact_file(app, commands, targets[0].path.clone(), None).await;
+                } else if targets.is_empty() {
+                    app.notice = Some("No workspace-relative Cargo source target available".into());
+                } else {
+                    app.map.target_picker = Some(0);
+                }
+            }
             KeyCode::Char('c')
                 if app.view == View::Symbols
                     || (app.view == View::Explorer
@@ -218,13 +274,20 @@ pub(super) async fn handle_key(
             KeyCode::Enter if app.view == View::Explorer => {
                 activate_explorer(app, commands).await?
             }
+            KeyCode::Enter if app.view == View::Map => {
+                app.map.focus_selected();
+                app.pane = Pane::MapGraph;
+            }
             KeyCode::Enter => {
                 use super::overview::Target;
-                let target = super::overview::targets(app)
-                    .get(app.project_selection)
-                    .cloned();
+                let target = super::overview::selected(app);
                 let (path, anchor) = match target {
-                    Some(Target::File(path, _) | Target::Hotspot(path)) => (Some(path), None),
+                    Some(
+                        Target::File(path, _)
+                        | Target::Hotspot(path)
+                        | Target::Historical(path)
+                        | Target::Entrypoint(path),
+                    ) => (Some(path), None),
                     Some(Target::Unmeasured(f)) => (Some(f.path), None),
                     Some(Target::Longest(f) | Target::Deepest(f)) => {
                         (Some(f.path.clone()), Some(f))
@@ -232,26 +295,7 @@ pub(super) async fn handle_key(
                     _ => (None, None),
                 };
                 if let Some(path) = path {
-                    if app.project.workspace_root.join(&path).is_file()
-                        && app.explorer.reveal_file(&path)
-                    {
-                        app.switch_view(View::Explorer);
-                        if let Some((id, file)) = app.explorer.open_selected() {
-                            if let Some(anchor) = anchor {
-                                app.explorer.set_anchor(anchor);
-                            }
-                            app.pane = Pane::ExplorerFile;
-                            send_command(app, commands, AnalyzerCommand::InspectFile { id, file })
-                                .await;
-                        } else {
-                            app.pane = Pane::ExplorerFile;
-                        }
-                    } else {
-                        app.notice = Some(format!(
-                            "File unavailable in repository tree: {}",
-                            path.display()
-                        ));
-                    }
+                    open_exact_file(app, commands, path, anchor).await;
                 } else {
                     app.activate_project_item();
                 }
@@ -260,6 +304,32 @@ pub(super) async fn handle_key(
         },
     }
     Ok(false)
+}
+
+async fn open_exact_file(
+    app: &mut App,
+    commands: &mpsc::Sender<AnalyzerCommand>,
+    path: std::path::PathBuf,
+    anchor: Option<crate::maintainability::FunctionMetrics>,
+) {
+    if app.project.workspace_root.join(&path).is_file() && app.explorer.reveal_file(&path) {
+        app.switch_view(View::Explorer);
+        app.notice = None;
+        if let Some((id, file)) = app.explorer.open_selected() {
+            if let Some(anchor) = anchor {
+                app.explorer.set_anchor(anchor);
+            }
+            app.pane = Pane::ExplorerFile;
+            send_command(app, commands, AnalyzerCommand::InspectFile { id, file }).await;
+        } else {
+            app.pane = Pane::ExplorerFile;
+        }
+    } else {
+        app.notice = Some(format!(
+            "File unavailable in repository tree: {}",
+            path.display()
+        ));
+    }
 }
 
 async fn begin_inspect(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
@@ -320,6 +390,16 @@ async fn activate_explorer(app: &mut App, commands: &mpsc::Sender<AnalyzerComman
             }
         }
         Pane::ExplorerFile if app.explorer.right_mode == ExplorerRightMode::File => {
+            if app.explorer.file.as_ref().is_none_or(|f| {
+                app.explorer
+                    .selected_entry()
+                    .is_none_or(|e| e.path != f.path)
+            }) {
+                if let Some((id, file)) = app.explorer.open_selected() {
+                    send_command(app, commands, AnalyzerCommand::InspectFile { id, file }).await;
+                }
+                return Ok(());
+            }
             if let Some((id, symbol)) = app.begin_explorer_symbol_inspect() {
                 send_command(app, commands, AnalyzerCommand::Inspect { id, symbol }).await;
             }
@@ -440,8 +520,14 @@ mod tests {
         let tree = crate::repository::scan(temp.path()).unwrap();
         app.metrics = Some(crate::metrics::analyze(temp.path(), &tree, &app.project));
         app.explorer.apply_tree(tree);
-        app.move_selection(1);
-        assert_eq!(app.project_selection, 1);
+        app.overview
+            .expanded
+            .insert(super::super::overview::Group::Largest);
+        let target = super::super::overview::targets(&app)
+            .into_iter()
+            .find(|t| matches!(t, super::super::overview::Target::File(..)))
+            .unwrap();
+        app.overview.selected = target.id();
         let (tx, mut rx) = mpsc::channel(16);
         handle_key(
             &mut app,
@@ -476,6 +562,7 @@ mod tests {
 
     fn app() -> App {
         App::new(Project {
+            architecture: Default::default(),
             workspace_root: "/workspace/project".into(),
             packages: Vec::new(),
             rust_files: Vec::new(),
@@ -571,7 +658,9 @@ mod tests {
         assert!(app.calls.center.is_none());
         assert!(receiver.try_recv().is_err());
 
-        app.inspector = Some(super::super::app::Inspector::loading(1, symbol("run")));
+        let mut callable = symbol("run");
+        callable.kind = "method".into();
+        app.inspector = Some(super::super::app::Inspector::loading(1, callable));
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),

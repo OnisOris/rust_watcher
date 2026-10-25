@@ -1110,11 +1110,24 @@ fn source_fragment(file: &Path, selected: Range) -> Result<String> {
 }
 
 fn source_preview(file: &Path, selected: Range) -> Result<String> {
-    let source = std::fs::read_to_string(file)
-        .with_context(|| format!("failed to read {}", file.display()))?;
+    use std::io::Read;
+    // The Inspector never loads an unbounded/generated file just for presentation.
+    const MAX_PREVIEW_READ_BYTES: u64 = 2 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .with_context(|| format!("failed to read {}", file.display()))?
+        .take(MAX_PREVIEW_READ_BYTES)
+        .read_to_end(&mut bytes)?;
+    let source = String::from_utf8(bytes)
+        .context("source preview is not valid UTF-8 (or read limit cuts a character)")?;
     let lines: Vec<_> = source.lines().collect();
     let start = selected.start.line.saturating_sub(10) as usize;
-    let end = ((selected.end.line + 11) as usize).min(lines.len());
+    let end = (selected.end.line.saturating_add(11) as usize)
+        .min(lines.len())
+        .min(start + 31);
+    if start >= end {
+        anyhow::bail!("Source preview unavailable: selected line outside bounded 2 MiB preview");
+    }
     Ok(lines[start..end]
         .iter()
         .enumerate()
@@ -1125,7 +1138,17 @@ fn source_preview(file: &Path, selected: Range) -> Result<String> {
             } else {
                 ' '
             };
-            format!("{marker}{:>4} | {}", line_number + 1, line)
+            let shown: String = line.chars().take(300).collect();
+            format!(
+                "{marker}{:>4} | {}{}",
+                line_number + 1,
+                shown,
+                if line.chars().count() > 300 {
+                    " … [line clipped]"
+                } else {
+                    ""
+                }
+            )
         })
         .collect::<Vec<_>>()
         .join("\n"))
@@ -1384,6 +1407,41 @@ mod tests {
         .unwrap();
         assert_eq!(preview.lines().count(), 21);
         assert!(preview.lines().any(|line| line == ">  20 | line 20"));
+    }
+
+    #[test]
+    fn source_preview_clips_long_lines_and_rejects_locations_beyond_read_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("generated.rs");
+        std::fs::write(&file, format!("{}\n", "é".repeat(2 * 1024 * 1024))).unwrap();
+        let point = Position {
+            line: 0,
+            character: 0,
+        };
+        let preview = source_preview(
+            &file,
+            Range {
+                start: point,
+                end: point,
+            },
+        )
+        .unwrap();
+        assert!(preview.contains("[line clipped]"));
+        assert!(preview.chars().count() < 350);
+        let outside = Position {
+            line: u32::MAX,
+            character: 0,
+        };
+        assert!(source_preview(
+            &file,
+            Range {
+                start: outside,
+                end: outside
+            }
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("bounded 2 MiB"));
     }
 
     #[test]

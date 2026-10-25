@@ -18,6 +18,7 @@ pub(super) enum View {
     Symbols,
     Calls,
     Explorer,
+    Map,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub(super) enum Pane {
     Callees,
     ExplorerTree,
     ExplorerFile,
+    MapGraph,
+    MapInspector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +64,7 @@ pub(super) struct Inspector {
     pub diagnostics: Option<usize>,
     pub errors: Vec<(String, String)>,
     pub scroll: usize,
+    pub scroll_limit: std::cell::Cell<Option<usize>>,
 }
 
 impl Inspector {
@@ -77,11 +81,12 @@ impl Inspector {
             diagnostics: None,
             errors: Vec::new(),
             scroll: 0,
+            scroll_limit: Default::default(),
         }
     }
 
     fn line_count(&self) -> usize {
-        17 + self
+        30 + self
             .hover
             .as_ref()
             .and_then(|value| value.as_deref())
@@ -94,7 +99,11 @@ impl Inspector {
     }
 
     fn scroll_by(&mut self, delta: isize) {
-        self.scroll = move_index(self.scroll, self.line_count(), delta);
+        let max = self
+            .scroll_limit
+            .get()
+            .unwrap_or_else(|| self.line_count().saturating_sub(1));
+        self.scroll = self.scroll.min(max).saturating_add_signed(delta).min(max);
     }
 }
 
@@ -102,6 +111,9 @@ const CALL_HISTORY_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct CallsState {
+    pub context_scroll: usize,
+    pub context_scroll_limit: std::cell::Cell<Option<usize>>,
+    pub unavailable: Option<String>,
     pub scope: CallScope,
     pub center: Option<CallTarget>,
     pub callers: Vec<CallTarget>,
@@ -119,6 +131,8 @@ pub(super) struct CallsState {
 }
 
 pub(super) struct App {
+    pub map: super::map::State,
+    pub color_mode: super::theme::ColorMode,
     pub hotspots: Option<crate::git_analysis::HotspotReport>,
     pub hotspots_error: Option<String>,
     pub maintainability: Option<crate::maintainability::MaintainabilityReport>,
@@ -126,12 +140,13 @@ pub(super) struct App {
     pub metrics: Option<crate::metrics::RepositoryMetrics>,
     pub metrics_error: Option<String>,
     pub metrics_scroll: usize,
+    pub metrics_scroll_limit: std::cell::Cell<Option<usize>>,
     pub project: Project,
     pub analyzer_state: AnalyzerState,
     pub view: View,
     pub pane: Pane,
     pub overlay: Overlay,
-    pub project_selection: usize,
+    pub overview: super::overview::State,
     pub symbols_query: String,
     pub symbols_results: Vec<Symbol>,
     pub symbols_selection: usize,
@@ -150,6 +165,8 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            map: super::map::State::new(&project.architecture),
+            color_mode: super::theme::ColorMode::detect(),
             hotspots: None,
             hotspots_error: None,
             maintainability: None,
@@ -157,12 +174,13 @@ impl App {
             metrics: None,
             metrics_error: None,
             metrics_scroll: 0,
+            metrics_scroll_limit: Default::default(),
             project,
             analyzer_state: AnalyzerState::Starting,
             view: View::Overview,
             pane: Pane::Project,
             overlay: Overlay::None,
-            project_selection: 0,
+            overview: super::overview::State::default(),
             symbols_query: String::new(),
             symbols_results: Vec::new(),
             symbols_selection: 0,
@@ -178,8 +196,10 @@ impl App {
         }
     }
 
-    fn project_item_count(&self) -> usize {
-        super::overview::targets(self).len()
+    pub(super) fn select_overview(&mut self, index: usize) {
+        if let Some(target) = super::overview::targets(self).get(index) {
+            self.overview.selected = target.id();
+        }
     }
 
     pub(super) fn switch_view(&mut self, view: View) {
@@ -190,6 +210,7 @@ impl App {
             View::Symbols => Pane::Symbols,
             View::Calls => Pane::CallCurrent,
             View::Explorer => Pane::ExplorerTree,
+            View::Map => Pane::MapGraph,
         };
     }
 
@@ -202,8 +223,12 @@ impl App {
         match self.pane {
             Pane::Project => {
                 self.metrics_scroll = 0;
-                self.project_selection =
-                    move_index(self.project_selection, self.project_item_count(), delta);
+                let next = move_index(
+                    super::overview::index(self).unwrap_or(0),
+                    super::overview::targets(self).len(),
+                    delta,
+                );
+                self.select_overview(next);
             }
             Pane::Symbols => {
                 self.symbols_selection =
@@ -228,7 +253,10 @@ impl App {
                     delta,
                 );
             }
-            Pane::ExplorerTree => self.explorer.move_tree_selection(delta),
+            Pane::ExplorerTree => {
+                self.explorer.move_tree_selection(delta);
+                self.explorer.right_mode = ExplorerRightMode::File;
+            }
             Pane::ExplorerFile => {
                 if self.explorer.right_mode == ExplorerRightMode::Inspector {
                     if let Some(inspector) = &mut self.inspector {
@@ -239,10 +267,33 @@ impl App {
                 }
             }
             Pane::Details => {
-                let lines = super::overview::details(self).len();
-                self.metrics_scroll = move_index(self.metrics_scroll, lines, delta);
+                let max = self
+                    .metrics_scroll_limit
+                    .get()
+                    .unwrap_or_else(|| super::overview::details(self).len().saturating_sub(1));
+                self.metrics_scroll = self
+                    .metrics_scroll
+                    .min(max)
+                    .saturating_add_signed(delta)
+                    .min(max);
             }
-            Pane::CallCurrent => {}
+            Pane::CallCurrent => {
+                self.calls.context_scroll = self
+                    .calls
+                    .context_scroll
+                    .min(self.calls.context_scroll_limit.get().unwrap_or(0))
+                    .saturating_add_signed(delta)
+                    .min(self.calls.context_scroll_limit.get().unwrap_or(0))
+            }
+            Pane::MapGraph => self.map.move_by(&self.project.architecture, delta),
+            Pane::MapInspector => {
+                self.map.inspector_scroll = self
+                    .map
+                    .inspector_scroll
+                    .min(self.map.scroll_limit.get().unwrap_or(0))
+                    .saturating_add_signed(delta)
+                    .min(self.map.scroll_limit.get().unwrap_or(0))
+            }
         }
     }
 
@@ -257,6 +308,8 @@ impl App {
             (View::Calls, Pane::Callees) => Pane::Callers,
             (View::Explorer, Pane::ExplorerTree) => Pane::ExplorerFile,
             (View::Explorer, Pane::ExplorerFile) => Pane::ExplorerTree,
+            (View::Map, Pane::MapGraph) => Pane::MapInspector,
+            (View::Map, Pane::MapInspector) => Pane::MapGraph,
             (_, pane) => pane,
         };
     }
@@ -272,6 +325,8 @@ impl App {
             (View::Calls, Pane::Callees) => Pane::CallCurrent,
             (View::Explorer, Pane::ExplorerTree) => Pane::ExplorerFile,
             (View::Explorer, Pane::ExplorerFile) => Pane::ExplorerTree,
+            (View::Map, Pane::MapGraph) => Pane::MapInspector,
+            (View::Map, Pane::MapInspector) => Pane::MapGraph,
             (_, pane) => pane,
         };
     }
@@ -288,12 +343,18 @@ impl App {
             (View::Calls, Pane::Callees, FocusDirection::Left) => Pane::CallCurrent,
             (View::Explorer, Pane::ExplorerTree, FocusDirection::Right) => Pane::ExplorerFile,
             (View::Explorer, Pane::ExplorerFile, FocusDirection::Left) => Pane::ExplorerTree,
+            (View::Map, Pane::MapGraph, FocusDirection::Right) => Pane::MapInspector,
+            (View::Map, Pane::MapInspector, FocusDirection::Left) => Pane::MapGraph,
             _ => self.pane,
         };
     }
 
     pub(super) fn escape(&mut self) -> Option<(u64, CallTarget, CallScope)> {
         match self.overlay {
+            Overlay::None if self.view == View::Map => {
+                self.map.back();
+                self.pane = Pane::MapGraph;
+            }
             Overlay::Help | Overlay::Search => self.overlay = Overlay::None,
             Overlay::None
                 if self.view == View::Explorer
@@ -322,7 +383,13 @@ impl App {
 
     pub(super) fn activate_project_item(&mut self) {
         use super::overview::Target;
-        let label = match super::overview::targets(self).get(self.project_selection) {
+        let label = match super::overview::selected(self) {
+            Some(Target::Group(group)) => {
+                if !self.overview.expanded.remove(&group) {
+                    self.overview.expanded.insert(group);
+                }
+                return;
+            }
             Some(Target::Entrypoint(path)) => format!("Entrypoint: {}", path.display()),
             Some(Target::Package(name)) => format!("Crate: {name}"),
             _ => format!("Workspace: {}", project_name(&self.project)),
@@ -338,6 +405,15 @@ impl App {
     }
 
     pub(super) fn edit_search(&mut self) {
+        self.search_request += 1; // Invalidate responses for the previous query immediately.
+        if self.symbols_query.is_empty() {
+            self.symbols_results.clear();
+            self.symbols_selection = 0;
+            self.symbols_truncated = false;
+            self.symbols_loading = false;
+            self.symbols_dirty_at = None;
+            return;
+        }
         self.symbols_dirty_at = Some(Instant::now());
         self.symbols_loading = !self.symbols_query.is_empty();
     }
@@ -352,6 +428,7 @@ impl App {
             View::Overview => Pane::Details,
             View::Symbols => Pane::Inspector,
             View::Calls => Pane::CallCurrent,
+            View::Map => Pane::MapInspector,
             View::Explorer => {
                 self.explorer.right_mode = ExplorerRightMode::Inspector;
                 Pane::ExplorerFile
@@ -361,13 +438,45 @@ impl App {
     }
 
     pub(super) fn open_calls_for_inspector(&mut self) -> Option<(u64, CallTarget, CallScope)> {
+        let symbol = match self.view {
+            View::Symbols => self
+                .symbols_results
+                .get(self.symbols_selection)
+                .cloned()
+                .or_else(|| self.inspector.as_ref().map(|i| i.symbol.clone())),
+            View::Explorer if self.explorer.right_mode == ExplorerRightMode::File => {
+                if self.explorer.file.as_ref().is_some_and(|f| {
+                    self.explorer
+                        .selected_entry()
+                        .is_some_and(|e| e.path == f.path)
+                }) {
+                    self.explorer.selected_symbol()
+                } else {
+                    None
+                }
+            }
+            _ => self.inspector.as_ref().map(|i| i.symbol.clone()),
+        };
         self.switch_view(View::Calls);
-        let target = CallTarget::from_symbol(&self.inspector.as_ref()?.symbol);
+        let symbol = symbol?;
+        let target = CallTarget::from_symbol(&symbol);
+        if !crate::model::is_callable_kind(&target.kind) {
+            let id = self.calls.request_id + 1;
+            self.calls=CallsState { request_id:id,unavailable:Some(format!("{} is a {}.\n\nCall hierarchy is available for functions and methods.\nSelect a callable symbol to explore execution flow.",qualified_symbol(&symbol),target.kind)),center:Some(target),..Default::default() };
+            return None;
+        }
         self.calls.history.clear();
         Some(self.load_calls(target, false))
     }
 
     pub(super) fn begin_explorer_symbol_inspect(&mut self) -> Option<(u64, Symbol)> {
+        if self.explorer.file.as_ref().is_none_or(|f| {
+            self.explorer
+                .selected_entry()
+                .is_none_or(|e| e.path != f.path)
+        }) {
+            return None;
+        }
         let symbol = self.explorer.selected_symbol()?;
         self.inspect_request += 1;
         let id = self.inspect_request;
@@ -395,12 +504,17 @@ impl App {
     }
 
     pub(super) fn toggle_call_scope(&mut self) -> Option<(u64, CallTarget, CallScope)> {
+        if self.calls.unavailable.is_some() {
+            return None;
+        }
         let target = self.calls.center.clone()?;
         self.calls.scope = self.calls.scope.toggled();
         Some(self.load_calls(target, false))
     }
 
     fn load_calls(&mut self, target: CallTarget, remember: bool) -> (u64, CallTarget, CallScope) {
+        self.calls.unavailable = None;
+        self.calls.context_scroll = 0;
         if remember {
             if let Some(center) = self.calls.center.take() {
                 self.calls.history.push(center);
@@ -568,6 +682,7 @@ mod tests {
 
     pub(super) fn project() -> Project {
         Project {
+            architecture: Default::default(),
             workspace_root: "/workspace/rust_watcher".into(),
             packages: vec![Package {
                 name: "rust_watcher".into(),
@@ -782,7 +897,9 @@ mod tests {
     #[test]
     fn calls_selection_history_and_stale_events_are_bounded() {
         let mut app = App::new(project());
-        app.inspector = Some(Inspector::loading(1, symbol("A")));
+        let mut callable = symbol("A");
+        callable.kind = "function".into();
+        app.inspector = Some(Inspector::loading(1, callable));
         let (first, _, _) = app.open_calls_for_inspector().unwrap();
         let caller_b = call_target("B", 10);
         let callee_c = call_target("C", 20);

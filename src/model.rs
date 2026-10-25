@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Component;
 use std::path::PathBuf;
 
+pub fn is_callable_kind(kind: &str) -> bool {
+    matches!(kind, "function" | "method")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Position {
     pub line: u32,

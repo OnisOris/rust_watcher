@@ -24,6 +24,7 @@ pub enum Command {
     Summary,
     Stats,
     Maintainability,
+    Architecture,
     Hotspots {
         #[arg(long, default_value_t = crate::git_analysis::DEFAULT_DAYS, value_parser = clap::value_parser!(u16).range(1..=3650))]
         days: u16,

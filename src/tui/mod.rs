@@ -1,10 +1,16 @@
 mod app;
+mod components;
 mod event;
 mod explorer;
+mod highlight;
 mod hotspots;
+mod map;
 #[cfg(test)]
 mod navigation_tests;
 mod overview;
+#[cfg(test)]
+mod performance_tests;
+mod theme;
 mod ui;
 mod worker;
 

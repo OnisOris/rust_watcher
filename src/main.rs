@@ -1,3 +1,4 @@
+mod architecture;
 mod cli;
 mod git_analysis;
 mod lsp;
@@ -43,6 +44,13 @@ async fn execute(cli: &Cli) -> Result<()> {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
+    if matches!(cli.command, Some(Command::Architecture)) {
+        if cli.json {
+            return output::json(&project.architecture);
+        }
+        architecture::print(&project.architecture);
+        return Ok(());
+    }
     if let Some(Command::Hotspots { days }) = cli.command {
         let options = git_analysis::Options {
             days,
@@ -94,6 +102,8 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
     match &cli.command {
         None | Some(Command::Summary) => summary(analyzer, cli.json).await,
         Some(Command::Symbol { name }) => {
+            // Only interactive search may return partial results during indexing.
+            analyzer.wait_ready().await?;
             let symbols = analyzer.symbols(name).await?;
             if cli.json {
                 output::json(&symbols)
@@ -154,7 +164,11 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
             }
         }
         Some(
-            Command::Doctor | Command::Stats | Command::Maintainability | Command::Hotspots { .. },
+            Command::Doctor
+            | Command::Stats
+            | Command::Maintainability
+            | Command::Hotspots { .. }
+            | Command::Architecture,
         ) => unreachable!(),
     }
 }
