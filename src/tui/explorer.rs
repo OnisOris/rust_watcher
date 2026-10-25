@@ -16,6 +16,9 @@ pub(super) enum ExplorerRightMode {
 
 #[derive(Debug, Clone)]
 pub(super) struct FileState {
+    pub retry_when_ready: bool,
+    pub symbol_anchor: Option<Symbol>,
+    pub entrypoint: Option<String>,
     pub module_anchor: Option<(String, usize, usize)>,
     pub anchor: Option<crate::maintainability::FunctionMetrics>,
     pub anchor_matched: bool,
@@ -168,6 +171,9 @@ impl ExplorerState {
         let request_id = self.next_file_request;
         let rust = entry.path.extension().is_some_and(|value| value == "rs");
         self.file = Some(FileState {
+            retry_when_ready: false,
+            symbol_anchor: None,
+            entrypoint: None,
             module_anchor: None,
             anchor: None,
             anchor_matched: false,
@@ -212,12 +218,21 @@ impl ExplorerState {
 
     pub fn retry_anchor(&mut self) -> Option<(u64, PathBuf)> {
         let file = self.file.as_mut()?;
-        if (file.anchor.is_none() && file.module_anchor.is_none()) || file.error.is_none() {
+        if file.entrypoint.is_some() && !file.retry_when_ready {
+            return None;
+        }
+        if (file.anchor.is_none()
+            && file.module_anchor.is_none()
+            && file.symbol_anchor.is_none()
+            && file.entrypoint.is_none())
+            || (file.error.is_none() && !file.retry_when_ready)
+        {
             return None;
         }
         self.next_file_request += 1;
         file.request_id = self.next_file_request;
         file.error = None;
+        file.retry_when_ready = false;
         file.loading = true;
         file.symbols.clear();
         file.anchor_matched = false;
@@ -269,9 +284,20 @@ impl ExplorerState {
                         .collect();
                     (matches.len() == 1).then(|| matches[0])
                 })
+            })
+            .or_else(|| {
+                state.symbol_anchor.as_ref().and_then(|anchor| {
+                    let mut matches = symbols
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| exact_symbol(anchor, s));
+                    let first = matches.next()?.0;
+                    matches.next().is_none().then_some(first)
+                })
             });
         state.anchor_matched = matched.is_some();
-        if state.anchor.is_some() || state.module_anchor.is_some() {
+        if state.anchor.is_some() || state.module_anchor.is_some() || state.symbol_anchor.is_some()
+        {
             state.anchor_notice = Some(
                 if matched.is_some() {
                     "Exact RA symbol selected; Enter Inspector, c Calls"
@@ -300,7 +326,14 @@ impl ExplorerState {
         if state.request_id == id && state.path == file {
             state.loading = false;
             state.error = Some(message);
-            if state.anchor.is_some() || state.module_anchor.is_some() {
+            if state.entrypoint.is_some() {
+                state.anchor_notice = Some(
+                    "Source available. Call hierarchy unavailable: rust-analyzer error.".into(),
+                );
+            } else if state.anchor.is_some()
+                || state.module_anchor.is_some()
+                || state.symbol_anchor.is_some()
+            {
                 state.anchor_notice =
                     Some("Semantic Inspector unavailable; source anchor retained".into());
             }
@@ -312,7 +345,10 @@ impl ExplorerState {
         if file.error.is_some() || file.loading {
             return None;
         }
-        if (file.anchor.is_some() || file.module_anchor.is_some())
+        if (file.anchor.is_some()
+            || file.module_anchor.is_some()
+            || file.symbol_anchor.is_some()
+            || file.entrypoint.is_some())
             && !file.anchor_matched
             && !file.manual_selection
         {
@@ -420,6 +456,14 @@ impl ExplorerState {
             self.visible_rebuilds += 1;
         }
     }
+}
+
+pub(super) fn exact_symbol(a: &Symbol, b: &Symbol) -> bool {
+    a.file == b.file
+        && a.name == b.name
+        && a.kind == b.kind
+        && a.range == b.range
+        && a.selection_range == b.selection_range
 }
 
 pub(super) fn anchor_matches(

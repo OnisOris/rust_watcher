@@ -1,6 +1,11 @@
 //! Bounded cross-view intent. Semantic identity is accepted only from exact RA anchors.
 mod actions;
+mod anchors;
 mod dispatch;
+#[cfg(test)]
+mod entrypoint_tests;
+#[cfg(test)]
+mod performance_tests;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -10,7 +15,9 @@ use super::{
     worker::AnalyzerCommand,
 };
 use crate::maintainability::FunctionMetrics;
-pub(super) use actions::{Action, Picker};
+pub(super) use actions::{Action, BinaryEntrypoint, Picker};
+pub(super) use anchors::prepare as prepare_file_symbols;
+use anchors::Selector;
 pub(super) use dispatch::{flush, handle_key};
 pub(super) use render::{render_picker, render_start};
 use std::path::PathBuf;
@@ -21,9 +28,11 @@ pub(super) enum Destination {
 }
 pub(super) struct Pending {
     pub id: u64,
-    pub anchor: FunctionMetrics,
+    pub selector: Selector,
     pub destination: Destination,
+    pub deadline: std::time::Instant,
 }
+pub(super) const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 #[derive(Clone)]
 pub(super) struct ReturnPoint {
     from: View,
@@ -45,6 +54,7 @@ pub(super) struct State {
     pub pending: Option<Pending>,
     pub dispatch: Option<AnalyzerCommand>,
     pub start_selection: usize,
+    pub binary_context: Option<(BinaryEntrypoint, crate::model::Symbol)>,
     history: Vec<ReturnPoint>,
 }
 pub(super) fn point(app: &App, to: View) -> ReturnPoint {
@@ -66,7 +76,20 @@ pub(super) fn point(app: &App, to: View) -> ReturnPoint {
         }),
     }
 }
-pub(super) fn remember(app: &mut App, p: ReturnPoint) {
+pub(super) fn remember(app: &mut App, mut p: ReturnPoint) {
+    // A semantic file request is a bridge, not an extra stop between Map and Calls.
+    if p.from == View::Explorer
+        && p.to == View::Calls
+        && app.journey.history.last().is_some_and(|old| {
+            old.to == View::Explorer && matches!(old.from, View::Map | View::Calls)
+        })
+    {
+        let old = app.journey.history.pop().unwrap();
+        p = ReturnPoint {
+            to: View::Calls,
+            ..old
+        };
+    }
     if p.from == p.to {
         return;
     }
@@ -74,6 +97,12 @@ pub(super) fn remember(app: &mut App, p: ReturnPoint) {
     if app.journey.history.len() > 50 {
         app.journey.history.remove(0);
     }
+}
+pub(super) fn source_returns_to_calls(app: &App) -> bool {
+    app.journey
+        .history
+        .last()
+        .is_some_and(|p| p.from == View::Calls && p.to == View::Explorer)
 }
 pub(super) fn back(app: &mut App) -> bool {
     if !app.journey.history.last().is_some_and(|p| p.to == app.view) {
@@ -92,15 +121,27 @@ pub(super) fn back(app: &mut App) -> bool {
         map.mode = m;
         map.diagram = d;
     }
+    // InspectFile/Inspect can supersede the worker's remaining Calls phase.
+    // Resume an incomplete target on return, with a fresh ID rejecting late replies.
+    if app.view == View::Calls && (app.calls.callers_loading || app.calls.callees_loading) {
+        if let Some(target) = app.calls.center.clone() {
+            let (id, target, scope) = app.load_calls(target, false);
+            app.journey.dispatch = Some(AnalyzerCommand::LoadCalls { id, target, scope });
+        }
+    }
     true
 }
 pub(super) fn cancel(app: &mut App) {
-    app.journey.pending = None;
+    if app.journey.pending.take().is_some() {
+        if let Some(f) = app.explorer.file.as_mut() {
+            f.retry_when_ready = false;
+        }
+    }
     app.journey.dispatch = None;
 }
 pub(super) fn rebind(app: &mut App, id: u64, file: &std::path::Path) {
     if let Some(p) = &mut app.journey.pending {
-        if p.anchor.path == file {
+        if p.selector.path() == file {
             p.id = id;
         }
     }
@@ -113,6 +154,24 @@ pub(super) fn advance(app: &mut App) {
         cancel(app);
         return;
     }
+    if std::time::Instant::now() >= p.deadline {
+        let reason="Semantic navigation timed out (120s). Source retained; retry selection after RA Ready.";
+        if let Some(f) = app
+            .explorer
+            .file
+            .as_mut()
+            .filter(|f| f.request_id == p.id && f.path == p.selector.path())
+        {
+            f.loading = false;
+            f.error = None;
+            f.retry_when_ready = false;
+            f.anchor_matched = false;
+            f.anchor_notice = Some(reason.into());
+        }
+        app.notice = Some(reason.into());
+        cancel(app);
+        return;
+    }
     if app.overlay != Overlay::None {
         return;
     }
@@ -120,11 +179,17 @@ pub(super) fn advance(app: &mut App) {
         cancel(app);
         return;
     };
-    if f.request_id != p.id || f.path != p.anchor.path {
+    if f.request_id != p.id || f.path != p.selector.path() {
         cancel(app);
         return;
     }
-    if matches!(app.analyzer_state, AnalyzerState::Error(_)) {
+    if let AnalyzerState::Error(reason) = &app.analyzer_state {
+        let f = app.explorer.file.as_mut().unwrap();
+        f.loading = false;
+        f.error = Some(reason.clone());
+        f.anchor_notice = Some(
+            "Source available. Call hierarchy unavailable: rust-analyzer not available.".into(),
+        );
         app.notice = Some(
             "Semantic navigation unavailable: rust-analyzer error. Exact file/anchor retained."
                 .into(),
@@ -135,24 +200,42 @@ pub(super) fn advance(app: &mut App) {
     if f.loading {
         return;
     }
+    // Binary discovery is provisional during indexing, even when one main is returned.
+    // Ready triggers the existing single bounded file retry, not a workspace search.
+    if matches!(p.selector, Selector::Binary(_)) && app.analyzer_state != AnalyzerState::Ready {
+        let f = app.explorer.file.as_mut().unwrap();
+        f.retry_when_ready = true;
+        f.anchor_notice =
+            Some("Entrypoint: indexing; waiting for RA Ready and one exact-file retry".into());
+        return;
+    }
     let symbol = app
         .explorer
         .selected_symbol()
-        .filter(|s| f.anchor_matched && super::explorer::anchor_matches(&p.anchor, s));
+        .filter(|s| f.anchor_matched && p.selector.matches(s));
     let Some(symbol) = symbol else {
         if app.analyzer_state != AnalyzerState::Ready {
             let f = app.explorer.file.as_mut().unwrap();
-            f.error = Some("Exact anchor not available while indexing; retry on Ready".into());
+            f.retry_when_ready = true;
+            f.anchor_notice =
+                Some("Exact anchor not available while indexing; retry on Ready".into());
             return;
         }
-        app.notice = Some(
+        app.notice = if matches!(p.selector, Selector::Binary(_)) {
+            f.error.clone().or_else(|| f.anchor_notice.clone())
+        } else {
+            Some(
             "No unique callable RA symbol at exact anchor; file/line retained. Select manually."
                 .into(),
-        );
+        )
+        };
         cancel(app);
         return;
     };
     let p = app.journey.pending.take().unwrap();
+    if let Selector::Binary(t) = p.selector {
+        app.journey.binary_context = Some((t, symbol.clone()));
+    }
     match p.destination {
         Destination::Inspector => {
             if let Some((id, symbol)) = app.begin_explorer_symbol_inspect() {

@@ -73,6 +73,10 @@ pub(super) async fn run_loop(
                 terminal.draw(app)?;
             }
             _ = tick.tick() => {
+                if app.journey.pending.is_some() {
+                    super::journey::flush(app,commands).await;
+                    if app.journey.pending.is_none() {terminal.draw(app)?;}
+                }
                 while event::poll(Duration::ZERO)? {
                     match event::read()? {
                         Event::Key(key) if key.kind == event::KeyEventKind::Press => {

@@ -126,6 +126,8 @@ pub(super) struct CallsState {
     pub callees_truncated: bool,
     pub callers_error: Option<String>,
     pub callees_error: Option<String>,
+    pub callers_unsupported: bool,
+    pub callees_unsupported: bool,
     pub history: Vec<CallTarget>,
     pub request_id: u64,
 }
@@ -359,8 +361,8 @@ impl App {
     }
 
     pub(super) fn escape(&mut self) -> Option<(u64, CallTarget, CallScope)> {
-        if self.journey.pending.take().is_some() {
-            self.journey.dispatch = None;
+        if self.journey.pending.is_some() {
+            super::journey::cancel(self);
             self.notice =
                 Some("Pending semantic navigation cancelled; exact file anchor retained".into());
             return None;
@@ -380,6 +382,10 @@ impl App {
                 if self.view == View::Explorer
                     && self.explorer.right_mode == ExplorerRightMode::Inspector =>
             {
+                if super::journey::source_returns_to_calls(self) {
+                    super::journey::back(self);
+                    return None;
+                }
                 self.explorer.right_mode = ExplorerRightMode::File;
                 self.pane = Pane::ExplorerFile;
             }
@@ -565,6 +571,8 @@ impl App {
         self.calls.callees_truncated = false;
         self.calls.callers_error = None;
         self.calls.callees_error = None;
+        self.calls.callers_unsupported = false;
+        self.calls.callees_unsupported = false;
         self.pane = Pane::CallCurrent;
         (self.calls.request_id, target, self.calls.scope)
     }
@@ -625,13 +633,16 @@ impl App {
             } if id == self.calls.request_id => {
                 if incoming {
                     self.calls.callers_loading = false;
+                    self.calls.callers_unsupported = false;
                     self.calls.callers_error = Some(message);
                 } else {
                     self.calls.callees_loading = false;
+                    self.calls.callees_unsupported = false;
                     self.calls.callees_error = Some(message);
                 }
             }
             AnalyzerEvent::FileSymbols { id, file, symbols } => {
+                super::journey::prepare_file_symbols(self, id, &file, &symbols);
                 self.explorer.apply_file_symbols(id, &file, symbols);
             }
             AnalyzerEvent::FileSymbolsFailed { id, file, message } => {
@@ -657,6 +668,7 @@ impl App {
 
     fn apply_callers(&mut self, result: Option<CallTargets>) {
         self.calls.callers_loading = false;
+        self.calls.callers_unsupported = result.is_none();
         match result {
             Some(result) => {
                 self.calls.callers = result.items;
@@ -670,6 +682,7 @@ impl App {
 
     fn apply_callees(&mut self, result: Option<CallTargets>) {
         self.calls.callees_loading = false;
+        self.calls.callees_unsupported = result.is_none();
         match result {
             Some(result) => {
                 self.calls.callees = result.items;

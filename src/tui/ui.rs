@@ -173,7 +173,13 @@ fn footer_text(app: &App) -> &'static str {
                 " / search · j/k select · Enter inspect · c calls · Tab pane · ? help · q quit"
             }
             View::Calls => {
-                " j/k select · Enter follow · Tab pane · e scope · Esc back · ? help · q quit"
+                " j/k · Enter follow · o source · Tab pane · e scope · Esc back · ? · q quit"
+            }
+            View::Explorer
+                if app.explorer.right_mode == ExplorerRightMode::Inspector
+                    && super::journey::source_returns_to_calls(app) =>
+            {
+                " j/k scroll · c calls · Esc Calls · Tab pane · ? help · q quit"
             }
             View::Explorer if app.explorer.right_mode == ExplorerRightMode::Inspector => {
                 " j/k scroll · c calls · Esc file symbols · Tab pane · ? help · q quit"
@@ -197,7 +203,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         heading("Explore"),
         Line::raw("Overview: Enter expands a group or opens a file"),
         Line::raw("Symbols: / search · Enter Inspector · c Calls"),
-        Line::raw("Calls: Enter follow · e external scope · Esc back"),
+        Line::raw("Calls: Enter follow · o exact source/Inspector · e scope · Esc back"),
         Line::raw("Explorer: h/l directories · Enter file / symbol"),
         Line::raw("Map: j/k nodes · Enter focus · m modules · o exact source"),
         Line::raw("Modules: v Hierarchy/Imports/Used by · f files · a limitations · t target"),

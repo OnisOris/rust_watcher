@@ -175,7 +175,7 @@ async fn symbol_and_call_start_routes_open_real_candidates_or_explain_unavailabi
         .notice
         .as_ref()
         .unwrap()
-        .contains("no known exact anchor"));
+        .contains("No binary targets found"));
     app.analyzer_state = AnalyzerState::Error("missing RA".into());
     app.journey.start_selection = 1;
     key(&mut app, K::Enter, &tx).await;
@@ -210,6 +210,11 @@ async fn open(
 async fn priorities_open_exact_inspector_calls_and_restore_module_context() {
     let (_t, mut app, fs) = fixture();
     let origin = app.module_map.selected.clone();
+    let scope = (
+        app.module_map.crate_id.clone(),
+        app.module_map.target_id.clone(),
+        app.module_map.focus.clone(),
+    );
     let (tx, mut rx) = mpsc::channel(16);
     let id = open(&mut app, &fs[0], false, &tx, &mut rx).await;
     assert_eq!(app.view, View::Explorer);
@@ -241,17 +246,21 @@ async fn priorities_open_exact_inspector_calls_and_restore_module_context() {
         _ => panic!(),
     };
     key(&mut app, K::Esc, &tx).await;
-    assert_eq!(app.view, View::Explorer);
-    assert_eq!(app.explorer.right_mode, ExplorerRightMode::Inspector);
+    assert_eq!(app.view, View::Map);
     app.apply_event(AnalyzerEvent::CallersLoaded {
         id: request,
         result: None,
     });
-    assert_eq!(app.view, View::Explorer);
-    key(&mut app, K::Esc, &tx).await;
-    key(&mut app, K::Esc, &tx).await;
     assert_eq!(app.view, View::Map);
     assert_eq!(app.module_map.selected, origin);
+    assert_eq!(
+        (
+            app.module_map.crate_id.clone(),
+            app.module_map.target_id.clone(),
+            app.module_map.focus.clone()
+        ),
+        scope
+    );
     assert!(!app.module_map.diagram);
     assert_eq!(app.module_map.mode, super::super::module_map::Mode::Imports);
     let id = open(&mut app, &fs[1], true, &tx, &mut rx).await;

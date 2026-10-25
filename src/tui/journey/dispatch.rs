@@ -64,6 +64,25 @@ pub(in crate::tui) async fn handle_key(
     if app.overlay != Overlay::None {
         return None;
     }
+    if key.code == K::Char('o') && app.view == View::Calls {
+        if let Some(t) = app.calls.center.as_ref() {
+            let mut s = crate::model::Symbol {
+                id: String::new(),
+                name: t.name.clone(),
+                kind: t.kind.clone(),
+                file: t.file.clone(),
+                range: t.range,
+                selection_range: t.selection_range,
+                container: None,
+            };
+            s.id = crate::model::stable_symbol_id(&app.project.workspace_root, &s);
+            activate(app, tx, Action::Symbol(s), Destination::Inspector).await;
+        } else {
+            app.notice =
+                Some("No current callable selected; choose a binary entrypoint first".into());
+        }
+        return Some(false);
+    }
     if key.code == K::Char('p') && app.view == View::Map && app.module_map.active {
         let title = app
             .module_map
@@ -105,7 +124,11 @@ pub(in crate::tui) async fn handle_key(
                     calls,
                 );
                 if items.is_empty() {
-                    app.notice = Some(format!("{label}: unavailable; data may still be loading"));
+                    app.notice = Some(actions::unavailable_reason(
+                        app,
+                        routes[app.journey.start_selection.min(routes.len() - 1)],
+                        calls,
+                    ));
                 } else {
                     app.journey.picker = Some(Picker {
                         title: label,
@@ -131,21 +154,10 @@ async fn activate(
     match action {
         Action::File(path, _) => open_exact_file(app, tx, path, None).await,
         Action::Function(anchor) => {
-            let before = app.explorer.file.as_ref().map(|f| f.request_id);
-            open_exact_file(app, tx, anchor.path.clone(), Some(anchor.clone())).await;
-            if let Some(f) = app
-                .explorer
-                .file
-                .as_ref()
-                .filter(|f| Some(f.request_id) != before && f.path == anchor.path)
-            {
-                app.journey.pending = Some(Pending {
-                    id: f.request_id,
-                    anchor,
-                    destination,
-                });
-                advance(app);
-            }
+            open_selector(app, tx, Selector::Function(anchor), destination).await;
+        }
+        Action::BinaryEntrypoint(t) => {
+            open_selector(app, tx, Selector::Binary(t), destination).await
         }
         Action::Symbol(symbol) => {
             if destination == Destination::Calls {
@@ -158,7 +170,53 @@ async fn activate(
                     remember(app, origin);
                     send_command(app, tx, AnalyzerCommand::LoadCalls { id, target, scope }).await;
                 }
+            } else {
+                open_selector(app, tx, Selector::Exact(symbol), destination).await;
             }
         }
+    }
+}
+async fn open_selector(
+    app: &mut App,
+    tx: &Sender<AnalyzerCommand>,
+    selector: Selector,
+    destination: Destination,
+) {
+    let path = selector.path().to_path_buf();
+    let before = app.explorer.file.as_ref().map(|f| f.request_id);
+    let anchor = if let Selector::Function(f) = &selector {
+        Some(f.clone())
+    } else {
+        None
+    };
+    open_exact_file(app, tx, path.clone(), anchor).await;
+    if let Some(f) = app
+        .explorer
+        .file
+        .as_mut()
+        .filter(|f| Some(f.request_id) != before && f.path == path)
+    {
+        match &selector {
+            Selector::Binary(t) => {
+                f.entrypoint = Some(format!("{} · {}", t.name, t.package));
+                f.anchor_notice = Some(
+                    "Source available. Resolving binary entrypoint through RA documentSymbol..."
+                        .into(),
+                );
+            }
+            Selector::Exact(s) => {
+                f.symbol_anchor = Some(s.clone());
+                f.anchor_notice =
+                    Some("Exact Calls target; waiting for matching file symbol".into());
+            }
+            Selector::Function(_) => {}
+        }
+        app.journey.pending = Some(Pending {
+            id: f.request_id,
+            selector,
+            destination,
+            deadline: std::time::Instant::now() + NAVIGATION_TIMEOUT,
+        });
+        advance(app);
     }
 }

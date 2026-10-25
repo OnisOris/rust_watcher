@@ -61,11 +61,13 @@ pub(in crate::tui) fn render_picker(frame: &mut Frame<'_>, area: Rect, app: &App
     }
     frame.render_widget(
         Paragraph::new(vec![
-            Line::raw("Enter source / Inspector · c exact Calls · Esc back"),
+            Line::raw(if p.calls {
+                if matches!(app.analyzer_state,AnalyzerState::Error(_)) {"Enter exact source · Calls unavailable (RA) · Esc back"}else{"Enter resolve exact Calls · Esc back"}
+            } else {"Enter source / Inspector · c exact Calls · Esc back"}),
             Line::styled(
                 app.notice
                     .as_deref()
-                    .unwrap_or("Known ranked functions/files only; no name-only lookup.")
+                    .unwrap_or(if p.actions.iter().any(|a|matches!(a,Action::BinaryEntrypoint(_))) {"Cargo binary targets → exact RA file symbols. Without RA, Enter opens source."} else {"Known ranked functions/files only; no name-only lookup."})
                     .to_owned(),
                 Style::default().fg(theme::MUTED),
             ),
@@ -101,9 +103,16 @@ pub(in crate::tui) fn render_start(frame: &mut Frame<'_>, area: Rect, app: &App,
         let (label, actions) = super::actions::available(app, r, calls);
         let enabled = !actions.is_empty();
         let location = if let Some(a) = actions.first() {
-            format!("  {} location(s) · {}", actions.len(), a.location())
+            if calls
+                && matches!(app.analyzer_state, AnalyzerState::Error(_))
+                && matches!(a, Action::BinaryEntrypoint(_))
+            {
+                "Source available · Calls unavailable (RA)".into()
+            } else {
+                format!("  {} location(s) · {}", actions.len(), a.location())
+            }
         } else {
-            "  unavailable / no known exact location".into()
+            super::actions::unavailable_reason(app, r, calls)
         };
         let width = inside.width.saturating_sub(2) as usize;
         items.push(ListItem::new(vec![

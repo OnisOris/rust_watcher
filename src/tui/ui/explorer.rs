@@ -197,7 +197,11 @@ pub(super) fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App)
         return;
     };
 
-    let details_height = if file.anchor.is_some() || file.module_anchor.is_some() {
+    let details_height = if file.anchor.is_some()
+        || file.module_anchor.is_some()
+        || file.entrypoint.is_some()
+        || file.symbol_anchor.is_some()
+    {
         12
     } else {
         9
@@ -218,6 +222,22 @@ pub(super) fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App)
         Line::raw(format!("package   {package}")),
         Line::raw(format!("role      {role}")),
     ];
+    if let Some(target) = &file.entrypoint {
+        file_details.push(Line::raw(format!("Entry point: {target}")));
+    }
+    if let Some(s) = &file.symbol_anchor {
+        file_details.push(Line::raw(format!(
+            "RA anchor {}:{} · {}",
+            s.selection_range.start.line + 1,
+            s.selection_range.start.character + 1,
+            s.name
+        )));
+    }
+    if file.entrypoint.is_some() || file.symbol_anchor.is_some() {
+        if let Some(notice) = &file.anchor_notice {
+            file_details.push(Line::raw(notice.clone()));
+        }
+    }
     if let Some((name, line, col)) = &file.module_anchor {
         file_details.push(Line::raw(format!("module anchor {name} · {line}:{col}")));
         if let Some(notice) = &file.anchor_notice {

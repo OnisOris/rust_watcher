@@ -6,6 +6,25 @@ pub(in crate::tui) enum Action {
     Function(FunctionMetrics),
     File(PathBuf, String),
     Symbol(Symbol),
+    BinaryEntrypoint(BinaryEntrypoint),
+}
+/// Cargo identity, not semantic identity. Two targets may share a source file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct BinaryEntrypoint {
+    pub crate_id: String,
+    pub package: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+impl BinaryEntrypoint {
+    pub fn id(&self) -> String {
+        format!(
+            "{}/target:{}:bin:{}",
+            self.crate_id,
+            self.name,
+            self.path.display()
+        )
+    }
 }
 impl Action {
     pub fn label(&self) -> String {
@@ -16,6 +35,7 @@ impl Action {
             ),
             Self::File(_, s) => s.clone(),
             Self::Symbol(s) => format!("Previous: {}", super::super::app::qualified_symbol(s)),
+            Self::BinaryEntrypoint(t) => format!("{} · {} · binary", t.name, t.package),
         }
     }
     pub fn location(&self) -> String {
@@ -28,6 +48,7 @@ impl Action {
             ),
             Self::File(p, _) => p.display().to_string(),
             Self::Symbol(s) => format!("{}:{}", s.file.display(), s.selection_range.start.line + 1),
+            Self::BinaryEntrypoint(t) => t.path.display().to_string(),
         }
     }
 }
@@ -121,50 +142,40 @@ pub(super) fn available(app: &App, route: Start, calls: bool) -> (String, Vec<Ac
     let mut a = vec![];
     let label = match route {
         Start::Entry => {
-            for t in app
-                .project
-                .architecture
-                .nodes
-                .iter()
-                .flat_map(|n| &n.targets)
-                .filter(|t| {
-                    t.kinds.iter().any(|k| {
-                        k == "bin"
-                            || (!calls
-                                && matches!(
-                                    k.as_str(),
-                                    "lib"
-                                        | "rlib"
-                                        | "proc-macro"
-                                        | "cdylib"
-                                        | "dylib"
-                                        | "staticlib"
-                                ))
-                    })
-                })
-            {
-                if calls {
-                    if let Some(r) = &app.maintainability {
-                        for f in r
-                            .longest_functions
-                            .iter()
-                            .chain(&r.deepest_functions)
-                            .filter(|f| f.path == t.path && f.name == "main")
-                        {
-                            a.push(Action::Function(f.clone()));
-                        }
+            for n in &app.project.architecture.nodes {
+                for t in &n.targets {
+                    if t.kinds.iter().any(|k| k == "bin") {
+                        a.push(Action::BinaryEntrypoint(BinaryEntrypoint {
+                            crate_id: n.id.clone(),
+                            package: n.name.clone(),
+                            name: t.name.clone(),
+                            path: t.path.clone(),
+                        }));
+                    } else if !calls
+                        && t.kinds.iter().any(|k| {
+                            matches!(
+                                k.as_str(),
+                                "lib" | "rlib" | "proc-macro" | "cdylib" | "dylib" | "staticlib"
+                            )
+                        })
+                    {
+                        a.push(Action::File(
+                            t.path.clone(),
+                            format!("Open library root: {} · {}", n.name, t.name),
+                        ));
                     }
-                } else {
-                    a.push(Action::File(
-                        t.path.clone(),
-                        format!("Cargo entrypoint: {}", t.name),
-                    ));
                 }
             }
-            if calls && a.is_empty() {
-                "Main entrypoint · no known exact anchor"
+            if a.is_empty() {
+                if calls {
+                    "No binary targets found"
+                } else {
+                    "No Cargo source roots found"
+                }
+            } else if calls {
+                "Binary entrypoints"
             } else {
-                "Main entrypoint"
+                "Cargo source roots"
             }
         }
         Start::Longest | Start::Deepest => {
@@ -177,11 +188,7 @@ pub(super) fn available(app: &App, route: Start, calls: bool) -> (String, Vec<Ac
                     a.push(Action::Function(f.clone()));
                 }
             }
-            if app.maintainability_error.is_some() {
-                "Maintainability: unavailable"
-            } else if app.maintainability.is_none() {
-                "Maintainability: analyzing..."
-            } else if matches!(route, Start::Longest) {
+            if matches!(route, Start::Longest) {
                 "Longest known functions"
             } else {
                 "Deepest known functions"
@@ -196,13 +203,7 @@ pub(super) fn available(app: &App, route: Start, calls: bool) -> (String, Vec<Ac
                     ));
                 }
             }
-            if app.hotspots_error.is_some() {
-                "Hotspots: unavailable"
-            } else if app.hotspots.is_none() {
-                "Hotspots: analyzing..."
-            } else {
-                "Review hotspot files"
-            }
+            "Review hotspot files"
         }
         Start::Previous => {
             if let Some(i) = app
@@ -219,9 +220,56 @@ pub(super) fn available(app: &App, route: Start, calls: bool) -> (String, Vec<Ac
         a.clear();
     }
     if calls && matches!(app.analyzer_state, AnalyzerState::Error(_)) {
-        a.clear();
+        a.retain(|a| matches!(a, Action::BinaryEntrypoint(_)));
     }
     let mut seen = BTreeSet::new();
-    a.retain(|a| seen.insert(a.location()));
+    a.retain(|a| {
+        seen.insert(match a {
+            Action::BinaryEntrypoint(t) => t.id(),
+            _ => a.location(),
+        })
+    });
     (label.into(), a)
+}
+pub(super) fn unavailable_reason(app: &App, route: Start, calls: bool) -> String {
+    if app.explorer.tree.is_none() {
+        return "Repository tree: scanning; source navigation will be available when ready".into();
+    }
+    if calls
+        && !matches!(route, Start::Entry)
+        && matches!(app.analyzer_state, AnalyzerState::Error(_))
+    {
+        return "Call hierarchy unavailable: rust-analyzer not available. Binary source files remain accessible.".into();
+    }
+    match route {
+        Start::Entry => {
+            if calls {
+                "No binary targets found. Library/test/example targets are not main entrypoints."
+                    .into()
+            } else {
+                "No Cargo source roots found".into()
+            }
+        }
+        Start::Longest | Start::Deepest => app.maintainability_error.as_ref().map_or_else(
+            || {
+                if app.maintainability.is_none() {
+                    "Maintainability: analyzing...".into()
+                } else {
+                    "No known functions in the bounded maintainability rankings".into()
+                }
+            },
+            |e| format!("Maintainability unavailable: {e}"),
+        ),
+        Start::Previous => "No previously inspected callable symbol".into(),
+        Start::Hotspots => app.hotspots_error.as_ref().map_or_else(
+            || {
+                if app.hotspots.is_none() {
+                    "Hotspots: analyzing...".into()
+                } else {
+                    "No current ranked hotspot files".into()
+                }
+            },
+            |e| format!("Hotspots unavailable: {e}"),
+        ),
+    }
 }

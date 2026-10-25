@@ -9,7 +9,8 @@ pub(super) fn render_calls_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
     if let (Some(incoming), Some(outgoing)) = (&app.calls.callers_error, &app.calls.callees_error) {
-        if incoming == outgoing {
+        if incoming == outgoing && !(app.calls.callers_unsupported && app.calls.callees_unsupported)
+        {
             frame.render_widget(
                 components::empty_state("Call hierarchy unavailable", incoming)
                     .block(pane_block(" CALLS · RA error ", true)),
@@ -107,10 +108,22 @@ pub(super) fn render_call_list(frame: &mut Frame<'_>, area: Rect, app: &App, inc
         format!(" {label} ")
     };
     if let Some(error) = error {
+        let unsupported = if incoming {
+            app.calls.callers_unsupported
+        } else {
+            app.calls.callees_unsupported
+        };
         frame.render_widget(
-            Paragraph::new(format!("error: {error}"))
-                .wrap(Wrap { trim: false })
-                .block(pane_block(&title, app.pane == pane)),
+            Paragraph::new(format!(
+                "{}: {error}",
+                if unsupported {
+                    "Not supported"
+                } else {
+                    "RA error"
+                }
+            ))
+            .wrap(Wrap { trim: false })
+            .block(pane_block(&title, app.pane == pane)),
             area,
         );
         return;
@@ -188,6 +201,17 @@ pub(super) fn call_target_row(
 pub(super) fn render_call_current(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let target = app.calls.center.as_ref().expect("checked by calls view");
     let mut text = vec![heading(&call_target_name(target))];
+    if let Some((binary, s)) = &app.journey.binary_context {
+        if s.file == target.file
+            && s.range == target.range
+            && s.selection_range == target.selection_range
+        {
+            text.push(Line::styled(
+                format!("Selected binary: {} · {}", binary.name, binary.package),
+                Style::default().fg(theme::ACCENT),
+            ));
+        }
+    }
     if target
         .detail
         .as_deref()
@@ -209,22 +233,34 @@ pub(super) fn render_call_current(frame: &mut Frame<'_>, area: Rect, app: &App) 
         Line::raw(""),
         Line::raw(format!(
             "callers   {}",
-            call_count(
-                app.calls.callers_loading,
-                app.calls.callers_error.as_ref(),
-                app.calls.callers.len()
-            )
+            if app.calls.callers_unsupported {
+                "not supported".into()
+            } else {
+                call_count(
+                    app.calls.callers_loading,
+                    app.calls.callers_error.as_ref(),
+                    app.calls.callers.len(),
+                )
+            }
         )),
         Line::raw(format!(
             "callees   {}",
-            call_count(
-                app.calls.callees_loading,
-                app.calls.callees_error.as_ref(),
-                app.calls.callees.len()
-            )
+            if app.calls.callees_unsupported {
+                "not supported".into()
+            } else {
+                call_count(
+                    app.calls.callees_loading,
+                    app.calls.callees_error.as_ref(),
+                    app.calls.callees.len(),
+                )
+            }
         )),
         Line::raw(""),
         Line::raw(format!("history   {}", app.calls.history.len())),
+        Line::styled(
+            "o exact source / Inspector",
+            Style::default().fg(theme::ACCENT),
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(text)

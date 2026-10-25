@@ -149,8 +149,13 @@ pub(super) fn render_inspector_block(frame: &mut Frame<'_>, area: Rect, app: &Ap
         if let Some(file) = &app.explorer.file {
             text.push(Line::styled(
                 format!(
-                    "Current file: {} · Esc returns to file symbols",
-                    file.path.display()
+                    "Current file: {} · Esc returns to {}",
+                    file.path.display(),
+                    if super::super::journey::source_returns_to_calls(app) {
+                        "Calls"
+                    } else {
+                        "file symbols"
+                    }
                 ),
                 Style::default().fg(theme::MUTED),
             ));

@@ -94,6 +94,42 @@ Loading, no calls, and RA failure are distinct states. On tall terminals, a
 bounded source area appears only when the inspected semantic location exactly
 matches CURRENT; following another target cannot mislabel an old preview.
 
+Calls is also a starting point: **3 → Binary entrypoints → choose a Cargo binary
+target → main → Calls**, without typing a symbol name. The target picker comes
+from already-discovered Cargo metadata (package ID, target name/kind and exact
+workspace-relative source path), independently of Maintainability rankings.
+Different binaries sharing a source file remain separate choices. Library roots
+are labeled separately in Symbols; test/example targets are not main entrypoints.
+
+Selecting a binary uses the existing file-symbol request and accepts exactly one
+RA-reported **top-level function** named `main` in that file, with a valid identifier
+range inside its declaration range. No workspace-wide name search, source parser
+fallback or macro expansion is used. Ordinary and async/attributed main functions
+work when RA exposes them. Multiple candidates are reported as ambiguous; missing,
+conditional or macro-generated entrypoints stay unresolved rather than guessed.
+The complete file response is checked before Explorer's 200-symbol presentation
+window, retaining a unique main even beyond it. An unmatched truncated result
+reports truncated/unresolved, never proof that main does not exist.
+
+Binary discovery waits for analyzer Ready: provisional indexing results schedule
+one exact-file retry via the existing readiness event, then either resolve or
+report a reason. A semantic navigation intent expires after 120 seconds even if
+Ready never arrives; the existing event tick checks this without blocking input.
+Rebinding a retry does not reset that deadline. Each intent uses the current file request ID; Esc, a new action
+or switching views prevents delayed responses from navigating. Without RA, binary
+targets remain selectable and open their exact source with an explicit
+“Source available / Call hierarchy unavailable” notice, not a stuck loading state.
+
+In Calls, **o** opens CURRENT's exact file/semantic anchor and reuses Inspector;
+Esc returns to the same Calls target and pane. Enter on callers/callees still
+follows their exact targets. If source inspection superseded an unfinished Calls
+phase, returning resumes that exact target with a fresh request ID instead of
+leaving a permanent loading indicator. Map-priority → Calls treats its intermediate file
+request as a bridge: Esc from CURRENT (after call-follow history is exhausted)
+restores the original crate, target, module, map mode and Diagram/List selection.
+The return history stores bounded identifiers, not App snapshots (50 entries).
+Zero calls, loading, unsupported hierarchy, RPC errors and truncation are distinct.
+
 Explorer is a read-only, gitignore-aware physical repository tree that remains usable if rust-analyzer fails. Press `4`, navigate with `j`/`k`, expand or collapse directories with `l`/`h` (or the arrow keys), and press Enter on a file. Non-Rust files show metadata; Rust files load document symbols for that file only. Select a symbol and press Enter to reuse the Inspector, then press `c` to open Calls for that exact symbol:
 
 ```text
@@ -617,9 +653,9 @@ Inspector/file and Calls to the originating Map focus, selection and mode using
 a bounded 50-entry identifier-only return history. One session RA worker serves
 all these actions; no synchronous LSP work happens during rendering.
 
-Empty Symbols now offers real Cargo entrypoints, bounded longest/deepest
+Empty Symbols now offers real Cargo binary targets/library roots, bounded longest/deepest
 function candidates and current hotspots. Empty Calls offers known exact
-entrypoint/function anchors and the previously inspected callable when available.
+Cargo binary targets, ranked function anchors and the previously inspected callable when available.
 `j/k` and Enter open their candidate picker; `/` switches to Symbols search.
 Unavailable or still-loading routes are labeled and do not guess a target.
 
