@@ -416,8 +416,124 @@ The crate inspector progressively joins the existing LOC, AST and hotspot report
 by deepest package root; switching nodes never reruns those analyzers. Missing
 reports or incomplete per-crate AST coverage display `unknown`, not false zeros.
 Partial source totals are labeled as lower bounds. Map is immediately available
-from metadata, independently of repository processing, Git and RA. This release
-does not infer module/use dependencies or function-level architecture graphs.
+from metadata, independently of repository processing, Git and RA. Rust module
+declarations and conservative syntax imports have a separate scale described below;
+neither is a function-level/runtime dependency graph.
+
+## Rust Module Map and guided exploration
+
+```bash
+wt modules
+wt modules --json
+wt modules --crate rust_watcher
+wt modules --crate rust_watcher --target wt --json
+wt /path/to/project modules
+```
+
+These read-only commands require neither Git nor rust-analyzer, and never probe
+them. Cargo metadata supplies targets; the existing RepositoryTree restricts source
+files; the existing `syn` tokenizer/parser supplies declarations. No second crawler,
+build scripts, cargo check, new parser dependency or semantic resolver is involved.
+By default the report contains **all packages and targets**, with `crateId:null`
+for multiple packages. `--crate` accepts a package name or stable crate ID;
+`--target` selects one exact Cargo target in that package. Missing/ambiguous
+selections fail with structured `module_selection` errors and candidate labels.
+
+The v1 success envelope contains camelCase `crateId`, `targets`, `nodes`,
+`containmentEdges`, `verifiedImportEdges`, `unresolved`, `unresolvedCount`, `unresolvedByModule`,
+`conditionalRelations`, `partial`, `partialReasons`, `parsedFiles`, `readBytes`.
+Target IDs include package identity, Cargo target name/kinds and relative source
+root. Module IDs include target and logical declaration context, path attribute
+and cfg qualifiers, not checkout location or line numbers. The same physical
+file used by two targets therefore has two structural contexts. Each file is
+read/parsed once **per module analysis**, and file aggregates are deduplicated.
+`sourceFile` is null when a declaration's source cannot be established; a missing
+source is never silently converted to an empty module.
+
+Nodes include `name`, `qualifiedPath`, `crateId`, `targetId`, `sourceFile`,
+`declarationFile`, `declarationLine`, `declarationColumn`, `parentId`, `depth`,
+`inline`, `conditions`, and `status` (`resolved`, `declaredConditional`,
+`unresolved`). Locations are 1-based; columns count UTF-16 units for exact LSP
+navigation. Status describes **declared syntax**, not build activation.
+
+File-backed discovery accepts `foo.rs` or `foo/mod.rs`, never arbitrarily chooses
+when both exist, and respects the owning directory of nested/inline modules.
+Direct `#[path]` is relative to the source directory, or the appropriate inline
+module directory; inline path attributes can change that directory. Paths are
+normalized within the workspace and must remain regular RepositoryTree files.
+These rules follow the [Rust Reference](https://doc.rust-lang.org/reference/items/modules.html#the-path-attribute).
+`cfg` declarations are retained and marked conditional, **not evaluated**.
+Conditional/unknown path attributes, ambiguous declarations, missing/ignored
+sources, recursive file inclusion, parse failures, module-scope macros and
+`include!` remain unresolved. Block-local `mod`/`use` is explicitly outside v1
+scope. Neither macros nor feature predicates are expanded.
+
+Containment means **declares/owns a module**, not “depends on.” Import edges are
+separate, with source file/line, syntactic `importPath`, alias, public flag and
+conditions. Only explicit `crate::`, `self::`, `super::` paths through unique
+declared modules qualify. A remaining leaf must be a directly declared item;
+associated/type suffixes, imported bindings and re-export chains are not followed.
+Nested use groups and aliases preserve syntax but do not create an alias resolver.
+Globs, external/unrooted paths and uncertain namespaces are unresolved. Even a
+verified import is **not** an LSP reference or runtime call. The map deliberately
+prefers missing edges with explanations over invented dependencies.
+
+Resource limits: 10,000 nodes, 64 declaration levels, 256 targets, 50,000 use
+records, 1,000 retained unresolved details (full import/other counts per module
+remain available even when reason details are capped). Reads
+reuse the AST limits of 1 MiB/file and 128 MiB/session. The shared tokenizer guard
+allows 200,000 tokens; Module Map additionally caps token-group depth at **32**
+before `syn` parsing, protecting ordinary thread stacks from recursive syntax.
+Additional IR budgets bound expansion rather than just input bytes: names ≤256
+bytes, paths ≤1,024 bytes, ≤1,024 use leaves per module, and ≤16 retained cfg
+predicates per declaration (long predicates carry explicit truncated excerpts).
+Source summaries and proof tables share an estimated 64 MiB payload budget;
+pending imports have 32 MiB and retained node/import payloads 64 MiB. These are
+retained-data budgets, not a promise about exact allocator/RSS usage. Exceeding
+them leaves explicit budget reasons and partial results, never guessed edges.
+Namespace tables with omitted bindings cannot produce verified imports.
+Maintainability's previous limits are unchanged. The two passes share bounded
+read/parser safeguards but independently summarize different structures; no AST
+is retained for UI navigation. Cancellation is checked while reading, guarding
+tokens and traversing declarations/imports. One bounded parse is not interruptible;
+quitting does not join this background thread or leave a process behind.
+The single background pipeline has a bounded 16 MiB stack reservation so the
+existing Maintainability pass retains its previous depth coverage safely; this
+does not change its metrics or add per-file threads.
+
+After the first frame: RepositoryTree → ModuleGraph → Metrics → Maintainability
+→ Git Hotspots on the existing background pipeline. RA state is independent.
+An incomplete scan, conditionals, unresolved relations or resource/cancellation
+limits make the graph partial; a loading/error state is local to Map.
+
+`5 Map` automatically opens modules for a single-package workspace. Multi-package
+workspaces retain Cargo Map; select a crate and press **m**. Breadcrumbs identify
+the scale. Initially only the primary target root and direct children are shown;
+**t** cycles Cargo targets (library/binary first, then other Cargo targets).
+`j/k` selects, Enter focuses children, Esc returns one scope and ultimately to
+Cargo Map, preserving selection through up to 50 history entries. `Tab`/`Ctrl+h/l`
+switch panes. Background results preserve module selection.
+
+The legend distinguishes `─mod▶` ownership, `┄use▶` verified import, `[cfg]`
+conditional, and `[?]` unresolved, including with NO_COLOR. Imports outside the
+focused neighborhood have explicit stubs. The scrollable inspector explains
+confirmed imports, imported-by modules, unresolved reasons and exact source.
+Metrics are labeled **known physical subtree files / file LOC / file functions**:
+they deduplicate physical paths, not logical target contexts. Inline modules share
+file metrics; exclusive own-content LOC/function metrics remain unknown. Missing
+measurements stay unknown, not zero. Git/AST are never rerun on key presses.
+
+**o** uses the resolved module source path to reveal the exact Explorer file. For
+inline declarations it retains a source anchor and selects a module symbol only
+if RA agrees on file, kind, name and exact UTF-16 position. Stale request IDs,
+missing/ambiguous symbols and absent RA retain file/anchor with an explanation.
+No global name search is involved. Existing function anchors and Inspector/Calls
+navigation remain unchanged.
+
+Overview's **START EXPLORING** offers four real routes: architecture, exact Cargo
+binary/library entrypoint (with a chooser for multiple targets), first current
+hotspot candidate, and longest measured function. Unavailable/loading/empty data
+produces a notice rather than an inert action.
 
 ## Headless semantic summary
 
@@ -515,6 +631,7 @@ The implementation is one binary crate:
 - `cli.rs` defines arguments and commands.
 - `project.rs` maps Cargo metadata into a small workspace model.
 - `architecture.rs` verifies and normalizes declared Cargo workspace dependencies.
+- `module_graph.rs` discovers bounded declared module containment and conservative syntax imports, separately from Rust semantics.
 - `lsp.rs` owns framing, request routing, initialization, server readiness, progress, diagnostics notifications, bounded stderr capture, and shutdown.
 - `rust.rs` implements semantic operations over rust-analyzer responses.
 - `model.rs` contains transport-neutral result structures.

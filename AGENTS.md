@@ -6,6 +6,7 @@ This repository is intentionally a small, Rust-only semantic CLI. Read [README.m
 
 - Keep one binary crate and the pipeline `CLI → cargo metadata → rust-analyzer/LSP → normalized model → output`.
 - rust-analyzer is the only source of Rust semantic information. Do not add parser, regex, tree-sitter, or compiler-frontend fallbacks.
+- Existing `syn` passes may measure function structure and discover declared Rust modules and conservative syntactic imports. They must not resolve semantic identities, expand macros, infer runtime calls, or replace rust-analyzer. Unverifiable structural relations stay explicitly unresolved.
 - Keep semantic operations independent from terminal rendering so a future MCP adapter can reuse them.
 - Do not add web, cloud, frontend, authentication, databases, queues, daemons, file watchers, or support for other languages without an explicit new task.
 - Preserve stable ordering, repository-relative workspace paths, and IDs derived from semantic location rather than clocks, randomness, traversal order, or absolute checkout paths.
