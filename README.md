@@ -49,7 +49,7 @@ Open another checkout:
 wt /path/to/project
 ```
 
-The first frame appears before rust-analyzer starts. The header reports real analyzer state (`starting`, `indexing`, `ready`, or `error`) from rust-analyzer progress and server-status notifications. The four persistent views are `1 Overview`, `2 Symbols`, `3 Calls`, and `4 Explorer`. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact inspected symbol:
+The first frame appears before repository scanning or rust-analyzer starts. The five persistent views are `1 Overview`, `2 Symbols`, `3 Calls`, `4 Explorer`, and `5 Map`. The header reports independent RA/Git readiness and partial states. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact selected symbol:
 
 ```text
 2
@@ -58,7 +58,41 @@ Enter
 c
 ```
 
+Overview begins with compact source/function/hotspot indicators and collapsible
+exploration groups. Git Hotspots starts expanded; Enter on a group toggles it,
+and Enter on a file/function opens its exact Explorer location. Selection uses
+stable item identities, so incoming analysis results do not move it to another
+file. The right panel describes the selected item; Workspace restores the global
+summary and Analysis exposes full limits/errors. `Ctrl+h/l` changes panes and
+`j/k` scrolls details. Historical removed/ignored paths have a separate group.
+
+All views share a restrained dark-terminal palette: sky headings (`#7DD3FC`),
+indigo selection (`#A5B4FC`), green ready, amber warning/partial, rose errors,
+violet numbers and muted slate paths/borders. Selection also has a `>` marker;
+statuses include text, not color alone. `COLORTERM=truecolor`/`24bit` or a direct
+color TERM enables RGB; other terminals receive ANSI16 fallback. Presence of
+`NO_COLOR` disables colors while preserving bold and markers. No special terminal
+protocol is needed. Tabs shorten at narrow widths; lists follow the selection.
+Detail scrolling uses Ratatui's own rendered-line count (its opt-in
+`unstable-rendered-line-info` feature), so wrapped diagnostics remain reachable
+without scrolling into an empty pane. This adds no dependency or renderer engine.
+
+An empty search never silently presents the previous Inspector as current:
+retained history is explicitly **LAST INSPECTED**. Explorer likewise distinguishes
+the current tree file from a previously inspected location. Source previews use
+presentation-only lexical colors (not a semantic parser), preserve Unicode/raw
+strings and comments, and fall back to plain code when lexical context is unknown
+or a line was clipped. Preview reads are capped at 2 MiB, output at 31 lines and
+300 characters per line; an out-of-budget location reports an error instead of
+loading a huge file. Full source editing is outside this tool.
+
 Calls shows immediate `CALLERS | CURRENT | CALLEES`. It defaults to workspace-local targets so toolchain and dependency calls do not crowd out repository architecture; press `e` to toggle external calls. External targets are marked and their displayed paths are compact, while navigation retains their exact semantic locations. Scope filtering happens before the 20-result limit. Use `Ctrl+h/l` to move spatially without wrapping, `Tab`/`Shift+Tab` to cycle panes, and `j`/`k` to select a caller or callee. Enter follows the selected semantic target immediately, while its two one-hop lists load progressively. `Esc` from a side pane returns to CURRENT; from CURRENT it walks back through up to 50 visited targets, then returns to Symbols. Each side is deterministically sorted and deduplicated. Call navigation accepts an exact target or one uniquely provable same-file fallback; it never chooses an arbitrary first candidate.
+
+Only functions and methods request call hierarchy. Fields, types and constants
+show an explanatory “not applicable” state without pointless LSP requests.
+Loading, no calls, and RA failure are distinct states. On tall terminals, a
+bounded source area appears only when the inspected semantic location exactly
+matches CURRENT; following another target cannot mislabel an old preview.
 
 Explorer is a read-only, gitignore-aware physical repository tree that remains usable if rust-analyzer fails. Press `4`, navigate with `j`/`k`, expand or collapse directories with `l`/`h` (or the arrow keys), and press Enter on a file. Non-Rust files show metadata; Rust files load document symbols for that file only. Select a symbol and press Enter to reuse the Inspector, then press `c` to open Calls for that exact symbol:
 
@@ -310,8 +344,9 @@ budgets remain unchanged.
 JSON uses the v1 envelope. `data` includes `available`, nullable structured
 `reason {code,message}`, `sinceDays`, `asOfUtc`, `headSha`, nullable
 `commitsAnalyzed`, `changedFiles`, `candidateFiles`, `historyShallow`,
-`workingTreeDirty`, `historyPartial`, `partial`, `partialReasons`, `hotspots` and
-`mostChangedFiles`. File records contain `path`, `changeCommits`, nullable
+`workingTreeDirty`, `historyPartial`, `coChangePartial`, `currentMetricsPartial`,
+`partial`, `partialReasons`, `hotspots`, `mostChangedFiles`, `historicalFiles`
+and `historicalChangedFiles`. File records contain `path`, `changeCommits`, nullable
 `addedLines`, `deletedLines`, `churnLines`, `lastChangedAt`, `presentInTree`,
 nullable `sourceNonblankLines`, `functions`, `longestFunctionLines`,
 `maxControlDepth`, `controlFlowNodes`, `signals`, `reviewCandidate` and `coChanged`
@@ -322,8 +357,14 @@ never an empty supposedly measured history. Cargo discovery errors still fail.
 
 `partialReasons` identifies commit/file/output budgets, timeout, cancellation,
 co-change file limits, shallow history, path omissions or incomplete current
-LOC/AST analysis. `historyPartial` covers Git limitations; `partial` also covers
-incomplete current metrics. Unknown non-Rust structure is expected, not a failure.
+LOC/AST analysis. `historyPartial` means incomplete commit/file history;
+`coChangePartial` includes incomplete history or commits skipped only for pair
+calculations. A mass commit can therefore leave **History complete / Co-change
+partial**, without invalidating its change counts or churn. `currentMetricsPartial`
+covers incomplete current LOC/AST; `partial` is their union. Unknown non-Rust
+structure is expected, not a failure. Existing current regular files have priority;
+historical paths remain separately available but cannot displace current review
+candidates. Missing files are never presented as existing navigation targets.
 
 Overview loads Git after Metrics and Maintainability, independently of RA. Its
 top-10 section precedes long file/function lists; fallback rows are marked
@@ -333,6 +374,50 @@ Workspace to restore global metrics. Enter reuses `ExplorerState::reveal_file`
 for the exact file and metadata, then existing Rust symbols → Inspector → `c`
 Calls. No symbol name-only resolution. Missing/ignored paths show a notice.
 Git unavailability and RA errors are independent and do not close Overview.
+
+## Cargo Architecture Map
+
+```bash
+wt architecture
+wt architecture --json
+wt /path/to/project architecture
+```
+
+This command needs neither rust-analyzer nor Git. It reuses the single Cargo
+metadata discovery and performs no repository/AST/history scan. JSON keeps the
+v1 `{schemaVersion:1,ok:true,data:...}` envelope. `data` contains deterministic
+`nodes`, `edges`, `unresolvedDependencies`, and `partial`.
+
+Nodes are workspace packages, with stable `id` (`crate:<relative manifest>`),
+`name`, workspace-relative `manifestPath`, sorted `crateRoots`, `targets`
+(`name`, `path`, `kinds`) and aggregated `externalDependencies` declaration count.
+Edges have `from`, `to`, `kind` (`normal`, `dev`, `build`), `alias`, nullable
+`target` cfg, `optional` and `viaManifestPath`. **A → B means A depends on B.**
+Cargo package identities are retained internally; a declared dependency path
+must resolve uniquely to a member's canonical manifest root, original package
+name and compatible version. Aliases are labels, never identity joins. Missing
+proof, outside-workspace targets or ambiguous identities yield an unresolved
+reference with a reason, not an invented edge. External declarations are counted,
+not expanded into a crates.io graph. Paths/IDs do not depend on checkout location.
+All declared cfg/optional/dev/build dependencies are represented: this is not a
+feature-activated resolver graph, nor a graph inferred from Rust `use` statements.
+
+Press `5` for Map. Small graphs use bounded deterministic layered boxes/arrows;
+cycles, dense edges and larger workspaces use a compact directed adjacency
+diagram. Edge labels/styles are `─n→` normal, `┄d→` dev, `═b⇒` build, with a legend.
+Node ordinals disambiguate abbreviated names; the inspector retains the full name
+and manifest. `Showing N of M` explains a focused one-hop view. `j/k` selects,
+Enter focuses the selected crate and its direct dependencies/dependents, Esc
+returns through focus history, Tab or `Ctrl+h/l` changes panes. Inspector `j/k`
+scrolls. `o` opens the exact Cargo target in Explorer; multiple targets open an
+explicit deterministic chooser (library, binary, then other target kinds).
+
+The crate inspector progressively joins the existing LOC, AST and hotspot reports
+by deepest package root; switching nodes never reruns those analyzers. Missing
+reports or incomplete per-crate AST coverage display `unknown`, not false zeros.
+Partial source totals are labeled as lower bounds. Map is immediately available
+from metadata, independently of repository processing, Git and RA. This release
+does not infer module/use dependencies or function-level architecture graphs.
 
 ## Headless semantic summary
 
@@ -429,6 +514,7 @@ The implementation is one binary crate:
 
 - `cli.rs` defines arguments and commands.
 - `project.rs` maps Cargo metadata into a small workspace model.
+- `architecture.rs` verifies and normalizes declared Cargo workspace dependencies.
 - `lsp.rs` owns framing, request routing, initialization, server readiness, progress, diagnostics notifications, bounded stderr capture, and shutdown.
 - `rust.rs` implements semantic operations over rust-analyzer responses.
 - `model.rs` contains transport-neutral result structures.
