@@ -19,11 +19,7 @@ pub(super) fn render_calls_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }
     }
     if app.calls.center.is_none() {
-        frame.render_widget(
-            components::empty_state("No symbol selected", "Open Symbols with 2, search for a function or method,\nthen press Enter or c to explore its execution flow.")
-                .block(pane_block(" CALLS ", true)),
-            area,
-        );
+        super::super::journey::render_start(frame, area, app, true);
         return;
     }
     let context = app.inspector.as_ref().filter(|i| {

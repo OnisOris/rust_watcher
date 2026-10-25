@@ -572,6 +572,22 @@ all neighbors remain selectable regardless of terminal size. Adjacency and
 deduplicated physical-subtree indexes are prepared once when the graph arrives;
 switching mode or moving selection never starts scan, metadata, AST, Git or RA.
 
+**g** switches **Diagram / List** without changing the model or selection.
+Diagram uses a deterministic, cached two-tier node-link layout: one focus box,
+then rows of at most three direct neighbors, joined by routed arrows outside
+node text. Imports point **focus → neighbors**; Used by reverses the arrows;
+Hierarchy uses only declared containment edges. Repeated import records share
+one edge with a count; `[cfg]` marks conditional records. Self-imports are shown
+as a loop on the single focus box, not a duplicate node. Cycles do not recurse:
+each view shows only the indexed one-step neighborhood.
+
+The viewport determines the visible page (at most 12 neighbors). `j/k` traverses
+the complete neighborhood and brings the selected node into that page. Below
+28×9 content cells Diagram explicitly falls back to directed List. Full paths
+and relation counts remain available in Inspector. Colors supplement markers
+and arrows; NO_COLOR preserves selection and relationship meaning. Empty import
+views explain the conservative scope and offer Enter to explore children.
+
 Inspector prioritizes Structure, Relationships, Review priorities and Analysis
 status. **f** expands/collapses physical files; **a** expands/collapses analysis
 limitations. Both scroll in the existing right pane (Tab or Ctrl+l, then j/k).
@@ -582,6 +598,30 @@ Review priorities reuse existing measured child-file totals, top-ranked hotspot
 files and known longest/deepest function reports. Rank lists are bounded global
 reports, not a new AST/Git pass; missing measurements remain unknown. Displayed
 file totals describe the known physical subtree, not complete exclusive contents.
+
+**p** opens an actionable **Review priorities** picker for the selected module's
+physical subtree: existing longest/deepest ranked functions, up to five current
+hotspot files and three largest measured files (at most 32 choices). This is
+not a complete function catalog and does not run another AST/Git pass.
+Enter on a function reveals its exact file and retains its declaration anchor;
+after a unique RA document-symbol match it opens Inspector. **c** in the picker
+instead opens existing Calls around that verified callable symbol. Files have
+no automatic Calls action. Matching requires file, kind, identifier line/UTF-16
+column and source range, never a name-only search. Ambiguous/missing symbols
+retain the file and explanatory notice; absent RA still permits file navigation.
+
+Pending semantic navigation is tied to the active file request ID. A new action,
+manual navigation or Esc cancels it; delayed replies cannot reopen Calls. An
+indexing retry rebinds the intent to its new request ID. Esc returns through
+Inspector/file and Calls to the originating Map focus, selection and mode using
+a bounded 50-entry identifier-only return history. One session RA worker serves
+all these actions; no synchronous LSP work happens during rendering.
+
+Empty Symbols now offers real Cargo entrypoints, bounded longest/deepest
+function candidates and current hotspots. Empty Calls offers known exact
+entrypoint/function anchors and the previously inspected callable when available.
+`j/k` and Enter open their candidate picker; `/` switches to Symbols search.
+Unavailable or still-loading routes are labeled and do not guess a target.
 
 The legend distinguishes `─mod▶` ownership, `─use▶` verified import, `[cfg]`
 conditional, and `[?]` unresolved, including with NO_COLOR. Imports outside the

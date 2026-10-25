@@ -36,9 +36,11 @@ pub(super) async fn run_loop(
                         app.apply_event(event);
                         if ready {
                             if let Some((id, file)) = app.explorer.retry_anchor() {
+                                super::journey::rebind(app,id,&file);
                                 send_command(app, commands, AnalyzerCommand::InspectFile { id, file }).await;
                             }
                         }
+                        super::journey::flush(app,commands).await;
                     }
                     None => {
                         analyzer_events_open = false;
@@ -77,6 +79,7 @@ pub(super) async fn run_loop(
                             if handle_key(app, key, commands).await? {
                                 return Ok(());
                             }
+                            super::journey::flush(app,commands).await;
                             terminal.draw(app)?;
                         }
                         Event::Resize(_, _) => terminal.draw(app)?,
@@ -128,6 +131,20 @@ pub(super) async fn handle_key(
 ) -> Result<bool> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(true);
+    }
+    if let Some(quit) = super::journey::handle_key(app, key, commands).await {
+        return Ok(quit);
+    }
+    if app.journey.pending.is_some()
+        && matches!(
+            key.code,
+            KeyCode::Char('j' | 'k' | '/' | '1'..='5')
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Enter
+        )
+    {
+        super::journey::cancel(app);
     }
     if app.view == View::Map && app.overlay == Overlay::None {
         if let Some(index) = app.map.target_picker {
@@ -204,6 +221,9 @@ pub(super) async fn handle_key(
             KeyCode::Char('3') => open_calls(app, commands).await?,
             KeyCode::Char('4') => app.switch_view(View::Explorer),
             KeyCode::Char('5') => app.switch_view(View::Map),
+            KeyCode::Char('g') if app.view == View::Map && app.module_map.active => {
+                app.module_map.diagram = !app.module_map.diagram
+            }
             KeyCode::Char('v') if app.view == View::Map && app.module_map.active => {
                 app.module_map.cycle_mode();
                 app.map.inspector_scroll = 0;
@@ -273,7 +293,12 @@ pub(super) async fn handle_key(
                 reload_calls_scope(app, commands).await?
             }
             KeyCode::Char('?') => app.overlay = Overlay::Help,
-            KeyCode::Char('/') => app.open_search(),
+            KeyCode::Char('/') => {
+                if app.view != View::Symbols {
+                    app.switch_view(View::Symbols);
+                }
+                app.open_search();
+            }
             KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.focus_direction(FocusDirection::Left)
             }
@@ -352,14 +377,16 @@ pub(super) async fn handle_key(
     Ok(false)
 }
 
-async fn open_exact_file(
+pub(super) async fn open_exact_file(
     app: &mut App,
     commands: &mpsc::Sender<AnalyzerCommand>,
     path: std::path::PathBuf,
     anchor: Option<crate::maintainability::FunctionMetrics>,
 ) {
+    let origin = super::journey::point(app, View::Explorer);
     if app.project.workspace_root.join(&path).is_file() && app.explorer.reveal_file(&path) {
         app.switch_view(View::Explorer);
+        super::journey::remember(app, origin);
         app.notice = None;
         if let Some((id, file)) = app.explorer.open_selected() {
             if let Some(anchor) = anchor {
@@ -475,7 +502,9 @@ async fn guided(
 }
 
 async fn open_calls(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {
+    let origin = super::journey::point(app, View::Calls);
     if let Some((id, target, scope)) = app.open_calls_for_inspector() {
+        super::journey::remember(app, origin);
         send_command(
             app,
             commands,
@@ -544,7 +573,7 @@ async fn activate_explorer(app: &mut App, commands: &mpsc::Sender<AnalyzerComman
     Ok(())
 }
 
-async fn send_command(
+pub(super) async fn send_command(
     app: &mut App,
     commands: &mpsc::Sender<AnalyzerCommand>,
     command: AnalyzerCommand,

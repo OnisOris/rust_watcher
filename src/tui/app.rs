@@ -131,6 +131,7 @@ pub(super) struct CallsState {
 }
 
 pub(super) struct App {
+    pub journey: super::journey::State,
     pub module_map: super::module_map::State,
     pub map: super::map::State,
     pub color_mode: super::theme::ColorMode,
@@ -166,6 +167,7 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            journey: Default::default(),
             module_map: super::module_map::State::new(&project.architecture),
             map: super::map::State::new(&project.architecture),
             color_mode: super::theme::ColorMode::detect(),
@@ -205,6 +207,7 @@ impl App {
     }
 
     pub(super) fn switch_view(&mut self, view: View) {
+        super::journey::cancel(self);
         self.view = view;
         self.overlay = Overlay::None;
         self.pane = match view {
@@ -356,6 +359,12 @@ impl App {
     }
 
     pub(super) fn escape(&mut self) -> Option<(u64, CallTarget, CallScope)> {
+        if self.journey.pending.take().is_some() {
+            self.journey.dispatch = None;
+            self.notice =
+                Some("Pending semantic navigation cancelled; exact file anchor retained".into());
+            return None;
+        }
         match self.overlay {
             Overlay::None if self.view == View::Map => {
                 if self.module_map.active {
@@ -384,9 +393,15 @@ impl App {
                     self.notice = None;
                     return Some(self.load_calls(target, false));
                 }
+                self.calls.request_id += 1;
+                if super::journey::back(self) {
+                    return None;
+                }
                 self.switch_view(View::Symbols);
             }
-            Overlay::None => {}
+            Overlay::None => {
+                super::journey::back(self);
+            }
         }
         self.notice = None;
         None
@@ -523,7 +538,11 @@ impl App {
         Some(self.load_calls(target, false))
     }
 
-    fn load_calls(&mut self, target: CallTarget, remember: bool) -> (u64, CallTarget, CallScope) {
+    pub(super) fn load_calls(
+        &mut self,
+        target: CallTarget,
+        remember: bool,
+    ) -> (u64, CallTarget, CallScope) {
         self.calls.unavailable = None;
         self.calls.context_scroll = 0;
         if remember {
@@ -551,6 +570,12 @@ impl App {
     }
 
     pub(super) fn apply_event(&mut self, event: AnalyzerEvent) {
+        let advance = matches!(
+            &event,
+            AnalyzerEvent::FileSymbols { .. }
+                | AnalyzerEvent::FileSymbolsFailed { .. }
+                | AnalyzerEvent::Error(_)
+        );
         match event {
             AnalyzerEvent::Indexing => self.analyzer_state = AnalyzerState::Indexing,
             AnalyzerEvent::Ready => self.analyzer_state = AnalyzerState::Ready,
@@ -624,6 +649,9 @@ impl App {
             | AnalyzerEvent::CallersLoaded { .. }
             | AnalyzerEvent::CalleesLoaded { .. }
             | AnalyzerEvent::CallsFailed { .. } => {}
+        }
+        if advance {
+            super::journey::advance(self);
         }
     }
 

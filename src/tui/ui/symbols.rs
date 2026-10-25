@@ -40,20 +40,7 @@ pub(super) fn render_symbols_view(frame: &mut Frame<'_>, area: Rect, app: &App) 
 pub(super) fn render_symbols(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let active = app.pane == Pane::Symbols;
     if app.symbols_query.is_empty() && app.symbols_results.is_empty() {
-        frame.render_widget(
-            Paragraph::new(vec![
-                heading("Search-first symbol browser"),
-                Line::raw(""),
-                Line::raw("Press / and start typing"),
-                Line::raw(""),
-                Line::raw("Examples:"),
-                Line::raw("  LspClient"),
-                Line::raw("  Engine::run"),
-                Line::raw("  request"),
-            ])
-            .block(pane_block(" SYMBOLS ", active)),
-            area,
-        );
+        super::super::journey::render_start(frame, area, app, false);
         return;
     }
 

@@ -1,6 +1,10 @@
 //! Thin, cached ModuleGraph adapter for Map. No source reads or AST work here.
+mod diagram;
+#[cfg(test)]
+mod diagram_tests;
 mod index;
 mod inspector;
+mod list;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -48,7 +52,9 @@ pub(super) struct State {
     pub mode: Mode,
     pub show_files: bool,
     pub show_limits: bool,
-    index: index::Index,
+    pub diagram: bool,
+    diagram_cache: std::cell::RefCell<Option<(diagram::Key, Option<diagram::Drawing>)>>,
+    pub(in crate::tui) index: index::Index,
 }
 impl State {
     pub fn new(a: &Architecture) -> Self {
@@ -64,10 +70,13 @@ impl State {
             mode: Mode::Hierarchy,
             show_files: false,
             show_limits: false,
+            diagram: true,
+            diagram_cache: Default::default(),
             index: Default::default(),
         }
     }
     pub fn apply(&mut self, g: ModuleGraph) {
+        self.diagram_cache.borrow_mut().take();
         self.index = index::Index::build(&g);
         self.graph = Some(g);
         self.initialize();
@@ -154,6 +163,11 @@ impl State {
         }
     }
     pub fn focus_selected(&mut self) {
+        if self.focus == self.selected && self.mode != Mode::Hierarchy {
+            self.remember();
+            self.mode = Mode::Hierarchy;
+            return;
+        }
         if self.focus == self.selected || self.selected.is_empty() {
             return;
         }

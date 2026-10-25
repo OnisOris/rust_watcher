@@ -48,7 +48,7 @@ fn large_neighborhoods_scroll_without_dropping_nodes_and_history_is_bounded() {
         .map(|c| c.symbol())
         .collect();
     assert!(text.contains("m119"));
-    assert!(text.contains("of 120 related"));
+    assert!(text.contains("/ 120 related"));
     for _ in 0..100 {
         app.module_map.cycle_mode();
     }
@@ -104,8 +104,8 @@ async fn relationship_views_preserve_identity_history_and_observable_context() {
             .map(|c| c.symbol())
             .collect();
         assert!(text.contains("Imports"));
-        assert!(text.contains("2 records"));
-        assert!(text.contains("[cfg] 1"));
+        assert!(text.contains("×2"));
+        assert!(text.contains("[cfg]1"));
         assert!(text.contains("MODULE · crate::tui"));
     }
     press(&mut app, K::Char('v'), &tx).await;
@@ -162,6 +162,79 @@ async fn relationship_views_preserve_identity_history_and_observable_context() {
         .join("\n");
     assert!(detail.contains("src/lib.rs"));
     assert!(detail.contains("missing/ignored"));
+}
+#[test]
+fn diagrams_render_only_verified_pairs_self_cycles_and_explicit_list_fallback() {
+    let (temp, mut app) = guided_fixture();
+    std::fs::write(temp.path().join("src/main.rs"), "mod a {use crate::a; use crate::b; #[cfg(test)] use crate::b; use unknown::Missing;} mod b {use crate::a;} fn main(){}").unwrap();
+    let tree = crate::repository::scan(temp.path()).unwrap();
+    let g = crate::module_graph::analyze(temp.path(), &tree, &app.project.architecture, || false);
+    let id = |name: &str| g.nodes.iter().find(|n| n.name == name).unwrap().id.clone();
+    let (a, b) = (id("a"), id("b"));
+    app.module_map.apply(g);
+    app.module_map.focus = a.clone();
+    app.module_map.selected = a.clone();
+    app.module_map.mode = Mode::Imports;
+    app.switch_view(super::super::app::View::Map);
+    let outgoing = &app.module_map.index.nodes[&a].outgoing;
+    assert_eq!(outgoing.len(), 2);
+    assert!(outgoing.iter().any(|l| l.id == a && l.records == 1));
+    assert!(outgoing
+        .iter()
+        .any(|l| l.id == b && l.records == 2 && l.conditional == 1));
+    assert_eq!(app.module_map.choices().len(), 2); // center is not duplicated by self-edge
+    assert!(app.module_map.index.nodes[&b]
+        .outgoing
+        .iter()
+        .any(|l| l.id == a));
+    for (w, h) in [(80, 20), (100, 30), (120, 35), (160, 45)] {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+        let text = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("↺×1"));
+        assert!(text.contains("×2"));
+        assert!(text.contains("[cfg]1"));
+        assert!(text.contains("▼"));
+        assert!(!text.contains("Missing ─"));
+    }
+    app.color_mode = theme::ColorMode::None;
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+    assert!(t
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .all(|c| c.fg == ratatui::style::Color::Reset && c.bg == ratatui::style::Color::Reset));
+    app.module_map.diagram = false;
+    t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+    let text = t
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("g List"));
+    assert!(text.contains("self"));
+    app.module_map.diagram = true;
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    t.draw(|f| super::render::render(f, Rect::new(0, 0, 80, 13), &app))
+        .unwrap();
+    let text = t
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("fallback"), "{text}");
 }
 #[tokio::test]
 async fn multi_crate_map_drills_selected_package_and_returns_to_same_crate() {
@@ -350,6 +423,7 @@ fn module_map_performance() {
             app.module_map.move_by(-1);
         }
         timings.push(format!("selection={:?}/op", start.elapsed() / 2000));
+        timings.push(visual_timings(&mut app));
         eprintln!("{}", timings.join(" · "));
     }
 }
@@ -428,6 +502,63 @@ fn synthetic_relationship_performance() {
         app.module_map.move_by(-1);
     }
     eprintln!("synthetic selection={:?}", start.elapsed() / 2000);
+    eprintln!("synthetic {}", visual_timings(&mut app));
+}
+fn visual_timings(app: &mut App) -> String {
+    use std::{hint::black_box, time::Instant};
+    let start = Instant::now();
+    for i in 0..1000 {
+        black_box(super::diagram::layout(
+            85,
+            34,
+            2000,
+            i,
+            Mode::Imports,
+            false,
+        ));
+    }
+    let layout = start.elapsed() / 1000;
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 45)).unwrap();
+    app.module_map.mode = if app.module_map.index.nodes[&app.module_map.focus]
+        .outgoing
+        .is_empty()
+    {
+        Mode::UsedBy
+    } else {
+        Mode::Imports
+    };
+    assert!(
+        app.module_map.choices().len() > 1,
+        "time an actual populated neighborhood"
+    );
+    app.module_map.diagram = true;
+    let start = Instant::now();
+    for _ in 0..100 {
+        t.draw(|f| super::super::ui::render(f, app)).unwrap();
+    }
+    let diagram = start.elapsed() / 100;
+    app.module_map.diagram = false;
+    let start = Instant::now();
+    for _ in 0..100 {
+        t.draw(|f| super::super::ui::render(f, app)).unwrap();
+    }
+    let list = start.elapsed() / 100;
+    let start = Instant::now();
+    for _ in 0..1000 {
+        app.module_map.diagram = black_box(!app.module_map.diagram);
+    }
+    let toggle = start.elapsed() / 1000;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let start = Instant::now();
+    for _ in 0..100 {
+        app.journey.picker = None;
+        rt.block_on(press(app, crossterm::event::KeyCode::Char('p'), &tx));
+        black_box(&app.journey.picker);
+    }
+    let picker = start.elapsed() / 100;
+    app.journey.picker = None;
+    format!("layout={layout:?} diagram={diagram:?} list={list:?} presentation={toggle:?} picker={picker:?}")
 }
 async fn press(
     app: &mut App,
@@ -479,6 +610,7 @@ fn guided_fixture() -> (tempfile::TempDir, App) {
 fn module_loading_import_styles_and_no_color_keep_relationship_identity() {
     use ratatui::{backend::TestBackend, style::Color, Terminal};
     let (_temp, mut app) = guided_fixture();
+    app.module_map.diagram = false; // Explicitly retain the alternative directed List.
     app.switch_view(super::super::app::View::Map);
     app.color_mode = theme::ColorMode::TrueColor;
     let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();

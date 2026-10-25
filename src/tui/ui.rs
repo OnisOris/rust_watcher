@@ -65,6 +65,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         Overlay::Search => render_search(frame, area, app),
         Overlay::None => {}
     }
+    super::journey::render_picker(frame, area, app);
     theme::apply(frame.buffer_mut(), app.color_mode);
 }
 
@@ -160,7 +161,7 @@ fn footer_text(app: &App) -> &'static str {
         Overlay::Help => " ? / Esc close help · q quit",
         Overlay::None => match app.view {
             View::Map => {
-                " j/k nodes · Enter focus · v views · o source · Esc back · f files · ? · q quit"
+                " j/k · Enter focus · g layout · v mode · p review · o source · Esc · q quit"
             }
             View::Overview if app.pane == Pane::Details => {
                 " j/k scroll · Ctrl+h exploration · 1–5 views · ? help · q quit"
@@ -200,6 +201,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::raw("Explorer: h/l directories · Enter file / symbol"),
         Line::raw("Map: j/k nodes · Enter focus · m modules · o exact source"),
         Line::raw("Modules: v Hierarchy/Imports/Used by · f files · a limitations · t target"),
+        Line::raw("Visual Map: g Diagram/List · p actionable priorities · c exact Calls"),
         Line::raw("Map: t module target · Esc previous scope / Cargo map"),
         heading("Session"),
         Line::raw("? / Esc close help · q / Ctrl+C quit"),
@@ -684,7 +686,7 @@ mod tests {
     fn symbols_empty_state_and_small_terminal_are_safe() {
         let mut app = app();
         app.switch_view(View::Symbols);
-        assert!(render_text(&app).contains("Press / and start typing"));
+        assert!(render_text(&app).contains("START EXPLORING SYMBOLS"));
         let backend = TestBackend::new(70, 15);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
@@ -717,7 +719,7 @@ mod tests {
         }
         let mut empty = app();
         empty.switch_view(View::Calls);
-        assert!(render_text(&empty).contains("No symbol selected"));
+        assert!(render_text(&empty).contains("No callable symbol selected"));
 
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();

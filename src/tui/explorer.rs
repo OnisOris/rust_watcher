@@ -422,7 +422,10 @@ impl ExplorerState {
     }
 }
 
-fn anchor_matches(anchor: &crate::maintainability::FunctionMetrics, symbol: &Symbol) -> bool {
+pub(super) fn anchor_matches(
+    anchor: &crate::maintainability::FunctionMetrics,
+    symbol: &Symbol,
+) -> bool {
     anchor.path == symbol.file
         && anchor.name == symbol.name.trim_start_matches("r#")
         && matches!(symbol.kind.as_str(), "function" | "method")

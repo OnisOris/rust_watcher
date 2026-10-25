@@ -6,11 +6,11 @@ use std::{
     sync::Arc,
 };
 #[derive(Default)]
-pub(super) struct Index {
+pub(in crate::tui) struct Index {
     pub nodes: BTreeMap<String, Entry>,
 }
 #[derive(Default)]
-pub(super) struct Entry {
+pub(in crate::tui) struct Entry {
     pub position: usize,
     pub children: Vec<String>,
     pub outgoing: Vec<Link>,
@@ -21,7 +21,7 @@ pub(super) struct Entry {
     pub losses: usize,
 }
 #[derive(Clone)]
-pub(super) struct Link {
+pub(in crate::tui) struct Link {
     pub id: String,
     pub records: usize,
     pub conditional: usize,
@@ -53,9 +53,11 @@ impl Index {
                 },
             );
         }
-        for n in &g.nodes {
-            if let Some(p) = n.parent_id.as_ref().and_then(|p| index.nodes.get_mut(p)) {
-                p.children.push(n.id.clone());
+        for edge in &g.containment_edges {
+            if index.nodes.contains_key(&edge.to) {
+                if let Some(p) = index.nodes.get_mut(&edge.from) {
+                    p.children.push(edge.to.clone());
+                }
             }
         }
         let mut pairs = BTreeMap::<(&str, &str), (usize, usize)>::new();

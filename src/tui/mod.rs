@@ -4,6 +4,7 @@ mod event;
 mod explorer;
 mod highlight;
 mod hotspots;
+mod journey;
 mod map;
 mod module_map;
 #[cfg(test)]

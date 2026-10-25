@@ -108,6 +108,27 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         metric("Subtree unclassified", e.unclassified),
         components::section_header("REVIEW PRIORITIES"),
     ];
+    if s.mode != super::Mode::Hierarchy {
+        if let Some(focus) = s.index.nodes.get(&s.focus) {
+            let links = if s.mode == super::Mode::Imports {
+                &focus.outgoing
+            } else {
+                &focus.incoming
+            };
+            if let Some(link) = links.iter().find(|l| l.id == n.id) {
+                l.insert(
+                    1,
+                    Line::styled(
+                        format!(
+                            "Selected relation: {} records · {} conditional",
+                            link.records, link.conditional
+                        ),
+                        Style::default().fg(theme::NUMBER),
+                    ),
+                );
+            }
+        }
+    }
     let mut children: Vec<_> = e
         .children
         .iter()
