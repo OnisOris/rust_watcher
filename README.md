@@ -442,6 +442,51 @@ selections fail with structured `module_selection` errors and candidate labels.
 The v1 success envelope contains camelCase `crateId`, `targets`, `nodes`,
 `containmentEdges`, `verifiedImportEdges`, `unresolved`, `unresolvedCount`, `unresolvedByModule`,
 `conditionalRelations`, `partial`, `partialReasons`, `parsedFiles`, `readBytes`.
+Module Map v1.1 adds `coverageStatus`, `resolutionStatus`, `resolutionSummary`,
+and `resolutionByModule`. Existing graph arrays/counters remain available.
+Each retained unresolved record additionally has typed `issueKind` and
+`coverageLoss`; legacy `kind`/human-readable `reason` remain descriptive, never
+used to infer a category. All category counters are retained even when the
+1,000-record diagnostic sample is exhausted. Per-module summaries attribute
+verified/conditional import records (including unclassified conditional uses) to the importing module, conditional nodes
+to the declared module, and issues to their originating module.
+
+**Coverage and resolution are independent.** `coverageStatus:complete` means the
+planned structural pass finished without omitted sources/declarations; it does
+not promise complete Rust semantics. `partial:true` now means **coverage loss
+only**: missing/ignored sources, unsupported source-path declarations, ambiguous
+source declarations, recursive inclusions, parse/read failures, resource limits,
+cancellation or incomplete scan/metadata. `coverageStatus:partial` describes
+recoverable omissions; `error` means no target could be parsed and all retained
+target roots failed. Loading/worker failures are separate transient TUI states.
+`partialReasons` contains only actual coverage-loss reasons.
+
+`resolutionStatus:limited` means destinations were not proven or opaque syntax
+was intentionally not expanded. `verifiedOnly` means no such cases were recorded.
+Neither is a semantic-quality judgment. Unrooted paths are **unproven**, not
+guaranteed external: they may name aliases, local imports or re-exports.
+`cfg` is counted independently and is not a coverage failure when retained.
+
+| `issueKind` | Meaning | Coverage loss |
+| --- | --- | --- |
+| `unrootedImport` | unrooted/absolute destination not proven | no |
+| `unsupportedImport` | glob or unsupported import attribute | no |
+| `ambiguousImport` | namespace/re-export/leaf cannot be proven | no |
+| `macroOpaque`, `unsupportedScope` | macro or block-local syntax outside scope | no |
+| `missingModuleSource`, `unsupportedDeclaration` | source absent/excluded or path cannot be established | yes |
+| `ambiguousDeclaration`, `recursiveSource` | source identity/traversal cannot be established | yes |
+| `parseFailure`, `readFailure` | source could not be processed | yes |
+| `resourceLimit`, `cancelled` | bounded work omitted | yes |
+
+`resolutionSummary` and `resolutionByModule` contain `verifiedImports`,
+`unrootedImports`, `ambiguousImports`, `unsupportedImports`, `opaqueDeclarations`,
+`unsupportedScopes`, `missingSources`, `unsupportedDeclarations`,
+`ambiguousDeclarations`, `recursiveSources`, `parseFailures`, `readFailures`,
+`resourceSkips`, `cancelled`, and `conditionalRelations`. Issue counters count
+structural **contexts**, not unique physical files. Their sum (excluding verified
+and conditional counts) equals `unresolvedCount`; retained diagnostics may be
+fewer. Text output prints status/counter totals and at most ten diagnostic details;
+use JSON for all retained details. Other commands' JSON contracts are unchanged.
 Target IDs include package identity, Cargo target name/kinds and relative source
 root. Module IDs include target and logical declaration context, path attribute
 and cfg qualifiers, not checkout location or line numbers. The same physical
@@ -503,8 +548,9 @@ does not change its metrics or add per-file threads.
 
 After the first frame: RepositoryTree → ModuleGraph → Metrics → Maintainability
 → Git Hotspots on the existing background pipeline. RA state is independent.
-An incomplete scan, conditionals, unresolved relations or resource/cancellation
-limits make the graph partial; a loading/error state is local to Map.
+Coverage losses make the graph partial. Ordinary unclassified imports, opaque
+macros and retained conditional relations alone do not; a loading/error state is
+local to Map.
 
 `5 Map` automatically opens modules for a single-package workspace. Multi-package
 workspaces retain Cargo Map; select a crate and press **m**. Breadcrumbs identify
@@ -514,9 +560,33 @@ the scale. Initially only the primary target root and direct children are shown;
 Cargo Map, preserving selection through up to 50 history entries. `Tab`/`Ctrl+h/l`
 switch panes. Background results preserve module selection.
 
-The legend distinguishes `─mod▶` ownership, `┄use▶` verified import, `[cfg]`
+Press **v** to cycle **Hierarchy / Imports / Used by** within Map. Hierarchy
+draws module ownership. Imports draws `[0] ─use▶ neighbor`; Used by draws
+`neighbor ─use▶ [0]`. `[0]` is the focused module; selecting a neighbor updates
+Inspector, Enter makes it the focus, and Esc restores focus, selection, target
+and view mode (at most 50 history entries). Changing mode keeps the current
+selection as its center, including empty neighborhoods. Relations group repeated
+records by exact module-ID pair, showing record counts and conditional counts;
+they are syntactic imports, **not runtime calls**. Long lists scroll with j/k;
+all neighbors remain selectable regardless of terminal size. Adjacency and
+deduplicated physical-subtree indexes are prepared once when the graph arrives;
+switching mode or moving selection never starts scan, metadata, AST, Git or RA.
+
+Inspector prioritizes Structure, Relationships, Review priorities and Analysis
+status. **f** expands/collapses physical files; **a** expands/collapses analysis
+limitations. Both scroll in the existing right pane (Tab or Ctrl+l, then j/k).
+Direct imports/unclassified counts refer to the selected module; subtree records
+include its descendants. Subtree file LOC/functions/depth deduplicate physical
+paths. Exclusive own-module LOC/functions stay unknown, including inline modules.
+Review priorities reuse existing measured child-file totals, top-ranked hotspot
+files and known longest/deepest function reports. Rank lists are bounded global
+reports, not a new AST/Git pass; missing measurements remain unknown. Displayed
+file totals describe the known physical subtree, not complete exclusive contents.
+
+The legend distinguishes `─mod▶` ownership, `─use▶` verified import, `[cfg]`
 conditional, and `[?]` unresolved, including with NO_COLOR. Imports outside the
-focused neighborhood have explicit stubs. The scrollable inspector explains
+hierarchy scope are reached through the separate Imports/Used by neighborhoods,
+not dangling lines. The scrollable inspector explains
 confirmed imports, imported-by modules, unresolved reasons and exact source.
 Metrics are labeled **known physical subtree files / file LOC / file functions**:
 they deduplicate physical paths, not logical target contexts. Inline modules share
