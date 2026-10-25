@@ -47,6 +47,13 @@ struct ErrorBody {
 }
 
 pub fn json_error(error: &anyhow::Error) {
+    if let Some(selection) = error.downcast_ref::<crate::module_graph::SelectionError>() {
+        println!(
+            "{}",
+            serde_json::json!({"schemaVersion":1,"ok":false,"error":{"code":"module_selection","message":selection.message,"candidates":selection.candidates}})
+        );
+        return;
+    }
     let body = error_body(error);
     let envelope = ErrorEnvelope {
         schema_version: 1,

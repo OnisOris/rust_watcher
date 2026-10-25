@@ -98,7 +98,7 @@ fn load_hotspot(app: &mut App, path: &Path) {
             commits: 3,
         });
     app.hotspots = Some(report);
-    app.select_overview(2);
+    app.overview.selected = overview::Target::Hotspot(path.into()).id();
 }
 
 #[tokio::test]

@@ -116,6 +116,19 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         .iter()
         .filter(|u| u.from == node.id)
         .count();
+    let hint = if model.nodes.len() == 1 {
+        format!("1 Cargo crate · {} Rust files", value(rust_files))
+    } else {
+        "Rust modules of this crate".into()
+    };
+    l.insert(3, Line::styled(hint, Style::default().fg(theme::MUTED)));
+    l.insert(
+        4,
+        Line::styled(
+            "m → Open module map to explore internal architecture",
+            Style::default().fg(theme::ACTIVE),
+        ),
+    );
     if unresolved > 0 {
         l.insert(
             2,

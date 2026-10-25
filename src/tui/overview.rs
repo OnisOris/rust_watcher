@@ -20,5 +20,5 @@ use ratatui::{
 pub(super) use render::{render_details, render_project, render_summary};
 #[cfg(test)]
 pub(super) use state::ItemId;
-pub(super) use state::{index, selected, targets, Group, State, Target};
+pub(super) use state::{index, selected, targets, Group, Guide, State, Target};
 use std::{collections::BTreeSet, path::PathBuf};

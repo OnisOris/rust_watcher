@@ -44,6 +44,10 @@ pub(in crate::tui) fn render_project(frame: &mut Frame<'_>, area: Rect, app: &Ap
         .into_iter()
         .map(|target| {
             let lines = match target {
+                Target::Guide(g) => vec![Line::styled(
+                    format!("  {} →", g.label()),
+                    Style::default().fg(theme::ACTIVE),
+                )],
                 Target::Workspace => vec![heading("Workspace summary")],
                 Target::Group(g) => vec![Line::styled(
                     format!(

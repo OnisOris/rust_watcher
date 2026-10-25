@@ -16,6 +16,7 @@ pub(super) enum ExplorerRightMode {
 
 #[derive(Debug, Clone)]
 pub(super) struct FileState {
+    pub module_anchor: Option<(String, usize, usize)>,
     pub anchor: Option<crate::maintainability::FunctionMetrics>,
     pub anchor_matched: bool,
     pub anchor_notice: Option<String>,
@@ -167,6 +168,7 @@ impl ExplorerState {
         let request_id = self.next_file_request;
         let rust = entry.path.extension().is_some_and(|value| value == "rs");
         self.file = Some(FileState {
+            module_anchor: None,
             anchor: None,
             anchor_matched: false,
             anchor_notice: None,
@@ -196,10 +198,21 @@ impl ExplorerState {
             file.anchor = Some(anchor);
         }
     }
+    pub fn set_module_anchor(&mut self, name: String, line: usize, column: usize) {
+        if let Some(f) = &mut self.file {
+            f.anchor_notice = Some(format!(
+                "Module declaration {}:{line}:{column} · RA match pending",
+                f.path.display()
+            ));
+            f.module_anchor = Some((name, line, column));
+            f.anchor_matched = false;
+            f.manual_selection = false;
+        }
+    }
 
     pub fn retry_anchor(&mut self) -> Option<(u64, PathBuf)> {
         let file = self.file.as_mut()?;
-        if file.anchor.is_none() || file.error.is_none() {
+        if (file.anchor.is_none() && file.module_anchor.is_none()) || file.error.is_none() {
             return None;
         }
         self.next_file_request += 1;
@@ -224,21 +237,41 @@ impl ExplorerState {
                 .cmp(&b.selection_range)
                 .then(a.name.cmp(&b.name))
         });
-        let matched = state.anchor.as_ref().and_then(|anchor| {
-            let matches: Vec<_> = symbols
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| anchor_matches(anchor, s))
-                .map(|(i, _)| i)
-                .collect();
-            if matches.len() == 1 {
-                Some(matches[0])
-            } else {
-                None
-            }
-        });
+        let matched = state
+            .anchor
+            .as_ref()
+            .and_then(|anchor| {
+                let matches: Vec<_> = symbols
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| anchor_matches(anchor, s))
+                    .map(|(i, _)| i)
+                    .collect();
+                if matches.len() == 1 {
+                    Some(matches[0])
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                state.module_anchor.as_ref().and_then(|(name, line, col)| {
+                    let matches: Vec<_> = symbols
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| {
+                            s.file == state.path
+                                && s.kind == "module"
+                                && s.name.trim_start_matches("r#") == name
+                                && s.selection_range.start.line as usize + 1 == *line
+                                && s.selection_range.start.character as usize + 1 == *col
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    (matches.len() == 1).then(|| matches[0])
+                })
+            });
         state.anchor_matched = matched.is_some();
-        if state.anchor.is_some() {
+        if state.anchor.is_some() || state.module_anchor.is_some() {
             state.anchor_notice = Some(
                 if matched.is_some() {
                     "Exact RA symbol selected; Enter Inspector, c Calls"
@@ -267,7 +300,7 @@ impl ExplorerState {
         if state.request_id == id && state.path == file {
             state.loading = false;
             state.error = Some(message);
-            if state.anchor.is_some() {
+            if state.anchor.is_some() || state.module_anchor.is_some() {
                 state.anchor_notice =
                     Some("Semantic Inspector unavailable; source anchor retained".into());
             }
@@ -279,7 +312,10 @@ impl ExplorerState {
         if file.error.is_some() || file.loading {
             return None;
         }
-        if file.anchor.is_some() && !file.anchor_matched && !file.manual_selection {
+        if (file.anchor.is_some() || file.module_anchor.is_some())
+            && !file.anchor_matched
+            && !file.manual_selection
+        {
             return None;
         }
         file.symbols.get(file.selection).cloned()

@@ -25,6 +25,12 @@ pub enum Command {
     Stats,
     Maintainability,
     Architecture,
+    Modules {
+        #[arg(long = "crate")]
+        crate_name: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+    },
     Hotspots {
         #[arg(long, default_value_t = crate::git_analysis::DEFAULT_DAYS, value_parser = clap::value_parser!(u16).range(1..=3650))]
         days: u16,

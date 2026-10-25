@@ -131,6 +131,7 @@ pub(super) struct CallsState {
 }
 
 pub(super) struct App {
+    pub module_map: super::module_map::State,
     pub map: super::map::State,
     pub color_mode: super::theme::ColorMode,
     pub hotspots: Option<crate::git_analysis::HotspotReport>,
@@ -165,6 +166,7 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            module_map: super::module_map::State::new(&project.architecture),
             map: super::map::State::new(&project.architecture),
             color_mode: super::theme::ColorMode::detect(),
             hotspots: None,
@@ -285,6 +287,10 @@ impl App {
                     .saturating_add_signed(delta)
                     .min(self.calls.context_scroll_limit.get().unwrap_or(0))
             }
+            Pane::MapGraph if self.module_map.active => {
+                self.module_map.move_by(delta);
+                self.map.inspector_scroll = 0;
+            }
             Pane::MapGraph => self.map.move_by(&self.project.architecture, delta),
             Pane::MapInspector => {
                 self.map.inspector_scroll = self
@@ -352,7 +358,12 @@ impl App {
     pub(super) fn escape(&mut self) -> Option<(u64, CallTarget, CallScope)> {
         match self.overlay {
             Overlay::None if self.view == View::Map => {
-                self.map.back();
+                if self.module_map.active {
+                    self.module_map.back();
+                    self.map.inspector_scroll = 0;
+                } else {
+                    self.map.back();
+                }
                 self.pane = Pane::MapGraph;
             }
             Overlay::Help | Overlay::Search => self.overlay = Overlay::None,

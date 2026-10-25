@@ -197,7 +197,11 @@ pub(super) fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App)
         return;
     };
 
-    let details_height = if file.anchor.is_some() { 12 } else { 9 };
+    let details_height = if file.anchor.is_some() || file.module_anchor.is_some() {
+        12
+    } else {
+        9
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(details_height), Constraint::Min(3)])
@@ -214,6 +218,12 @@ pub(super) fn render_explorer_file(frame: &mut Frame<'_>, area: Rect, app: &App)
         Line::raw(format!("package   {package}")),
         Line::raw(format!("role      {role}")),
     ];
+    if let Some((name, line, col)) = &file.module_anchor {
+        file_details.push(Line::raw(format!("module anchor {name} · {line}:{col}")));
+        if let Some(notice) = &file.anchor_notice {
+            file_details.push(Line::raw(notice.clone()));
+        }
+    }
     if let Some(anchor) = &file.anchor {
         file_details.push(Line::raw(format!(
             "anchor    {}:{} · {}",

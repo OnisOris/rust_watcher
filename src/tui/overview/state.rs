@@ -1,6 +1,24 @@
 use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::tui) enum Guide {
+    Architecture,
+    Entrypoint,
+    Hotspots,
+    Longest,
+}
+impl Guide {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Architecture => "Explore architecture",
+            Self::Entrypoint => "Open main entrypoint",
+            Self::Hotspots => "Review hotspots",
+            Self::Longest => "Find longest functions",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::tui) enum Group {
+    Start,
     Hotspots,
     Largest,
     Longest,
@@ -12,7 +30,8 @@ pub(in crate::tui) enum Group {
     Analysis,
 }
 impl Group {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
+        Self::Start,
         Self::Hotspots,
         Self::Largest,
         Self::Longest,
@@ -25,6 +44,7 @@ impl Group {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::Start => "START EXPLORING",
             Self::Hotspots => "GIT HOTSPOTS",
             Self::Largest => "LARGEST SOURCE FILES",
             Self::Longest => "LONGEST FUNCTIONS",
@@ -39,6 +59,7 @@ impl Group {
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::tui) enum ItemId {
+    Guide(Guide),
     Workspace,
     Group(Group),
     Path(Group, PathBuf),
@@ -53,12 +74,13 @@ impl Default for State {
     fn default() -> Self {
         Self {
             selected: ItemId::Workspace,
-            expanded: BTreeSet::from([Group::Hotspots]),
+            expanded: BTreeSet::from([Group::Start, Group::Hotspots]),
         }
     }
 }
 #[derive(Clone)]
 pub(in crate::tui) enum Target {
+    Guide(Guide),
     Workspace,
     Group(Group),
     Hotspot(PathBuf),
@@ -73,6 +95,7 @@ pub(in crate::tui) enum Target {
 impl Target {
     pub fn id(&self) -> ItemId {
         match self {
+            Self::Guide(g) => ItemId::Guide(*g),
             Self::Workspace => ItemId::Workspace,
             Self::Group(g) => ItemId::Group(*g),
             Self::Package(n) => ItemId::Package(n.clone()),
@@ -104,6 +127,16 @@ pub(in crate::tui) fn targets(app: &App) -> Vec<Target> {
             continue;
         }
         match group {
+            Group::Start => items.extend(
+                [
+                    Guide::Architecture,
+                    Guide::Entrypoint,
+                    Guide::Hotspots,
+                    Guide::Longest,
+                ]
+                .into_iter()
+                .map(Target::Guide),
+            ),
             Group::Hotspots => {
                 if let Some(r) = &app.hotspots {
                     items.extend(r.rows().iter().map(|f| Target::Hotspot(f.path.clone())));

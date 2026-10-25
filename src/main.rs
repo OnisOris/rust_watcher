@@ -5,6 +5,7 @@ mod lsp;
 mod maintainability;
 mod metrics;
 mod model;
+mod module_graph;
 mod output;
 mod project;
 mod repository;
@@ -44,6 +45,20 @@ async fn execute(cli: &Cli) -> Result<()> {
         return doctor(&cli.path, cli.json).await;
     }
     let project = Project::discover(&cli.path)?;
+    if let Some(Command::Modules { crate_name, target }) = &cli.command {
+        let selected = module_graph::select(
+            &project.architecture,
+            crate_name.as_deref(),
+            target.as_deref(),
+        )?;
+        let tree = repository::scan(&project.workspace_root)?;
+        let graph = module_graph::analyze(&project.workspace_root, &tree, &selected, || false);
+        if cli.json {
+            return output::json(&graph);
+        }
+        module_graph::print(&graph);
+        return Ok(());
+    }
     if matches!(cli.command, Some(Command::Architecture)) {
         if cli.json {
             return output::json(&project.architecture);
@@ -168,7 +183,8 @@ async fn run(cli: &Cli, analyzer: &mut RustAnalyzer) -> Result<()> {
             | Command::Stats
             | Command::Maintainability
             | Command::Hotspots { .. }
-            | Command::Architecture,
+            | Command::Architecture
+            | Command::Modules { .. },
         ) => unreachable!(),
     }
 }

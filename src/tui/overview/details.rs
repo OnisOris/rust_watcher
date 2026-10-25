@@ -10,6 +10,24 @@ pub(in crate::tui) fn details(app: &App) -> Vec<Line<'static>> {
         ];
     };
     let mut lines = match target {
+        Target::Guide(g) => vec![
+            heading(g.label()),
+            Line::raw("Press Enter to start this exploration route."),
+            Line::raw(match g {
+                Guide::Architecture => {
+                    "Cargo crates → declared Rust modules → exact source → RA symbols."
+                }
+                Guide::Entrypoint => {
+                    "Open an exact Cargo binary/library target; multiple targets offer a choice."
+                }
+                Guide::Hotspots => {
+                    "Select the first current review candidate; unavailable history is explained."
+                }
+                Guide::Longest => {
+                    "Select the longest measured Rust function and explore its exact location."
+                }
+            }),
+        ],
         Target::Workspace => summary(app),
         Target::Group(Group::Analysis) => return analysis::analysis_details(app),
         Target::Group(Group::Hotspots) => {

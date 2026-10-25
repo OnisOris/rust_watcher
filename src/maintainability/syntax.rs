@@ -9,7 +9,7 @@ const MAX_TOKEN_DEPTH: usize = 128;
 const MAX_TOKENS: usize = 200_000;
 
 #[derive(Debug)]
-pub(super) enum Failure {
+pub(crate) enum Failure {
     Parse(String),
     Resource(&'static str),
 }
@@ -21,6 +21,35 @@ pub(super) fn functions(
     limit: usize,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Vec<FunctionMetrics>, Failure> {
+    let file = parse_file_bounded(source, cancelled)?;
+    let mut collector = Collector {
+        source_lines: source.lines().collect(),
+        path,
+        package,
+        scope: vec![],
+        test: classify(path).1 == Category::Tests,
+        functions: vec![],
+        limit,
+        cancelled,
+    };
+    collector.visit_file(&file);
+    if cancelled() {
+        return Err(Failure::Resource("cancelled"));
+    }
+    Ok(collector.functions)
+}
+
+pub(crate) fn parse_file_bounded(
+    source: &str,
+    cancelled: &impl Fn() -> bool,
+) -> Result<syn::File, Failure> {
+    parse_file_at_depth(source, cancelled, MAX_TOKEN_DEPTH)
+}
+pub(crate) fn parse_file_at_depth(
+    source: &str,
+    cancelled: &impl Fn() -> bool,
+    max_depth: usize,
+) -> Result<syn::File, Failure> {
     let token_source = source.trim_start_matches('\u{feff}');
     let token_source =
         if token_source.starts_with("#!") && !token_source[2..].trim_start().starts_with('[') {
@@ -39,7 +68,7 @@ pub(super) fn functions(
             if cancelled() {
                 return Err(Failure::Resource("cancelled"));
             }
-            if count > MAX_TOKENS || depth > MAX_TOKEN_DEPTH {
+            if count > MAX_TOKENS || depth > max_depth.min(MAX_TOKEN_DEPTH) {
                 return Err(Failure::Resource("AST token/depth budget exceeded"));
             }
             if let TokenTree::Group(group) = token {
@@ -56,21 +85,7 @@ pub(super) fn functions(
             e.span().start().column + 1
         ))
     })?;
-    let mut collector = Collector {
-        source_lines: source.lines().collect(),
-        path,
-        package,
-        scope: vec![],
-        test: classify(path).1 == Category::Tests,
-        functions: vec![],
-        limit,
-        cancelled,
-    };
-    collector.visit_file(&file);
-    if cancelled() {
-        return Err(Failure::Resource("cancelled"));
-    }
-    Ok(collector.functions)
+    Ok(file)
 }
 
 struct Collector<'a, F> {

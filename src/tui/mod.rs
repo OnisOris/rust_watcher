@@ -5,6 +5,7 @@ mod explorer;
 mod highlight;
 mod hotspots;
 mod map;
+mod module_map;
 #[cfg(test)]
 mod navigation_tests;
 mod overview;
@@ -19,9 +20,13 @@ use anyhow::Result;
 use app::App;
 use tokio::sync::mpsc;
 use worker::{AnalyzerCommand, AnalyzerEvent};
+// One shared pipeline, with bounded stack headroom for the existing syn pass.
+// Keep Maintainability's measured coverage unchanged on deeply nested sources.
+const PIPELINE_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) enum RepositoryEvent {
     Tree(crate::repository::RepositoryTree),
+    Modules(crate::module_graph::ModuleGraph),
     Metrics(crate::metrics::RepositoryMetrics),
     Maintainability(crate::maintainability::MaintainabilityReport),
     Hotspots(crate::git_analysis::HotspotReport),
@@ -44,48 +49,72 @@ pub async fn run(project: Project) -> Result<()> {
     let metrics_project = app.project.clone();
     let git_runner = crate::git_analysis::GitRunner::default();
     let background_git = git_runner.clone();
-    std::thread::spawn(move || match crate::repository::scan(&repository_root) {
-        Ok(tree) => {
-            if repository_tx
-                .blocking_send(RepositoryEvent::Tree(tree.clone()))
-                .is_err()
-            {
-                return;
+    let repository_failure_tx = repository_tx.clone();
+    let background = std::thread::Builder::new()
+        .name("repository-analysis".into())
+        .stack_size(PIPELINE_STACK_BYTES)
+        .spawn(move || match crate::repository::scan(&repository_root) {
+            Ok(tree) => {
+                if repository_tx
+                    .blocking_send(RepositoryEvent::Tree(tree.clone()))
+                    .is_err()
+                {
+                    return;
+                }
+                let modules = crate::module_graph::analyze(
+                    &repository_root,
+                    &tree,
+                    &metrics_project.architecture,
+                    || repository_tx.is_closed(),
+                );
+                if repository_tx
+                    .blocking_send(RepositoryEvent::Modules(modules))
+                    .is_err()
+                {
+                    return;
+                }
+                let metrics = crate::metrics::analyze_until(
+                    &repository_root,
+                    &tree,
+                    &metrics_project,
+                    || repository_tx.is_closed(),
+                );
+                if repository_tx
+                    .blocking_send(RepositoryEvent::Metrics(metrics.clone()))
+                    .is_err()
+                {
+                    return;
+                }
+                let report = crate::maintainability::analyze_until(
+                    &repository_root,
+                    &tree,
+                    &metrics_project,
+                    || repository_tx.is_closed(),
+                );
+                if repository_tx
+                    .blocking_send(RepositoryEvent::Maintainability(report.clone()))
+                    .is_err()
+                {
+                    return;
+                }
+                let history = crate::git_analysis::analyze(
+                    &repository_root,
+                    &Default::default(),
+                    &background_git,
+                );
+                let hotspots = crate::git_analysis::correlate(history, &metrics, &report, &tree);
+                let _ = repository_tx.blocking_send(RepositoryEvent::Hotspots(hotspots));
             }
-            let metrics =
-                crate::metrics::analyze_until(&repository_root, &tree, &metrics_project, || {
-                    repository_tx.is_closed()
-                });
-            if repository_tx
-                .blocking_send(RepositoryEvent::Metrics(metrics.clone()))
-                .is_err()
-            {
-                return;
+            Err(error) => {
+                let _ = repository_tx.blocking_send(RepositoryEvent::Error(format!("{error:#}")));
             }
-            let report = crate::maintainability::analyze_until(
-                &repository_root,
-                &tree,
-                &metrics_project,
-                || repository_tx.is_closed(),
-            );
-            if repository_tx
-                .blocking_send(RepositoryEvent::Maintainability(report.clone()))
-                .is_err()
-            {
-                return;
-            }
-            let history = crate::git_analysis::analyze(
-                &repository_root,
-                &Default::default(),
-                &background_git,
-            );
-            let hotspots = crate::git_analysis::correlate(history, &metrics, &report, &tree);
-            let _ = repository_tx.blocking_send(RepositoryEvent::Hotspots(hotspots));
-        }
-        Err(error) => {
-            let _ = repository_tx.blocking_send(RepositoryEvent::Error(format!("{error:#}")));
-        }
-    });
+        });
+    if let Err(error) = background {
+        let _ = repository_failure_tx.try_send(RepositoryEvent::Error(format!(
+            "Cannot start repository analyzer: {error}"
+        )));
+    }
+    drop(repository_failure_tx);
     let result = event::run_loop(
         &mut terminal,
         &mut app,
@@ -119,6 +148,33 @@ async fn stop_analyzer(
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+    #[test]
+    fn bounded_pipeline_stack_preserves_existing_maintainability_depth_coverage() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='deep'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            format!("{}{}", "mod n {".repeat(70), "}".repeat(70)),
+        )
+        .unwrap();
+        let project = Project::discover(root).unwrap();
+        let tree = crate::repository::scan(root).unwrap();
+        let path = root.to_path_buf();
+        let report = std::thread::Builder::new()
+            .stack_size(PIPELINE_STACK_BYTES)
+            .spawn(move || crate::maintainability::analyze(&path, &tree, &project))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(report.parsed_files, 1);
+        assert!(!report.partial);
+    }
     #[tokio::test]
     async fn quit_aborts_inflight_work_even_when_command_queue_is_full() {
         struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);

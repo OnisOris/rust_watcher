@@ -592,3 +592,89 @@ fn architecture_uses_cargo_identity_without_git_or_analyzer() {
         .status
         .success());
 }
+
+#[cfg(unix)]
+#[test]
+fn modules_are_exact_structural_reports_without_ra_or_git() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let tools = tempfile::tempdir().unwrap();
+    for name in ["cargo", "rustc"] {
+        let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        symlink(executable, tools.path().join(name)).unwrap();
+    }
+    let marker = tools.path().join("unexpected");
+    for name in ["git", "rust-analyzer"] {
+        let path = tools.path().join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname='module-fixture'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "mod foo {pub struct Bar;}\nmod consumer {use crate::foo::Bar;}\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", tools.path())
+        .arg(repo.path())
+        .args([
+            "modules",
+            "--json",
+            "--crate",
+            "module-fixture",
+            "--target",
+            "module_fixture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["schemaVersion"], 1);
+    assert_eq!(v["ok"], true);
+    let d = &v["data"];
+    assert_eq!(d["nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(d["containmentEdges"].as_array().unwrap().len(), 2);
+    assert_eq!(d["verifiedImportEdges"].as_array().unwrap().len(), 1);
+    assert_eq!(d["partial"], false);
+    assert_eq!(d["unresolvedCount"], 0);
+    assert_eq!(d["nodes"][2]["declarationLine"], 1);
+    let failure = Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", tools.path())
+        .arg(repo.path())
+        .args(["modules", "--json", "--target", "missing"])
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    let v: Value = serde_json::from_slice(&failure.stdout).unwrap();
+    assert_eq!(v["error"]["code"], "module_selection");
+    assert_eq!(v["error"]["candidates"].as_array().unwrap().len(), 1);
+    assert!(!marker.exists());
+    // Default multi-package mode is all contexts, not an arbitrary package.
+    let output = Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("PATH", tools.path())
+        .arg(fixture("workspace_project"))
+        .args(["modules", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(v["data"]["crateId"].is_null());
+    assert_eq!(v["data"]["targets"].as_array().unwrap().len(), 2);
+}

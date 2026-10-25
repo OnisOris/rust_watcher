@@ -56,6 +56,7 @@ pub(super) async fn run_loop(
                     Some(event)=>apply_repository(app,event),
                     None => {
                         repository_open = false;
+                        if app.module_map.graph.is_none() && app.module_map.error.is_none() {app.module_map.error=Some("background module analyzer stopped".into());}
                         if app.hotspots.is_none() && app.hotspots_error.is_none() {
                             app.hotspots_error = Some("background Git analyzer stopped".into());
                         }
@@ -106,10 +107,12 @@ pub(super) fn apply_repository(app: &mut App, event: super::RepositoryEvent) {
     use super::RepositoryEvent;
     match event {
         RepositoryEvent::Tree(tree) => app.explorer.apply_tree(tree),
+        RepositoryEvent::Modules(graph) => app.module_map.apply(graph),
         RepositoryEvent::Metrics(metrics) => app.metrics = Some(metrics),
         RepositoryEvent::Maintainability(report) => app.maintainability = Some(report),
         RepositoryEvent::Hotspots(report) => app.hotspots = Some(report),
         RepositoryEvent::Error(message) => {
+            app.module_map.error = Some(message.clone());
             app.metrics_error = Some(message.clone());
             app.hotspots_error = Some(message.clone());
             app.maintainability_error = Some(message.clone());
@@ -128,11 +131,7 @@ pub(super) async fn handle_key(
     }
     if app.view == View::Map && app.overlay == Overlay::None {
         if let Some(index) = app.map.target_picker {
-            let count = app
-                .project
-                .architecture
-                .node(&app.map.selected)
-                .map_or(0, |n| n.targets.len());
+            let count = super::map::targets(app).len();
             match key.code {
                 KeyCode::Char('q') => return Ok(true),
                 KeyCode::Esc => app.map.target_picker = None,
@@ -143,12 +142,7 @@ pub(super) async fn handle_key(
                     app.map.target_picker = Some(index.saturating_sub(1))
                 }
                 KeyCode::Enter => {
-                    let path = app
-                        .project
-                        .architecture
-                        .node(&app.map.selected)
-                        .and_then(|n| n.targets.get(index))
-                        .map(|t| t.path.clone());
+                    let path = super::map::targets(app).get(index).map(|t| t.path.clone());
                     app.map.target_picker = None;
                     if let Some(path) = path {
                         open_exact_file(app, commands, path, None).await;
@@ -210,7 +204,40 @@ pub(super) async fn handle_key(
             KeyCode::Char('3') => open_calls(app, commands).await?,
             KeyCode::Char('4') => app.switch_view(View::Explorer),
             KeyCode::Char('5') => app.switch_view(View::Map),
+            KeyCode::Char('m') if app.view == View::Map => {
+                app.module_map.enter(&app.map.selected);
+                app.map.inspector_scroll = 0;
+            }
+            KeyCode::Char('t') if app.view == View::Map && app.module_map.active => {
+                app.module_map.next_target();
+                app.map.inspector_scroll = 0;
+            }
+            KeyCode::Char('o') if app.view == View::Map && app.module_map.active => {
+                let node = app
+                    .module_map
+                    .graph
+                    .as_ref()
+                    .and_then(|g| g.node(&app.module_map.selected))
+                    .cloned();
+                if let Some(n) = node {
+                    if let Some(path) = n.source_file {
+                        open_exact_file(app, commands, path.clone(), None).await;
+                        if app.view == View::Explorer && n.inline {
+                            app.explorer.set_module_anchor(
+                                n.name,
+                                n.declaration_line,
+                                n.declaration_column,
+                            );
+                        }
+                    } else {
+                        app.notice = Some("Module source unresolved; see inspector reason".into());
+                    }
+                } else {
+                    app.notice = Some("Module graph is not ready".into());
+                }
+            }
             KeyCode::Char('o') if app.view == View::Map => {
+                app.map.entry_targets = None;
                 let targets = app
                     .project
                     .architecture
@@ -275,12 +302,21 @@ pub(super) async fn handle_key(
                 activate_explorer(app, commands).await?
             }
             KeyCode::Enter if app.view == View::Map => {
-                app.map.focus_selected();
+                if app.module_map.active {
+                    app.module_map.focus_selected();
+                } else {
+                    app.map.focus_selected();
+                }
+                app.map.inspector_scroll = 0;
                 app.pane = Pane::MapGraph;
             }
             KeyCode::Enter => {
                 use super::overview::Target;
                 let target = super::overview::selected(app);
+                if let Some(Target::Guide(guide)) = target {
+                    guided(app, commands, guide).await;
+                    return Ok(false);
+                }
                 let (path, anchor) = match target {
                     Some(
                         Target::File(path, _)
@@ -337,6 +373,95 @@ async fn begin_inspect(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) 
         send_command(app, commands, AnalyzerCommand::Inspect { id, symbol }).await;
     }
     Ok(())
+}
+
+async fn guided(
+    app: &mut App,
+    commands: &mpsc::Sender<AnalyzerCommand>,
+    guide: super::overview::Guide,
+) {
+    use super::overview::{Group, Guide, Target};
+    match guide {
+        Guide::Architecture => app.switch_view(View::Map),
+        Guide::Entrypoint => {
+            let targets: Vec<_> = app
+                .project
+                .architecture
+                .nodes
+                .iter()
+                .flat_map(|n| n.targets.iter())
+                .filter(|t| {
+                    t.kinds.iter().any(|k| {
+                        matches!(
+                            k.as_str(),
+                            "bin"
+                                | "lib"
+                                | "rlib"
+                                | "proc-macro"
+                                | "cdylib"
+                                | "dylib"
+                                | "staticlib"
+                        )
+                    })
+                })
+                .cloned()
+                .collect();
+            if targets.len() == 1 {
+                open_exact_file(app, commands, targets[0].path.clone(), None).await;
+            } else if targets.is_empty() {
+                app.notice = Some("No Cargo binary/library entrypoint available".into());
+            } else {
+                app.switch_view(View::Map);
+                app.map.entry_targets = Some(targets);
+                app.map.target_picker = Some(0);
+            }
+        }
+        Guide::Hotspots | Guide::Longest => {
+            let group = if guide == Guide::Hotspots {
+                Group::Hotspots
+            } else {
+                Group::Longest
+            };
+            app.overview.expanded.insert(group);
+            let selected = super::overview::targets(app).into_iter().find(|t| match t {
+                Target::Hotspot(path) => {
+                    guide == Guide::Hotspots
+                        && app.hotspots.as_ref().is_some_and(|r| {
+                            r.hotspots
+                                .iter()
+                                .any(|f| f.path == *path && f.present_in_tree)
+                        })
+                }
+                Target::Longest(_) => guide == Guide::Longest,
+                _ => false,
+            });
+            if let Some(target) = selected {
+                app.overview.selected = target.id();
+                app.metrics_scroll = 0;
+                app.notice = None;
+            } else {
+                app.notice = Some(if guide == Guide::Hotspots {
+                    app.hotspots.as_ref().map_or_else(
+                        || {
+                            app.hotspots_error
+                                .clone()
+                                .unwrap_or("Git history is still analyzing".into())
+                        },
+                        |r| format!("No current review candidates: {}", r.status()),
+                    )
+                } else {
+                    app.maintainability.as_ref().map_or_else(
+                        || {
+                            app.maintainability_error
+                                .clone()
+                                .unwrap_or("Maintainability is still analyzing".into())
+                        },
+                        |_| "No measured Rust functions available".into(),
+                    )
+                });
+            }
+        }
+    }
 }
 
 async fn open_calls(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) -> Result<()> {

@@ -23,6 +23,7 @@ pub(super) struct State {
     pub inspector_scroll: usize,
     pub scroll_limit: std::cell::Cell<Option<usize>>,
     pub target_picker: Option<usize>,
+    pub entry_targets: Option<Vec<crate::architecture::CrateTarget>>,
 }
 impl State {
     pub fn new(model: &Architecture) -> Self {
@@ -36,6 +37,7 @@ impl State {
             inspector_scroll: 0,
             scroll_limit: Default::default(),
             target_picker: None,
+            entry_targets: None,
         }
     }
     pub fn choices(&self, model: &Architecture) -> Vec<String> {
@@ -94,6 +96,13 @@ pub(super) fn edge_mark(kind: DependencyKind) -> &'static str {
     }
 }
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if app.module_map.active {
+        super::module_map::render(frame, area, app);
+        if let Some(index) = app.map.target_picker {
+            render_targets(frame, area, app, index);
+        }
+        return;
+    }
     let panes = Layout::horizontal([
         Constraint::Percentage(if area.width < 100 { 52 } else { 60 }),
         Constraint::Min(24),
@@ -119,11 +128,9 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 }
 fn render_targets(frame: &mut Frame<'_>, area: Rect, app: &App, index: usize) {
-    let Some(node) = app.project.architecture.node(&app.map.selected) else {
-        return;
-    };
+    let targets = targets(app);
     let width = area.width.saturating_sub(8);
-    let height = (node.targets.len() as u16 * 2 + 4).min(area.height.saturating_sub(2));
+    let height = (targets.len() as u16 * 2 + 4).min(area.height.saturating_sub(2));
     let popup = Rect::new(
         area.x + 4,
         area.y + (area.height - height) / 2,
@@ -131,8 +138,7 @@ fn render_targets(frame: &mut Frame<'_>, area: Rect, app: &App, index: usize) {
         height,
     );
     frame.render_widget(Clear, popup);
-    let items: Vec<_> = node
-        .targets
+    let items: Vec<_> = targets
         .iter()
         .map(|t| {
             ListItem::new(vec![
@@ -156,4 +162,12 @@ fn render_targets(frame: &mut Frame<'_>, area: Rect, app: &App, index: usize) {
         popup,
         &mut selected,
     );
+}
+pub(super) fn targets(app: &App) -> Vec<crate::architecture::CrateTarget> {
+    app.map.entry_targets.clone().unwrap_or_else(|| {
+        app.project
+            .architecture
+            .node(&app.map.selected)
+            .map_or_else(Vec::new, |n| n.targets.clone())
+    })
 }

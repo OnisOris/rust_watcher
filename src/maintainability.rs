@@ -1,5 +1,6 @@
 //! Passive Rust syntax measurements. Never resolves semantic identities.
 mod syntax;
+pub(crate) use syntax::{parse_file_at_depth, Failure as SyntaxFailure};
 #[cfg(test)]
 mod tests;
 
@@ -278,7 +279,7 @@ fn failure(report: &mut MaintainabilityReport, file: &Path, reason: String) {
     }
 }
 
-fn read_source(
+pub(crate) fn read_source(
     path: &Path,
     budget: &mut u64,
     cancelled: &impl Fn() -> bool,
