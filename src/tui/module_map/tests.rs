@@ -332,6 +332,18 @@ fn module_map_performance() {
             app.module_map.cycle_mode();
         }
         timings.push(format!("mode={:?}/op", start.elapsed() / 1000));
+        app.module_map.mode = if app.module_map.index.nodes[&app.module_map.focus]
+            .outgoing
+            .is_empty()
+        {
+            Mode::UsedBy
+        } else {
+            Mode::Imports
+        };
+        assert!(
+            app.module_map.choices().len() > 1,
+            "measure actual neighbor movement, not empty-list clamping"
+        );
         let start = std::time::Instant::now();
         for _ in 0..1000 {
             app.module_map.move_by(1);
@@ -408,6 +420,8 @@ fn synthetic_relationship_performance() {
         app.module_map.cycle_mode();
     }
     eprintln!("synthetic mode={:?}", start.elapsed() / 1000);
+    app.module_map.mode = Mode::Imports;
+    assert!(app.module_map.choices().len() > 1);
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         app.module_map.move_by(1);
