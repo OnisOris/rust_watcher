@@ -46,11 +46,27 @@ pub(super) fn conditions(attrs: &[syn::Attribute]) -> Vec<String> {
     }
     result
 }
+pub(super) fn conditions_limited(attrs: &[syn::Attribute]) -> bool {
+    let cfg: Vec<_> = attrs
+        .iter()
+        .filter_map(|a| match &a.meta {
+            syn::Meta::List(l) if l.path.is_ident("cfg") || l.path.is_ident("cfg_attr") => Some(l),
+            _ => None,
+        })
+        .collect();
+    cfg.len() > MAX_CONDITIONS
+        || cfg
+            .iter()
+            .any(|l| l.tokens.to_string().len() + 16 > MAX_PATH_BYTES)
+}
 pub(super) fn unit(items: &[Item], source: &str) -> Unit {
     let mut u = Unit::default();
     for item in items {
         match item {
             Item::Mod(m) => {
+                if conditions_limited(&m.attrs) {
+                    u.budgets.push(m.span().start().line);
+                }
                 if m.ident.to_string().len() > MAX_NAME_BYTES {
                     u.budgets.push(m.span().start().line);
                     continue;
@@ -180,6 +196,9 @@ pub(super) fn unit(items: &[Item], source: &str) -> Unit {
                     _ => None,
                 };
                 if let Some((name, attrs)) = name {
+                    if conditions_limited(attrs) {
+                        u.budgets.push(name.span().start().line);
+                    }
                     if name.to_string().len() > MAX_NAME_BYTES {
                         u.budgets.push(name.span().start().line);
                         continue;

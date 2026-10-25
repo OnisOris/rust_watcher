@@ -1,4 +1,79 @@
 use super::*;
+#[test]
+fn coverage_and_resolution_are_independent_typed_and_counted() {
+    let (temp,p,t)=fixture(&[("src/lib.rs", "mod foo {pub struct Bar;} mod consumer {use std::path::Path; use anyhow::Result; use alias::Bar; use crate::foo; use crate::foo::Bar; use crate::foo::*;} #[cfg(test)] mod tests {} make_modules!(); fn work(){use std::fmt;}")]);
+    let g = analyze(temp.path(), &t, &p.architecture, || false);
+    assert_eq!(g.coverage_status, CoverageStatus::Complete);
+    assert_eq!(g.resolution_status, ResolutionStatus::Limited);
+    assert!(!g.partial);
+    assert!(g.partial_reasons.is_empty());
+    let s = &g.resolution_summary;
+    assert_eq!(s.verified_imports, 2);
+    assert_eq!(s.unrooted_imports, 3);
+    assert_eq!(s.unsupported_imports, 1);
+    assert_eq!(s.opaque_declarations, 1);
+    assert_eq!(s.unsupported_scopes, 1);
+    assert_eq!(s.coverage_losses(), 0);
+    assert_eq!(s.conditional_relations, 1);
+    assert_eq!(g.unresolved_count, 6);
+    assert!(g.unresolved.iter().all(|u| !u.coverage_loss));
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        "#[cfg(feature=\"x\")] use unknown::Item;",
+    )
+    .unwrap();
+    let conditional = analyze(temp.path(), &t, &p.architecture, || false);
+    assert!(!conditional.partial);
+    assert_eq!(conditional.conditional_relations, 1);
+    assert_eq!(
+        g.nodes
+            .iter()
+            .find(|n| n.name == "consumer")
+            .unwrap()
+            .status,
+        ModuleStatus::Resolved
+    );
+    for (source, kind) in [
+        ("mod missing;", RelationIssueKind::MissingModuleSource),
+        ("fn broken(", RelationIssueKind::ParseFailure),
+        (
+            "#[cfg_attr(test,path=\"alternate.rs\")] mod unknown;",
+            RelationIssueKind::UnsupportedDeclaration,
+        ),
+    ] {
+        std::fs::write(temp.path().join("src/lib.rs"), source).unwrap();
+        let g = analyze(temp.path(), &t, &p.architecture, || false);
+        assert!(g.partial);
+        assert_ne!(g.coverage_status, CoverageStatus::Complete);
+        assert!(g
+            .unresolved
+            .iter()
+            .any(|u| u.issue_kind == kind && u.coverage_loss));
+        assert_eq!(g.resolution_summary.coverage_losses(), 1);
+    }
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        "#[cfg(a)] mod same {} #[cfg(b)] mod same {} mod consumer {use crate::same;}",
+    )
+    .unwrap();
+    let g = analyze(temp.path(), &t, &p.architecture, || false);
+    assert!(!g.partial);
+    assert_eq!(g.resolution_summary.ambiguous_imports, 1);
+    assert!(g.verified_import_edges.is_empty());
+    let g = analyze(temp.path(), &t, &p.architecture, || true);
+    assert!(g.partial);
+    assert_eq!(g.coverage_status, CoverageStatus::Partial);
+    assert!(g.resolution_summary.cancelled > 0);
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        " ".repeat(crate::maintainability::MAX_AST_FILE_BYTES as usize + 1),
+    )
+    .unwrap();
+    let g = analyze(temp.path(), &t, &p.architecture, || false);
+    assert!(g.partial);
+    assert_eq!(g.resolution_summary.resource_skips, 1);
+    assert_eq!(g.resolution_summary.parse_failures, 0);
+}
 fn fixture(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::project::Project, RepositoryTree) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -322,6 +397,7 @@ fn full_unresolved_counts_survive_retention_budget_and_line_moves_do_not_change_
         g.issue(
             "module",
             "import",
+            RelationIssueKind::UnrootedImport,
             Path::new("src/lib.rs"),
             n + 1,
             "unresolved",
@@ -330,6 +406,12 @@ fn full_unresolved_counts_survive_retention_budget_and_line_moves_do_not_change_
     assert_eq!(g.unresolved.len(), MAX_DETAILS);
     assert_eq!(g.unresolved_count, MAX_DETAILS + 3);
     assert_eq!(g.unresolved_by_module["module"].imports, MAX_DETAILS + 3);
+    assert_eq!(g.resolution_summary.unrooted_imports, MAX_DETAILS + 3);
+    assert_eq!(
+        g.resolution_by_module["module"].unrooted_imports,
+        MAX_DETAILS + 3
+    );
+    assert!(!g.partial);
     let (temp, p, t) = fixture(&[("src/lib.rs", "mod inline {pub fn f(){}}")]);
     let before = analyze(temp.path(), &t, &p.architecture, || false);
     std::fs::write(

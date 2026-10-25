@@ -654,6 +654,9 @@ fn modules_are_exact_structural_reports_without_ra_or_git() {
     assert_eq!(d["verifiedImportEdges"].as_array().unwrap().len(), 1);
     assert_eq!(d["partial"], false);
     assert_eq!(d["unresolvedCount"], 0);
+    assert_eq!(d["coverageStatus"], "complete");
+    assert_eq!(d["resolutionStatus"], "verifiedOnly");
+    assert_eq!(d["resolutionSummary"]["verifiedImports"], 1);
     assert_eq!(d["nodes"][2]["declarationLine"], 1);
     let failure = Command::new(env!("CARGO_BIN_EXE_wt"))
         .env("PATH", tools.path())

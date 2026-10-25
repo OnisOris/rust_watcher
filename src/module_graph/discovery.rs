@@ -6,11 +6,13 @@ use crate::{
     repository::RepoEntryKind,
 };
 use std::collections::BTreeMap;
+use RelationIssueKind as I;
+type SourceError = (RelationIssueKind, String);
 
 struct Builder<'a, F> {
     root: &'a Path,
     allowed: BTreeSet<PathBuf>,
-    cache: BTreeMap<PathBuf, Result<Unit, String>>,
+    cache: BTreeMap<PathBuf, Result<Unit, SourceError>>,
     graph: ModuleGraph,
     budget: u64,
     summary_budget: usize,
@@ -20,12 +22,15 @@ struct Builder<'a, F> {
     pending: Vec<(String, imports::UseSpec)>,
 }
 impl<F: Fn() -> bool> Builder<'_, F> {
-    fn load(&mut self, path: &Path) -> Result<Unit, String> {
+    fn load(&mut self, path: &Path) -> Result<Unit, SourceError> {
         if let Some(u) = self.cache.get(path) {
             return u.clone();
         }
         if !self.allowed.contains(path) {
-            return Err("source missing, ignored, symlinked, or outside RepositoryTree".into());
+            return Err((
+                I::MissingModuleSource,
+                "source missing, ignored, symlinked, or outside RepositoryTree".into(),
+            ));
         }
         if !self
             .root
@@ -33,26 +38,51 @@ impl<F: Fn() -> bool> Builder<'_, F> {
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_file())
         {
-            return Err("source is no longer a regular repository file".into());
+            return Err((
+                I::MissingModuleSource,
+                "source is no longer a regular repository file".into(),
+            ));
         }
-        let result =
-            maintainability::read_source(&self.root.join(path), &mut self.budget, self.cancelled)
-                .and_then(|s| {
-                    let file =
-                        maintainability::parse_file_at_depth(&s, self.cancelled, MAX_TOKEN_DEPTH)
-                            .map_err(|e| match e {
-                            SyntaxFailure::Parse(s) => s,
-                            SyntaxFailure::Resource(s) => s.into(),
-                        })?;
-                    let mut u = unit(&file.items, &s);
-                    u.conditions = conditions(&file.attrs);
-                    let bytes = u.bytes();
-                    if bytes > self.summary_budget {
-                        return Err("module summary byte budget".into());
-                    }
-                    self.summary_budget -= bytes;
-                    Ok(u)
-                });
+        let result = maintainability::read_source_typed(
+            &self.root.join(path),
+            &mut self.budget,
+            self.cancelled,
+        )
+        .map_err(|(kind, message)| {
+            (
+                match kind {
+                    maintainability::ReadFailure::Read => I::ReadFailure,
+                    maintainability::ReadFailure::Resource => I::ResourceLimit,
+                    maintainability::ReadFailure::Cancelled => I::Cancelled,
+                },
+                message,
+            )
+        })
+        .and_then(|s| {
+            let file = maintainability::parse_file_at_depth(&s, self.cancelled, MAX_TOKEN_DEPTH)
+                .map_err(|e| match e {
+                    SyntaxFailure::Parse(s) => (I::ParseFailure, s),
+                    SyntaxFailure::Resource(s) => (
+                        if (self.cancelled)() {
+                            I::Cancelled
+                        } else {
+                            I::ResourceLimit
+                        },
+                        s.into(),
+                    ),
+                })?;
+            let mut u = unit(&file.items, &s);
+            u.conditions = conditions(&file.attrs);
+            if super::source::conditions_limited(&file.attrs) {
+                u.budgets.push(1);
+            }
+            let bytes = u.bytes();
+            if bytes > self.summary_budget {
+                return Err((I::ResourceLimit, "module summary byte budget".into()));
+            }
+            self.summary_budget -= bytes;
+            Ok(u)
+        });
         if result.is_ok() {
             self.graph.parsed_files += 1;
         }
@@ -65,15 +95,16 @@ impl<F: Fn() -> bool> Builder<'_, F> {
         node.conditions.dedup();
         if !node.conditions.is_empty() {
             node.status = ModuleStatus::DeclaredConditional;
-            self.graph.partial = true;
-            self.graph
-                .partial_reasons
-                .insert("conditional declarations are not evaluated".into());
         }
         if (self.cancelled)() || node.depth > MAX_DEPTH || self.graph.nodes.len() >= MAX_NODES {
             self.graph.issue(
                 &node.id,
                 "budget",
+                if (self.cancelled)() {
+                    I::Cancelled
+                } else {
+                    I::ResourceLimit
+                },
                 &node.declaration_file,
                 node.declaration_line,
                 "cancelled or module node/depth budget reached",
@@ -85,6 +116,7 @@ impl<F: Fn() -> bool> Builder<'_, F> {
             self.graph.issue(
                 &id,
                 "declaration",
+                I::AmbiguousDeclaration,
                 &node.declaration_file,
                 node.declaration_line,
                 "duplicate structural identity",
@@ -99,6 +131,7 @@ impl<F: Fn() -> bool> Builder<'_, F> {
             self.graph.issue(
                 &id,
                 "budget",
+                I::ResourceLimit,
                 &file,
                 node.declaration_line,
                 "module model byte budget",
@@ -112,6 +145,7 @@ impl<F: Fn() -> bool> Builder<'_, F> {
             self.graph.issue(
                 &id,
                 "budget",
+                I::ResourceLimit,
                 &file,
                 node.declaration_line,
                 "module proof-table byte budget",
@@ -126,18 +160,26 @@ impl<F: Fn() -> bool> Builder<'_, F> {
                 self.pending_budget -= bytes;
                 self.pending.push((id.clone(), spec.clone()));
             } else {
-                self.graph
-                    .issue(&id, "budget", &file, spec.line, "import budget reached");
+                self.graph.issue(
+                    &id,
+                    "budget",
+                    I::ResourceLimit,
+                    &file,
+                    spec.line,
+                    "import budget reached",
+                );
                 break;
             }
         }
         for (line, reason) in u.opaque {
-            self.graph.issue(&id, "macro", &file, line, reason);
+            self.graph
+                .issue(&id, "macro", I::MacroOpaque, &file, line, reason);
         }
         for line in u.locals {
             self.graph.issue(
                 &id,
                 "scope",
+                I::UnsupportedScope,
                 &file,
                 line,
                 "block-local mod/use is outside v1 module scope; not inferred",
@@ -147,6 +189,7 @@ impl<F: Fn() -> bool> Builder<'_, F> {
             self.graph.issue(
                 &id,
                 "budget",
+                I::ResourceLimit,
                 &file,
                 line,
                 "module label/path/use summary budget",
@@ -157,6 +200,11 @@ impl<F: Fn() -> bool> Builder<'_, F> {
                 self.graph.issue(
                     &id,
                     "budget",
+                    if (self.cancelled)() {
+                        I::Cancelled
+                    } else {
+                        I::ResourceLimit
+                    },
                     &file,
                     d.line,
                     "cancelled or node budget reached",
@@ -188,14 +236,21 @@ impl<F: Fn() -> bool> Builder<'_, F> {
                 status: ModuleStatus::Resolved,
             };
             if child.depth > MAX_DEPTH {
-                self.graph
-                    .issue(&id, "budget", &file, d.line, "module depth budget");
+                self.graph.issue(
+                    &id,
+                    "budget",
+                    I::ResourceLimit,
+                    &file,
+                    d.line,
+                    "module depth budget",
+                );
                 continue;
             }
             if self.graph.node(&child_id).is_some() {
                 self.graph.issue(
                     &id,
                     "declaration",
+                    I::AmbiguousDeclaration,
                     &file,
                     d.line,
                     "duplicate module declaration",
@@ -206,66 +261,78 @@ impl<F: Fn() -> bool> Builder<'_, F> {
                 from: id.clone(),
                 to: child_id.clone(),
             });
-            let resolved = if d.invalid {
-                Err("conditional/unsupported path or macro attribute; not guessed".into())
-            } else if let Some(inline) = d.inline {
-                child.source_file = Some(file.clone());
-                let base = if node.inline {
-                    dir.clone()
+            let resolved =
+                if d.invalid {
+                    Err((
+                        I::UnsupportedDeclaration,
+                        "conditional/unsupported path or macro attribute; not guessed".into(),
+                    ))
+                } else if let Some(inline) = d.inline {
+                    child.source_file = Some(file.clone());
+                    let base = if node.inline {
+                        dir.clone()
+                    } else {
+                        file.parent().unwrap_or(Path::new("")).into()
+                    };
+                    let child_dir = normalize(&if let Some(path) = &d.path {
+                        base.join(path)
+                    } else {
+                        dir.join(&d.name)
+                    })
+                    .ok_or_else(|| {
+                        (
+                            I::MissingModuleSource,
+                            "inline path escapes workspace".to_string(),
+                        )
+                    });
+                    child_dir.map(|dir| (*inline, dir, None))
                 } else {
-                    file.parent().unwrap_or(Path::new("")).into()
-                };
-                let child_dir = normalize(&if let Some(path) = &d.path {
-                    base.join(path)
-                } else {
-                    dir.join(&d.name)
-                })
-                .ok_or_else(|| "inline path escapes workspace".to_string());
-                child_dir.map(|dir| (*inline, dir, None))
-            } else {
-                // Direct #[path] is relative to the containing source directory;
-                // within inline modules it is relative to their module directory.
-                let base = if node.inline {
-                    dir.clone()
-                } else {
-                    file.parent().unwrap_or(Path::new("")).into()
-                };
-                let candidates = if let Some(path) = &d.path {
-                    normalize(&base.join(path)).into_iter().collect::<Vec<_>>()
-                } else {
-                    vec![
-                        dir.join(format!("{}.rs", d.name)),
-                        dir.join(&d.name).join("mod.rs"),
-                    ]
-                };
-                let found: Vec<_> = candidates
-                    .into_iter()
-                    .filter(|p| self.root.join(p).symlink_metadata().is_ok())
-                    .collect();
-                if found.len() != 1 || !self.allowed.contains(&found[0]) {
-                    Err(
+                    // Direct #[path] is relative to the containing source directory;
+                    // within inline modules it is relative to their module directory.
+                    let base = if node.inline {
+                        dir.clone()
+                    } else {
+                        file.parent().unwrap_or(Path::new("")).into()
+                    };
+                    let candidates = if let Some(path) = &d.path {
+                        normalize(&base.join(path)).into_iter().collect::<Vec<_>>()
+                    } else {
+                        vec![
+                            dir.join(format!("{}.rs", d.name)),
+                            dir.join(&d.name).join("mod.rs"),
+                        ]
+                    };
+                    let found: Vec<_> = candidates
+                        .into_iter()
+                        .filter(|p| self.root.join(p).symlink_metadata().is_ok())
+                        .collect();
+                    if found.len() != 1 || !self.allowed.contains(&found[0]) {
+                        Err((if found.len()>1 {I::AmbiguousDeclaration}else{I::MissingModuleSource},
                         "missing/ignored/outside source or both foo.rs and foo/mod.rs (ambiguous)"
                             .into(),
-                    )
-                } else {
-                    let path = found[0].clone();
-                    child.source_file = Some(path.clone());
-                    if stack.contains(&path) {
-                        Err("recursive physical file inclusion; traversal stopped".into())
+                    ))
                     } else {
-                        self.load(&path).map(|u| {
-                            let directory = if path.file_name().is_some_and(|n| n == "mod.rs")
-                                || d.path.is_some()
-                            {
-                                path.parent().unwrap_or(Path::new("")).into()
-                            } else {
-                                path.with_extension("")
-                            };
-                            (u, directory, Some(path))
-                        })
+                        let path = found[0].clone();
+                        child.source_file = Some(path.clone());
+                        if stack.contains(&path) {
+                            Err((
+                                I::RecursiveSource,
+                                "recursive physical file inclusion; traversal stopped".into(),
+                            ))
+                        } else {
+                            self.load(&path).map(|u| {
+                                let directory = if path.file_name().is_some_and(|n| n == "mod.rs")
+                                    || d.path.is_some()
+                                {
+                                    path.parent().unwrap_or(Path::new("")).into()
+                                } else {
+                                    path.with_extension("")
+                                };
+                                (u, directory, Some(path))
+                            })
+                        }
                     }
-                }
-            };
+                };
             match resolved {
                 Ok((u, dir, path)) => {
                     if let Some(p) = &path {
@@ -276,15 +343,21 @@ impl<F: Fn() -> bool> Builder<'_, F> {
                         stack.pop();
                     }
                 }
-                Err(reason) => {
+                Err((kind, reason)) => {
                     child.status = ModuleStatus::Unresolved;
                     self.graph
-                        .issue(&child_id, "declaration", &file, d.line, reason);
+                        .issue(&child_id, "declaration", kind, &file, d.line, reason);
                     if self.graph.reserve_node(&child) {
                         self.graph.nodes.push(child);
                     } else {
-                        self.graph
-                            .issue(&id, "budget", &file, d.line, "module model byte budget");
+                        self.graph.issue(
+                            &id,
+                            "budget",
+                            I::ResourceLimit,
+                            &file,
+                            d.line,
+                            "module model byte budget",
+                        );
                     }
                 }
             }
@@ -342,10 +415,18 @@ pub(super) fn analyze(
     for crate_node in &architecture.nodes {
         for target in &crate_node.targets {
             if b.graph.targets.len() >= MAX_TARGETS || cancelled() {
-                b.graph.partial = true;
-                b.graph
-                    .partial_reasons
-                    .insert("target budget or cancellation".into());
+                b.graph.issue(
+                    &crate_node.id,
+                    "budget",
+                    if cancelled() {
+                        I::Cancelled
+                    } else {
+                        I::ResourceLimit
+                    },
+                    &target.path,
+                    1,
+                    "target budget or cancellation",
+                );
                 break;
             }
             let id = target_id(&crate_node.id, target);
@@ -379,16 +460,17 @@ pub(super) fn analyze(
                     target.path.parent().unwrap_or(Path::new("")).into(),
                     &mut vec![target.path.clone()],
                 ),
-                Err(reason) => {
+                Err((kind, reason)) => {
                     node.status = ModuleStatus::Unresolved;
                     b.graph
-                        .issue(&node.id, "parse/source", &target.path, 1, reason);
+                        .issue(&node.id, "parse/source", kind, &target.path, 1, reason);
                     if b.graph.reserve_node(&node) {
                         b.graph.nodes.push(node);
                     } else {
                         b.graph.issue(
                             &node.id,
                             "budget",
+                            I::ResourceLimit,
                             &target.path,
                             1,
                             "module model byte budget",
@@ -426,7 +508,7 @@ pub(super) fn analyze(
             .then(a.module_id.cmp(&b.module_id))
             .then(a.reason.cmp(&b.reason))
     });
-    b.graph.conditional_relations = b
+    b.graph.conditional_relations += b
         .graph
         .nodes
         .iter()
@@ -437,5 +519,43 @@ pub(super) fn analyze(
             .iter()
             .filter(|e| !e.conditions.is_empty())
             .count();
+    b.graph.coverage_status = if b.graph.partial {
+        CoverageStatus::Partial
+    } else {
+        CoverageStatus::Complete
+    };
+    if b.graph.parsed_files == 0
+        && !b.graph.targets.is_empty()
+        && b.graph
+            .nodes
+            .iter()
+            .all(|n| n.status == ModuleStatus::Unresolved)
+        && !cancelled()
+    {
+        b.graph.coverage_status = CoverageStatus::Error;
+    }
+    b.graph.resolution_summary.verified_imports = b.graph.verified_import_edges.len();
+    b.graph.resolution_summary.conditional_relations = b.graph.conditional_relations;
+    for n in &b.graph.nodes {
+        let summary = b
+            .graph
+            .resolution_by_module
+            .entry(n.id.clone())
+            .or_default();
+        if !n.conditions.is_empty() {
+            summary.conditional_relations += 1;
+        }
+    }
+    for e in &b.graph.verified_import_edges {
+        let s = b
+            .graph
+            .resolution_by_module
+            .entry(e.from.clone())
+            .or_default();
+        s.verified_imports += 1;
+        if !e.conditions.is_empty() {
+            s.conditional_relations += 1;
+        }
+    }
     b.graph
 }

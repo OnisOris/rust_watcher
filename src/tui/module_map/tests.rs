@@ -1,4 +1,168 @@
 use super::*;
+#[test]
+fn large_neighborhoods_scroll_without_dropping_nodes_and_history_is_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='many'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    let mut source = (0..120)
+        .map(|i| format!("mod m{i:03}{{}}\n"))
+        .collect::<String>();
+    source.push_str("mod consumer{\n");
+    for i in 0..120 {
+        source.push_str(&format!("use crate::m{i:03};\n"));
+    }
+    source.push('}');
+    std::fs::write(root.join("src/lib.rs"), source).unwrap();
+    let p = crate::project::Project::discover(root).unwrap();
+    let tree = crate::repository::scan(root).unwrap();
+    let g = crate::module_graph::analyze(root, &tree, &p.architecture, || false);
+    let consumer = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "consumer")
+        .unwrap()
+        .id
+        .clone();
+    let mut app = App::new(p);
+    app.module_map.apply(g);
+    app.switch_view(super::super::app::View::Map);
+    app.module_map.focus = consumer.clone();
+    app.module_map.selected = consumer;
+    app.module_map.mode = Mode::Imports;
+    for _ in 0..120 {
+        app.module_map.move_by(1);
+    }
+    assert_eq!(app.module_map.choices().len(), 121);
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+    let text: String = t
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("m119"));
+    assert!(text.contains("of 120 related"));
+    for _ in 0..100 {
+        app.module_map.cycle_mode();
+    }
+    assert_eq!(app.module_map.history.len(), 50);
+}
+#[tokio::test]
+async fn relationship_views_preserve_identity_history_and_observable_context() {
+    use crossterm::event::KeyCode as K;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='relations'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"),"mod model{pub struct A;pub struct B;} mod tui{use crate::model::A; #[cfg(test)] use crate::model::B; use std::fmt;} mod user{use crate::tui;} mod empty{} mod missing;").unwrap();
+    let p = crate::project::Project::discover(root).unwrap();
+    let tree = crate::repository::scan(root).unwrap();
+    let g = crate::module_graph::analyze(root, &tree, &p.architecture, || false);
+    let id = |name: &str| g.nodes.iter().find(|n| n.name == name).unwrap().id.clone();
+    let (tui, model, user, empty) = (id("tui"), id("model"), id("user"), id("empty"));
+    let mut app = App::new(p);
+    app.module_map.apply(g);
+    app.explorer.apply_tree(tree);
+    app.analyzer_state = super::super::app::AnalyzerState::Error("RA missing".into());
+    app.switch_view(super::super::app::View::Map);
+    app.module_map.selected = tui.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    press(&mut app, K::Char('v'), &tx).await;
+    assert_eq!(app.module_map.focus, tui);
+    assert_eq!(app.module_map.selected, tui);
+    assert_eq!(app.module_map.mode, Mode::Imports);
+    assert_eq!(
+        app.module_map
+            .choices()
+            .iter()
+            .map(|n| n.id.clone())
+            .collect::<Vec<_>>(),
+        vec![tui.clone(), model.clone()]
+    );
+    let link = &app.module_map.index.nodes[&tui].outgoing[0];
+    assert_eq!(link.records, 2);
+    assert_eq!(link.conditional, 1);
+    for (w, h) in [(80, 20), (100, 30), (120, 35), (160, 45)] {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+        let text: String = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Imports"));
+        assert!(text.contains("2 records"));
+        assert!(text.contains("[cfg] 1"));
+        assert!(text.contains("MODULE · crate::tui"));
+    }
+    press(&mut app, K::Char('v'), &tx).await;
+    assert_eq!(app.module_map.mode, Mode::UsedBy);
+    assert_eq!(app.module_map.choices()[1].id, user);
+    press(&mut app, K::Char('j'), &tx).await;
+    press(&mut app, K::Enter, &tx).await;
+    assert_eq!(app.module_map.focus, user);
+    assert!(super::inspector::details(&app)
+        .iter()
+        .any(|l| l.to_string().contains("MODULE · crate::user")));
+    press(&mut app, K::Esc, &tx).await;
+    assert_eq!(app.module_map.focus, tui);
+    assert_eq!(app.module_map.selected, user);
+    assert_eq!(app.module_map.mode, Mode::UsedBy);
+    press(&mut app, K::Char('o'), &tx).await;
+    assert_eq!(
+        app.explorer.file.as_ref().unwrap().path,
+        std::path::Path::new("src/lib.rs")
+    );
+    assert!(matches!(
+        rx.recv().await,
+        Some(super::super::worker::AnalyzerCommand::InspectFile { .. })
+    ));
+    app.switch_view(super::super::app::View::Map);
+    app.module_map.selected = empty.clone();
+    app.module_map.focus = empty;
+    app.module_map.mode = Mode::Imports;
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+    let text: String = t
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("No verified outgoing imports"));
+    let before = app.module_map.selected.clone();
+    super::super::event::apply_repository(
+        &mut app,
+        super::super::RepositoryEvent::Metrics(Default::default()),
+    );
+    assert_eq!(app.module_map.selected, before);
+    assert!(!app.module_map.show_files);
+    press(&mut app, K::Char('f'), &tx).await;
+    assert!(app.module_map.show_files);
+    press(&mut app, K::Char('a'), &tx).await;
+    assert!(app.module_map.show_limits);
+    let detail = super::inspector::details(&app)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(detail.contains("src/lib.rs"));
+    assert!(detail.contains("missing/ignored"));
+}
 #[tokio::test]
 async fn multi_crate_map_drills_selected_package_and_returns_to_same_crate() {
     use super::super::app::View;
@@ -107,7 +271,9 @@ fn module_map_performance() {
         app.metrics = Some(metrics);
         app.maintainability = Some(ast);
         app.hotspots = Some(hotspots);
+        let start = std::time::Instant::now();
         app.module_map.apply(graph);
+        timings.push(format!("indexes={:?}", start.elapsed()));
         let crate_id = app
             .project
             .architecture
@@ -119,6 +285,27 @@ fn module_map_performance() {
             .id
             .clone();
         app.module_map.enter(&crate_id);
+        let g = app.module_map.graph.as_ref().unwrap();
+        let focus = g
+            .nodes
+            .iter()
+            .filter(|n| n.target_id == app.module_map.target_id)
+            .max_by_key(|n| {
+                let e = &app.module_map.index.nodes[&n.id];
+                e.incoming.len() + e.outgoing.len()
+            })
+            .unwrap()
+            .id
+            .clone();
+        let e = &app.module_map.index.nodes[&focus];
+        eprintln!(
+            "render focus={} outgoing={} incoming={}",
+            g.node(&focus).unwrap().qualified_path,
+            e.outgoing.len(),
+            e.incoming.len()
+        );
+        app.module_map.focus = focus.clone();
+        app.module_map.selected = focus;
         app.switch_view(super::super::app::View::Map);
         app.color_mode = theme::ColorMode::TrueColor;
         let mut terminal =
@@ -126,15 +313,107 @@ fn module_map_performance() {
         terminal
             .draw(|f| super::super::ui::render(f, &app))
             .unwrap();
-        let start = std::time::Instant::now();
-        for _ in 0..100 {
-            terminal
-                .draw(|f| super::super::ui::render(f, &app))
-                .unwrap();
+        for mode in [Mode::Hierarchy, Mode::Imports, Mode::UsedBy] {
+            app.module_map.mode = mode;
+            let start = std::time::Instant::now();
+            for _ in 0..100 {
+                terminal
+                    .draw(|f| super::super::ui::render(f, &app))
+                    .unwrap();
+            }
+            timings.push(format!(
+                "{} render={:?}/frame",
+                mode.label(),
+                start.elapsed() / 100
+            ));
         }
-        timings.push(format!("map render={:?}/frame", start.elapsed() / 100));
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            app.module_map.cycle_mode();
+        }
+        timings.push(format!("mode={:?}/op", start.elapsed() / 1000));
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            app.module_map.move_by(1);
+            app.module_map.move_by(-1);
+        }
+        timings.push(format!("selection={:?}/op", start.elapsed() / 2000));
         eprintln!("{}", timings.join(" · "));
     }
+}
+#[test]
+#[ignore = "manual synthetic graph/index/view timings, no wall-clock assertions"]
+fn synthetic_relationship_performance() {
+    let (_temp, mut app) = guided_fixture();
+    let mut g = app.module_map.graph.take().unwrap();
+    let root = g
+        .nodes
+        .iter()
+        .find(|n| n.parent_id.is_none() && n.target_id == app.module_map.target_id)
+        .unwrap()
+        .clone();
+    g.nodes = vec![root.clone()];
+    g.verified_import_edges.clear();
+    g.containment_edges.clear();
+    let start = std::time::Instant::now();
+    for i in 0..2000 {
+        let mut n = root.clone();
+        n.id = format!("synthetic:{i}");
+        n.name = format!("module_{i:04}");
+        n.qualified_path = format!("crate::{}", n.name);
+        n.parent_id = Some(root.id.clone());
+        n.depth = 1;
+        g.nodes.push(n);
+    }
+    for i in 0..2000 {
+        for j in 1..=5 {
+            g.verified_import_edges
+                .push(crate::module_graph::ImportEdge {
+                    from: format!("synthetic:{i}"),
+                    to: format!("synthetic:{}", (i + j) % 2000),
+                    source_file: root.declaration_file.clone(),
+                    line: 1,
+                    import_path: format!("crate::module_{}", (i + j) % 2000),
+                    alias: None,
+                    public: false,
+                    conditions: vec![],
+                });
+        }
+    }
+    eprintln!(
+        "synthetic 2001 nodes/10000 records model={:?}",
+        start.elapsed()
+    );
+    let start = std::time::Instant::now();
+    app.module_map.apply(g);
+    eprintln!("synthetic indexes={:?}", start.elapsed());
+    app.module_map.selected = "synthetic:0".into();
+    app.module_map.focus = "synthetic:0".into();
+    app.switch_view(super::super::app::View::Map);
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 45)).unwrap();
+    for mode in [Mode::Hierarchy, Mode::Imports, Mode::UsedBy] {
+        app.module_map.mode = mode;
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+        }
+        eprintln!(
+            "synthetic {} render={:?}",
+            mode.label(),
+            start.elapsed() / 100
+        );
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..1000 {
+        app.module_map.cycle_mode();
+    }
+    eprintln!("synthetic mode={:?}", start.elapsed() / 1000);
+    let start = std::time::Instant::now();
+    for _ in 0..1000 {
+        app.module_map.move_by(1);
+        app.module_map.move_by(-1);
+    }
+    eprintln!("synthetic selection={:?}", start.elapsed() / 2000);
 }
 async fn press(
     app: &mut App,
@@ -227,7 +506,7 @@ fn module_loading_import_styles_and_no_color_keep_relationship_identity() {
             public: false,
             conditions: vec![],
         });
-    app.module_map.graph = Some(g);
+    app.module_map.apply(g);
     app.module_map.focus = b.clone();
     app.module_map.selected = b;
     terminal
@@ -238,6 +517,11 @@ fn module_loading_import_styles_and_no_color_keep_relationship_identity() {
         .content
         .iter()
         .any(|c| c.symbol() == "▶" && c.fg == theme::ACCENT));
+    app.module_map.cycle_mode();
+    terminal
+        .draw(|f| super::super::ui::render(f, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
     assert!(buffer
         .content
         .iter()
@@ -252,9 +536,8 @@ fn module_loading_import_styles_and_no_color_keep_relationship_identity() {
         .iter()
         .all(|c| c.fg == Color::Reset && c.bg == Color::Reset));
     let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("mod▶"));
     assert!(text.contains("use▶"));
-    assert!(text.contains("outside scope"));
+    assert!(text.contains("Imports"));
 }
 #[tokio::test]
 async fn guided_routes_have_observable_outcomes_and_unavailable_notices() {

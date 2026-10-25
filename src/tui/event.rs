@@ -204,6 +204,16 @@ pub(super) async fn handle_key(
             KeyCode::Char('3') => open_calls(app, commands).await?,
             KeyCode::Char('4') => app.switch_view(View::Explorer),
             KeyCode::Char('5') => app.switch_view(View::Map),
+            KeyCode::Char('v') if app.view == View::Map && app.module_map.active => {
+                app.module_map.cycle_mode();
+                app.map.inspector_scroll = 0;
+            }
+            KeyCode::Char('f') if app.view == View::Map && app.module_map.active => {
+                app.module_map.show_files = !app.module_map.show_files;
+            }
+            KeyCode::Char('a') if app.view == View::Map && app.module_map.active => {
+                app.module_map.show_limits = !app.module_map.show_limits;
+            }
             KeyCode::Char('m') if app.view == View::Map => {
                 app.module_map.enter(&app.map.selected);
                 app.map.inspector_scroll = 0;

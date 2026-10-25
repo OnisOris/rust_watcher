@@ -1,4 +1,6 @@
 //! Thin, cached ModuleGraph adapter for Map. No source reads or AST work here.
+mod index;
+mod inspector;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -18,6 +20,22 @@ use ratatui::{
     Frame,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Mode {
+    #[default]
+    Hierarchy,
+    Imports,
+    UsedBy,
+}
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hierarchy => "Hierarchy",
+            Self::Imports => "Imports",
+            Self::UsedBy => "Used by",
+        }
+    }
+}
 pub(super) struct State {
     pub active: bool,
     pub graph: Option<ModuleGraph>,
@@ -26,7 +44,11 @@ pub(super) struct State {
     pub target_id: String,
     pub focus: String,
     pub selected: String,
-    pub history: Vec<(String, String, String)>,
+    pub history: Vec<(String, String, String, Mode)>,
+    pub mode: Mode,
+    pub show_files: bool,
+    pub show_limits: bool,
+    index: index::Index,
 }
 impl State {
     pub fn new(a: &Architecture) -> Self {
@@ -39,9 +61,14 @@ impl State {
             focus: String::new(),
             selected: String::new(),
             history: vec![],
+            mode: Mode::Hierarchy,
+            show_files: false,
+            show_limits: false,
+            index: Default::default(),
         }
     }
     pub fn apply(&mut self, g: ModuleGraph) {
+        self.index = index::Index::build(&g);
         self.graph = Some(g);
         self.initialize();
     }
@@ -74,6 +101,7 @@ impl State {
             self.focus.clear();
             self.target_id.clear();
             self.history.clear();
+            self.mode = Mode::Hierarchy;
         }
         self.active = true;
         self.initialize();
@@ -81,11 +109,37 @@ impl State {
     pub fn choices(&self) -> Vec<&ModuleNode> {
         let Some(g) = &self.graph else { return vec![] };
         let mut nodes = vec![];
-        if let Some(n) = g.node(&self.focus) {
+        if let Some(n) = self.node(g, &self.focus) {
             nodes.push(n);
         }
-        nodes.extend(g.children(&self.focus));
+        if let Some(e) = self.index.nodes.get(&self.focus) {
+            let ids: Vec<_> = match self.mode {
+                Mode::Hierarchy => e.children.iter().map(String::as_str).collect(),
+                Mode::Imports => e.outgoing.iter().map(|l| l.id.as_str()).collect(),
+                Mode::UsedBy => e.incoming.iter().map(|l| l.id.as_str()).collect(),
+            };
+            nodes.extend(
+                ids.into_iter()
+                    .filter(|id| *id != self.focus)
+                    .filter_map(|id| self.node(g, id)),
+            );
+        }
         nodes
+    }
+    fn node<'a>(&self, g: &'a ModuleGraph, id: &str) -> Option<&'a ModuleNode> {
+        self.index
+            .nodes
+            .get(id)
+            .and_then(|e| g.nodes.get(e.position))
+    }
+    pub fn cycle_mode(&mut self) {
+        self.remember();
+        self.focus = self.selected.clone();
+        self.mode = match self.mode {
+            Mode::Hierarchy => Mode::Imports,
+            Mode::Imports => Mode::UsedBy,
+            Mode::UsedBy => Mode::Hierarchy,
+        };
     }
     pub fn move_by(&mut self, d: isize) {
         let nodes = self.choices();
@@ -111,16 +165,18 @@ impl State {
             self.target_id.clone(),
             self.focus.clone(),
             self.selected.clone(),
+            self.mode,
         ));
         if self.history.len() > 50 {
             self.history.remove(0);
         }
     }
     pub fn back(&mut self) {
-        if let Some((target, focus, selected)) = self.history.pop() {
+        if let Some((target, focus, selected, mode)) = self.history.pop() {
             self.target_id = target;
             self.focus = focus;
             self.selected = selected;
+            self.mode = mode;
         } else {
             self.active = false;
         }

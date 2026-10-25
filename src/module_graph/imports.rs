@@ -118,7 +118,7 @@ pub(super) fn flatten(item: &syn::ItemUse) -> Vec<UseSpec> {
                 .iter()
                 .any(|n| a.path().is_ident(n))
             }),
-            limited: false,
+            limited: super::source::conditions_limited(&item.attrs),
         },
         &mut out,
     );
@@ -147,23 +147,32 @@ pub(super) fn resolve(
             continue;
         };
         if cancelled() {
-            g.partial = true;
-            g.partial_reasons.insert("cancelled".into());
+            g.issue(
+                &from,
+                "budget",
+                RelationIssueKind::Cancelled,
+                &source.declaration_file,
+                s.line,
+                "cancelled",
+            );
             break;
         }
+        let mut issue_kind = RelationIssueKind::AmbiguousImport;
         let result = (|| -> Result<(String, Vec<String>), &str> {
             if s.limited {
-                g.partial_reasons
-                    .insert("use expansion byte/leaf budget".into());
+                issue_kind = RelationIssueKind::ResourceLimit;
                 return Err("use expansion resource budget; not inferred");
             }
             if s.unsupported_attribute {
+                issue_kind = RelationIssueKind::UnsupportedImport;
                 return Err("conditional or macro import attribute not interpreted");
             }
             if s.glob {
+                issue_kind = RelationIssueKind::UnsupportedImport;
                 return Err("glob import is opaque; no inferred edges");
             }
             if s.absolute {
+                issue_kind = RelationIssueKind::UnrootedImport;
                 return Err("absolute/external crate import; not a local declaration path");
             }
             let mut segments = s.segments.iter().map(String::as_str).peekable();
@@ -177,7 +186,10 @@ pub(super) fn resolve(
                     .parent_id
                     .clone()
                     .ok_or("super outside target root")?,
-                _ => return Err("unrooted path may be external, alias or re-export; not resolved"),
+                _ => {
+                    issue_kind = RelationIssueKind::UnrootedImport;
+                    return Err("unrooted path may be external, alias or re-export; not resolved");
+                }
             };
             while segments.peek() == Some(&"super") {
                 segments.next();
@@ -194,6 +206,7 @@ pub(super) fn resolve(
                     .get(&current)
                     .ok_or("destination module source unavailable")?;
                 if !u.budgets.is_empty() {
+                    issue_kind = RelationIssueKind::ResourceLimit;
                     return Err("namespace summary truncated by resource budget");
                 }
                 if u.modules.iter().filter(|m| m.name == *segment).count() > 1 {
@@ -244,11 +257,6 @@ pub(super) fn resolve(
         })();
         match result {
             Ok((to, conditions)) => {
-                if !conditions.is_empty() {
-                    g.partial = true;
-                    g.partial_reasons
-                        .insert("conditional imports are not evaluated".into());
-                }
                 let edge = ImportEdge {
                     from,
                     to,
@@ -263,6 +271,7 @@ pub(super) fn resolve(
                     g.issue(
                         &edge.from,
                         "budget",
+                        RelationIssueKind::ResourceLimit,
                         &edge.source_file,
                         edge.line,
                         "import model byte budget",
@@ -271,17 +280,27 @@ pub(super) fn resolve(
                 }
                 g.verified_import_edges.push(edge);
             }
-            Err(reason) => g.issue(
-                &from,
-                "import",
-                &source.declaration_file_for_content(),
-                s.line,
-                format!(
-                    "{}{}: {reason}",
-                    s.segments.join("::"),
-                    if s.glob { "::*" } else { "" }
-                ),
-            ),
+            Err(reason) => {
+                if !source.conditions.is_empty() || !s.conditions.is_empty() {
+                    g.conditional_relations += 1;
+                    g.resolution_by_module
+                        .entry(from.clone())
+                        .or_default()
+                        .conditional_relations += 1;
+                }
+                g.issue(
+                    &from,
+                    "import",
+                    issue_kind,
+                    &source.declaration_file_for_content(),
+                    s.line,
+                    format!(
+                        "{}{}: {reason}",
+                        s.segments.join("::"),
+                        if s.glob { "::*" } else { "" }
+                    ),
+                );
+            }
         }
     }
 }

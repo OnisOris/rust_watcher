@@ -3,6 +3,8 @@
 mod discovery;
 mod imports;
 mod source;
+mod status;
+pub use status::{CoverageStatus, RelationIssueKind, ResolutionStatus, ResolutionSummary};
 #[cfg(test)]
 mod tests;
 use crate::{
@@ -86,6 +88,8 @@ pub struct ImportEdge {
 pub struct Unresolved {
     pub module_id: String,
     pub kind: String,
+    pub issue_kind: RelationIssueKind,
+    pub coverage_loss: bool,
     pub reason: String,
     pub source_file: PathBuf,
     pub line: usize,
@@ -105,6 +109,10 @@ pub struct ModuleGraph {
     pub unresolved_by_module: std::collections::BTreeMap<String, UnresolvedCounts>,
     pub conditional_relations: usize,
     pub partial: bool,
+    pub coverage_status: CoverageStatus,
+    pub resolution_status: ResolutionStatus,
+    pub resolution_summary: ResolutionSummary,
+    pub resolution_by_module: std::collections::BTreeMap<String, ResolutionSummary>,
     pub partial_reasons: BTreeSet<String>,
     pub parsed_files: usize,
     pub read_bytes: u64,
@@ -151,11 +159,7 @@ impl ModuleGraph {
     pub fn node(&self, id: &str) -> Option<&ModuleNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
-    pub fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a ModuleNode> {
-        self.nodes
-            .iter()
-            .filter(move |n| n.parent_id.as_deref() == Some(id))
-    }
+    #[cfg(test)]
     pub fn subtree_files(&self, id: &str) -> BTreeSet<PathBuf> {
         let mut ids = BTreeSet::from([id.to_owned()]);
         for _ in 0..MAX_DEPTH {
@@ -175,15 +179,27 @@ impl ModuleGraph {
             .filter_map(|n| n.source_file.clone())
             .collect()
     }
-    fn issue(&mut self, id: &str, kind: &str, file: &Path, line: usize, reason: impl Into<String>) {
+    fn issue(
+        &mut self,
+        id: &str,
+        kind: &str,
+        issue_kind: RelationIssueKind,
+        file: &Path,
+        line: usize,
+        reason: impl Into<String>,
+    ) {
         let reason = reason.into();
-        if kind == "budget"
-            || (reason.starts_with("AST ") && reason.contains("budget"))
-            || reason == "module summary byte budget"
-        {
+        if issue_kind.loses_coverage() {
+            self.partial = true;
+            self.coverage_status = CoverageStatus::Partial;
             self.partial_reasons.insert(reason.clone());
         }
-        self.partial = true;
+        self.resolution_status = ResolutionStatus::Limited;
+        self.resolution_summary.record(issue_kind);
+        self.resolution_by_module
+            .entry(id.into())
+            .or_default()
+            .record(issue_kind);
         self.unresolved_count += 1;
         let count = self.unresolved_by_module.entry(id.into()).or_default();
         if kind == "import" {
@@ -195,6 +211,8 @@ impl ModuleGraph {
             self.unresolved.push(Unresolved {
                 module_id: id.into(),
                 kind: kind.into(),
+                issue_kind,
+                coverage_loss: issue_kind.loses_coverage(),
                 source_file: file.into(),
                 line,
                 reason,
@@ -292,6 +310,7 @@ fn declaration_id(parent: &str, name: &str, path: &str, conditions: &str) -> Str
 }
 pub fn print(g: &ModuleGraph) {
     println!("Rust Module Map · declared structure (not runtime calls)\n");
+    println!("Coverage          {:?}\nResolution        {:?}\nTargets           {}\nModules           {}\nContainment       {}\nVerified imports  {}\nUnclassified imports {}\nMissing sources   {}\nResource skips    {}\nConditional       {}\n",g.coverage_status,g.resolution_status,g.targets.len(),g.nodes.len(),g.containment_edges.len(),g.verified_import_edges.len(),g.resolution_summary.unclassified_imports(),g.resolution_summary.missing_sources,g.resolution_summary.resource_skips,g.conditional_relations);
     for t in &g.targets {
         println!("{} · {}", t.name, t.source_file.display());
         for n in g.nodes.iter().filter(|n| n.target_id == t.id) {
@@ -318,13 +337,19 @@ pub fn print(g: &ModuleGraph) {
             e.import_path
         );
     }
-    for u in &g.unresolved {
+    for u in g.unresolved.iter().take(10) {
         println!(
             "[?] {}:{} {}: {}",
             u.source_file.display(),
             u.line,
             u.kind,
             u.reason
+        );
+    }
+    if g.unresolved_count > 10 {
+        println!(
+            "{} more classifications; use --json for retained details",
+            g.unresolved_count - 10
         );
     }
     println!("Nodes {} · containment {} · verified imports {} · unresolved {} · conditional {} · partial {}",g.nodes.len(),g.containment_edges.len(),g.verified_import_edges.len(),g.unresolved_count,g.conditional_relations,g.partial);

@@ -284,19 +284,36 @@ pub(crate) fn read_source(
     budget: &mut u64,
     cancelled: &impl Fn() -> bool,
 ) -> Result<String, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| format!("read: {e}"))?;
-    let size = file.metadata().map_err(|e| format!("metadata: {e}"))?.len();
+    read_source_typed(path, budget, cancelled).map_err(|e| e.1)
+}
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReadFailure {
+    Read,
+    Resource,
+    Cancelled,
+}
+pub(crate) fn read_source_typed(
+    path: &Path,
+    budget: &mut u64,
+    cancelled: &impl Fn() -> bool,
+) -> Result<String, (ReadFailure, String)> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| (ReadFailure::Read, format!("read: {e}")))?;
+    let size = file
+        .metadata()
+        .map_err(|e| (ReadFailure::Read, format!("metadata: {e}")))?
+        .len();
     if size > MAX_AST_FILE_BYTES {
-        return Err("AST per-file byte budget".into());
+        return Err((ReadFailure::Resource, "AST per-file byte budget".into()));
     }
     if size > *budget {
-        return Err("AST total-read byte budget".into());
+        return Err((ReadFailure::Resource, "AST total-read byte budget".into()));
     }
     let mut bytes = Vec::with_capacity(size as usize);
     let mut chunk = [0; 64 * 1024];
     loop {
         if cancelled() {
-            return Err("cancelled".into());
+            return Err((ReadFailure::Cancelled, "cancelled".into()));
         }
         let allowed = (*budget)
             .min(MAX_AST_FILE_BYTES - bytes.len() as u64)
@@ -305,16 +322,19 @@ pub(crate) fn read_source(
             if bytes.len() as u64 == size {
                 break;
             }
-            return Err("AST byte budget exhausted during read".into());
+            return Err((
+                ReadFailure::Resource,
+                "AST byte budget exhausted during read".into(),
+            ));
         }
         let n = file
             .read(&mut chunk[..allowed])
-            .map_err(|e| format!("read: {e}"))?;
+            .map_err(|e| (ReadFailure::Read, format!("read: {e}")))?;
         *budget -= n as u64;
         if n == 0 {
             break;
         }
         bytes.extend_from_slice(&chunk[..n]);
     }
-    String::from_utf8(bytes).map_err(|_| "invalid UTF-8".into())
+    String::from_utf8(bytes).map_err(|_| (ReadFailure::Read, "invalid UTF-8".into()))
 }
