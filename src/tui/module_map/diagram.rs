@@ -23,16 +23,21 @@ pub(super) struct Key {
     pub width: u16,
     pub height: u16,
     pub focus: String,
-    pub selected: usize,
+    pub page: usize,
     pub mode: Mode,
     pub total: usize,
     pub self_edge: bool,
+}
+pub(super) fn capacity(width: u16, height: u16) -> usize {
+    let cols = (width.saturating_sub(4) / 16).clamp(1, 3) as usize;
+    let rows = (height.saturating_sub(3) / 6) as usize;
+    (cols * rows).clamp(1, 12)
 }
 pub(super) fn layout(
     width: u16,
     height: u16,
     total: usize,
-    selected: usize,
+    page: usize,
     mode: Mode,
     self_edge: bool,
 ) -> Option<Drawing> {
@@ -40,15 +45,9 @@ pub(super) fn layout(
         return None;
     }
     let cols = ((width - 4) / 16).clamp(1, 3) as usize;
-    let rows = ((height - 3) / 6) as usize;
-    let capacity = (cols * rows).clamp(1, 12);
-    let count = total.min(capacity);
-    let start = if selected == 0 {
-        0
-    } else {
-        ((selected - 1) / capacity) * capacity
-    }
-    .min(total.saturating_sub(count));
+    let capacity = capacity(width, height);
+    let start = page.min(total.saturating_sub(1) / capacity) * capacity;
+    let count = total.saturating_sub(start).min(capacity);
     let cw = 22.min(width - 6);
     let center = Rect::new((width - cw) / 2, 0, cw, 3);
     let cx = center.x + cw / 2;
@@ -106,7 +105,6 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, s: &State) -> bool {
     if choices.is_empty() {
         return false;
     }
-    let selected = choices.iter().position(|n| n.id == s.selected).unwrap_or(0);
     let entry = &s.index.nodes[&s.focus];
     let links = match s.mode {
         Mode::Imports => &entry.outgoing,
@@ -118,7 +116,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, s: &State) -> bool {
         width: area.width,
         height: area.height,
         focus: s.focus.clone(),
-        selected,
+        page: s.page.get(),
         mode: s.mode,
         total: choices.len() - 1,
         self_edge,
@@ -131,7 +129,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, s: &State) -> bool {
                 area.width,
                 area.height,
                 key.total,
-                selected,
+                key.page,
                 s.mode,
                 self_edge,
             ),
@@ -313,9 +311,9 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, s: &State) -> bool {
     }
     if d.total == 0 {
         let text = if self_edge {
-            "Verified self-import ↺\nNo other verified neighbors.\nEnter explores children · o source"
+            "Verified self-import ↺\nNo other verified neighbors.\nv switches views · o source"
         } else {
-            match s.mode{Mode::Hierarchy=>"No known child modules. o opens source.",Mode::Imports=>"No verified outgoing imports.\nSome imports may be unclassified.\nEnter explores children · o source",Mode::UsedBy=>"No verified incoming imports.\nNot semantic usage analysis.\nEnter explores children · o source"}
+            match s.mode{Mode::Hierarchy=>"No known child modules. o opens source.",Mode::Imports=>"No verified outgoing imports.\nSome imports may be unclassified.\nv switches views · o source",Mode::UsedBy=>"No verified incoming imports.\nNot semantic usage analysis.\nv switches views · o source"}
         };
         let y = if self_edge { 5 } else { 4 };
         frame.render_widget(

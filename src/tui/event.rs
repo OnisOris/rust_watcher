@@ -228,6 +228,16 @@ pub(super) async fn handle_key(
             KeyCode::Char('g') if app.view == View::Map && app.module_map.active => {
                 app.module_map.diagram = !app.module_map.diagram
             }
+            KeyCode::PageDown | KeyCode::Char(']')
+                if app.view == View::Map && app.module_map.active =>
+            {
+                app.module_map.change_page(1);
+            }
+            KeyCode::PageUp | KeyCode::Char('[')
+                if app.view == View::Map && app.module_map.active =>
+            {
+                app.module_map.change_page(-1);
+            }
             KeyCode::Char('v') if app.view == View::Map && app.module_map.active => {
                 app.module_map.cycle_mode();
                 app.map.inspector_scroll = 0;

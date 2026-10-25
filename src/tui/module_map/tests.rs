@@ -34,11 +34,11 @@ fn large_neighborhoods_scroll_without_dropping_nodes_and_history_is_bounded() {
     app.module_map.focus = consumer.clone();
     app.module_map.selected = consumer;
     app.module_map.mode = Mode::Imports;
-    for _ in 0..120 {
-        app.module_map.move_by(1);
-    }
     assert_eq!(app.module_map.choices().len(), 121);
     let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+    app.module_map.change_page(isize::MAX);
+    app.module_map.move_by(120);
     t.draw(|f| super::super::ui::render(f, &app)).unwrap();
     let text: String = t
         .backend()
@@ -48,11 +48,11 @@ fn large_neighborhoods_scroll_without_dropping_nodes_and_history_is_bounded() {
         .map(|c| c.symbol())
         .collect();
     assert!(text.contains("m119"));
-    assert!(text.contains("/ 120 related"));
+    assert!(text.contains("of 120"));
     for _ in 0..100 {
         app.module_map.cycle_mode();
     }
-    assert_eq!(app.module_map.history.len(), 50);
+    assert!(app.module_map.history.is_empty());
 }
 #[tokio::test]
 async fn relationship_views_preserve_identity_history_and_observable_context() {
@@ -78,6 +78,7 @@ async fn relationship_views_preserve_identity_history_and_observable_context() {
     app.switch_view(super::super::app::View::Map);
     app.module_map.selected = tui.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    press(&mut app, K::Enter, &tx).await;
     press(&mut app, K::Char('v'), &tx).await;
     assert_eq!(app.module_map.focus, tui);
     assert_eq!(app.module_map.selected, tui);
@@ -518,6 +519,23 @@ fn visual_timings(app: &mut App) -> String {
         ));
     }
     let layout = start.elapsed() / 1000;
+    let start = Instant::now();
+    for _ in 0..1000 {
+        app.module_map.change_page(1);
+        app.module_map.change_page(-1);
+    }
+    let page = start.elapsed() / 2000;
+    let start = Instant::now();
+    for _ in 0..1000 {
+        let selection = app.module_map.selected.clone();
+        app.module_map.move_by(1);
+        if app.module_map.selected != app.module_map.focus {
+            app.module_map.focus_selected();
+            app.module_map.back();
+        }
+        app.module_map.selected = selection;
+    }
+    let drill_back = start.elapsed() / 1000;
     let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 45)).unwrap();
     app.module_map.mode = if app.module_map.index.nodes[&app.module_map.focus]
         .outgoing
@@ -558,7 +576,7 @@ fn visual_timings(app: &mut App) -> String {
     }
     let picker = start.elapsed() / 100;
     app.journey.picker = None;
-    format!("layout={layout:?} diagram={diagram:?} list={list:?} presentation={toggle:?} picker={picker:?}")
+    format!("layout={layout:?} page={page:?} drill+Esc={drill_back:?} diagram={diagram:?} list={list:?} presentation={toggle:?} picker={picker:?}")
 }
 async fn press(
     app: &mut App,

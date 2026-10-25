@@ -1,6 +1,6 @@
 use super::*;
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, s: &State) {
-    let choices = s.choices();
+    let choices = s.visible_choices();
     let Some(center) = choices.first() else {
         return;
     };
@@ -52,7 +52,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, s: &State) {
         regions[0],
     );
     if choices.len() == 1 {
-        frame.render_widget(Paragraph::new(if self_link.is_some(){"Verified self-import; no other neighbors.\nEnter explores children · o source"}else{match s.mode{Mode::Hierarchy=>"No known child modules. o opens source.",Mode::Imports=>"No verified outgoing imports.\nSome imports may be unclassified.\nEnter explores children · o source",Mode::UsedBy=>"No verified incoming imports.\nNot semantic usage analysis.\nEnter explores children · o source"}}).wrap(ratatui::widgets::Wrap{trim:false}),regions[1]);
+        frame.render_widget(Paragraph::new(if self_link.is_some(){"Verified self-import; no other neighbors.\nv switches views · o source"}else{match s.mode{Mode::Hierarchy=>"No known child modules. o opens source.",Mode::Imports=>"No verified outgoing imports.\nSome imports may be unclassified.\nv switches views · o source",Mode::UsedBy=>"No verified incoming imports.\nNot semantic usage analysis.\nv switches views · o source"}}).wrap(ratatui::widgets::Wrap{trim:false}),regions[1]);
         return;
     }
     let e = &s.index.nodes[&s.focus];

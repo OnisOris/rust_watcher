@@ -61,6 +61,12 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         .unwrap_or_default();
     let mut l = vec![
         components::section_header(&format!("MODULE · {}", n.qualified_path)),
+        Line::raw(format!("Selected: {}", n.qualified_path)),
+        Line::raw(format!(
+            "Center: {}",
+            g.node(&s.focus)
+                .map_or("unknown", |n| n.qualified_path.as_str())
+        )),
         components::path_label(
             n.source_file.as_deref().unwrap_or(&n.declaration_file),
             usize::MAX,

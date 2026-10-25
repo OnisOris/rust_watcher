@@ -7,6 +7,8 @@ mod inspector;
 mod list;
 mod render;
 #[cfg(test)]
+mod stability_tests;
+#[cfg(test)]
 mod tests;
 use super::{
     app::{App, Pane},
@@ -48,7 +50,10 @@ pub(super) struct State {
     pub target_id: String,
     pub focus: String,
     pub selected: String,
-    pub history: Vec<(String, String, String, Mode)>,
+    pub history: Vec<(String, String, String, Mode, usize)>,
+    pub page: std::cell::Cell<usize>,
+    viewport: std::cell::Cell<(u16, u16)>,
+    capacity: std::cell::Cell<usize>,
     pub mode: Mode,
     pub show_files: bool,
     pub show_limits: bool,
@@ -67,6 +72,9 @@ impl State {
             focus: String::new(),
             selected: String::new(),
             history: vec![],
+            page: Default::default(),
+            viewport: Default::default(),
+            capacity: std::cell::Cell::new(12),
             mode: Mode::Hierarchy,
             show_files: false,
             show_limits: false,
@@ -83,15 +91,17 @@ impl State {
     }
     fn initialize(&mut self) {
         let Some(g) = &self.graph else { return };
-        if g.node(&self.selected)
+        if g.node(&self.focus)
             .is_some_and(|n| n.crate_id == self.crate_id)
         {
+            self.normalize();
             return;
         }
         let target = g
             .targets
             .iter()
-            .find(|t| t.crate_id == self.crate_id)
+            .find(|t| t.crate_id == self.crate_id && t.id == self.target_id)
+            .or_else(|| g.targets.iter().find(|t| t.crate_id == self.crate_id))
             .map(|t| t.id.as_str());
         if let Some(n) = g
             .nodes
@@ -101,6 +111,11 @@ impl State {
             self.target_id = n.target_id.clone();
             self.focus = n.id.clone();
             self.selected = n.id.clone();
+            self.page.set(0);
+        } else {
+            self.focus.clear();
+            self.selected.clear();
+            self.page.set(0);
         }
     }
     pub fn enter(&mut self, id: &str) {
@@ -142,16 +157,80 @@ impl State {
             .and_then(|e| g.nodes.get(e.position))
     }
     pub fn cycle_mode(&mut self) {
-        self.remember();
-        self.focus = self.selected.clone();
         self.mode = match self.mode {
             Mode::Hierarchy => Mode::Imports,
             Mode::Imports => Mode::UsedBy,
             Mode::UsedBy => Mode::Hierarchy,
         };
+        self.normalize();
+    }
+    // Rendering records viewport changes only. Selection never determines layout.
+    fn prepare_viewport(&self, width: u16, height: u16) {
+        if self.viewport.replace((width, height)) != (width, height) {
+            self.capacity.set(diagram::capacity(width, height));
+            let ordinal = self
+                .choices()
+                .iter()
+                .position(|n| n.id == self.selected)
+                .unwrap_or(0);
+            let last = self.choices().len().saturating_sub(2) / self.capacity.get();
+            self.page.set(if ordinal > 0 {
+                (ordinal - 1) / self.capacity.get()
+            } else {
+                self.page.get().min(last)
+            });
+        }
+    }
+    fn normalize(&mut self) {
+        let ordinal = self.choices().iter().position(|n| n.id == self.selected);
+        if ordinal.is_none() {
+            self.selected = self.focus.clone();
+        }
+        let last = self.choices().len().saturating_sub(2) / self.capacity.get();
+        self.page.set(match ordinal {
+            Some(i) if i > 0 => (i - 1) / self.capacity.get(),
+            _ => self.page.get().min(last),
+        });
+    }
+    fn page_range(&self) -> std::ops::Range<usize> {
+        let total = self.choices().len().saturating_sub(1);
+        let start = self
+            .page
+            .get()
+            .saturating_mul(self.capacity.get())
+            .min(total);
+        start..(start + self.capacity.get()).min(total)
+    }
+    fn visible_choices(&self) -> Vec<&ModuleNode> {
+        let choices = self.choices();
+        let range = self.page_range();
+        choices
+            .iter()
+            .take(1)
+            .copied()
+            .chain(
+                choices
+                    .iter()
+                    .skip(range.start + 1)
+                    .take(range.len())
+                    .copied(),
+            )
+            .collect()
+    }
+    pub fn change_page(&mut self, delta: isize) {
+        let last = self.choices().len().saturating_sub(2) / self.capacity.get();
+        let next = self.page.get().saturating_add_signed(delta).min(last);
+        if next == self.page.get() {
+            return;
+        }
+        self.page.set(next);
+        self.selected = self
+            .visible_choices()
+            .get(1)
+            .map_or_else(|| self.focus.clone(), |n| n.id.clone());
     }
     pub fn move_by(&mut self, d: isize) {
-        let nodes = self.choices();
+        let nodes = self.visible_choices();
         let i = nodes
             .iter()
             .position(|n| n.id == self.selected)
@@ -163,16 +242,12 @@ impl State {
         }
     }
     pub fn focus_selected(&mut self) {
-        if self.focus == self.selected && self.mode != Mode::Hierarchy {
-            self.remember();
-            self.mode = Mode::Hierarchy;
-            return;
-        }
         if self.focus == self.selected || self.selected.is_empty() {
             return;
         }
         self.remember();
         self.focus = self.selected.clone();
+        self.page.set(0);
     }
     fn remember(&mut self) {
         self.history.push((
@@ -180,17 +255,20 @@ impl State {
             self.focus.clone(),
             self.selected.clone(),
             self.mode,
+            self.page.get(),
         ));
         if self.history.len() > 50 {
             self.history.remove(0);
         }
     }
     pub fn back(&mut self) {
-        if let Some((target, focus, selected, mode)) = self.history.pop() {
+        if let Some((target, focus, selected, mode, page)) = self.history.pop() {
             self.target_id = target;
             self.focus = focus;
             self.selected = selected;
             self.mode = mode;
+            self.page.set(page);
+            self.initialize();
         } else {
             self.active = false;
         }
@@ -223,6 +301,7 @@ impl State {
         self.target_id = target;
         self.focus = id.clone();
         self.selected = id;
+        self.page.set(0);
     }
 }
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {

@@ -59,7 +59,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(vec![
             components::section_header(&format!(
-                "Workspace > {name} > Modules · {}",
+                "Workspace > {name} > Modules · Focus: {}",
                 s.graph
                     .as_ref()
                     .and_then(|g| g.node(&s.focus))
@@ -86,28 +86,35 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let inner = panel.inner(panes[0]);
     frame.render_widget(panel, panes[0]);
     let regions = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    s.prepare_viewport(regions[0].width, regions[0].height);
     let drawn = s.diagram && super::diagram::render(frame, regions[0], s);
     if !drawn {
         super::list::render(frame, regions[0], s);
     }
     let total = s.choices().len().saturating_sub(1);
-    let caption = if drawn {
-        let cache = s.diagram_cache.borrow();
-        let d = cache.as_ref().and_then(|(_, d)| d.as_ref()).unwrap();
-        format!("Diagram · Showing {} / {} related", d.shown, d.total)
+    let range = s.page_range();
+    let presentation = if drawn {
+        "Diagram"
     } else if s.diagram {
-        "List fallback: viewport <28×9".into()
+        "List fallback: viewport <28×9"
     } else {
-        format!("List · {total} related · j/k scroll")
+        "List"
     };
+    let caption = format!(
+        "Page {}/{} · Nodes {}–{} of {total} · {presentation}",
+        s.page.get() + 1,
+        total.saturating_sub(1) / s.capacity.get() + 1,
+        if total == 0 { 0 } else { range.start + 1 },
+        range.end
+    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(caption, Style::default().fg(theme::MUTED)),
             Line::styled(
                 match s.mode {
-                    Mode::Hierarchy => "mod containment · p priorities · o source",
-                    Mode::Imports => "use: focus → neighbors · [cfg] conditional",
-                    Mode::UsedBy => "use: neighbors → focus · not calls",
+                    Mode::Hierarchy => "mod: parent → child · PgUp/PgDn pages",
+                    Mode::Imports => "use: focus → neighbors · PgUp/PgDn pages",
+                    Mode::UsedBy => "use: neighbors → focus · PgUp/PgDn pages",
                 },
                 Style::default().fg(theme::MUTED),
             ),

@@ -600,11 +600,12 @@ Press **v** to cycle **Hierarchy / Imports / Used by** within Map. Hierarchy
 draws module ownership. Imports draws `[0] ─use▶ neighbor`; Used by draws
 `neighbor ─use▶ [0]`. `[0]` is the focused module; selecting a neighbor updates
 Inspector, Enter makes it the focus, and Esc restores focus, selection, target
-and view mode (at most 50 history entries). Changing mode keeps the current
-selection as its center, including empty neighborhoods. Relations group repeated
+and view mode/page (at most 50 history entries). Changing mode never changes focus:
+selection is retained only if it belongs to the new neighborhood, otherwise the
+center is selected. Enter on the center is a no-op. Relations group repeated
 records by exact module-ID pair, showing record counts and conditional counts;
-they are syntactic imports, **not runtime calls**. Long lists scroll with j/k;
-all neighbors remain selectable regardless of terminal size. Adjacency and
+they are syntactic imports, **not runtime calls**. `j/k` selects the center and
+neighbors on the explicit current page, clamping at its ends. Adjacency and
 deduplicated physical-subtree indexes are prepared once when the graph arrives;
 switching mode or moving selection never starts scan, metadata, AST, Git or RA.
 
@@ -617,12 +618,23 @@ one edge with a count; `[cfg]` marks conditional records. Self-imports are shown
 as a loop on the single focus box, not a duplicate node. Cycles do not recurse:
 each view shows only the indexed one-step neighborhood.
 
-The viewport determines the visible page (at most 12 neighbors). `j/k` traverses
-the complete neighborhood and brings the selected node into that page. Below
+The viewport determines page capacity (at most 12 neighbors), shared by Diagram
+and List. **PgUp/PgDn** (also **[ / ]**) explicitly switch pages and select the
+first neighbor. The caption reports page number and the neighbor range; `j/k`
+never switches pages. All neighbors remain reachable, without overlap between
+pages. `g` preserves focus, selection, mode and page. Only Enter on a neighbor
+recenters the graph; Esc restores the exact previous context. Mode, presentation,
+selection and page changes do not add drill-down history entries.
+
+Geometry is cached by viewport size, focus ID, mode, page, neighbor count and
+self-edge presence, **not selection**. Applying a new ModuleGraph invalidates the
+cache (the graph revision boundary). Selection changes only styles and Inspector.
+Resize can reflow pages to retain the selected module; a replaced graph validates
+focus/selection and clamps invalid pages. Below
 28×9 content cells Diagram explicitly falls back to directed List. Full paths
 and relation counts remain available in Inspector. Colors supplement markers
 and arrows; NO_COLOR preserves selection and relationship meaning. Empty import
-views explain the conservative scope and offer Enter to explore children.
+views explain the conservative scope and offer `v` to return to Hierarchy.
 
 Inspector prioritizes Structure, Relationships, Review priorities and Analysis
 status. **f** expands/collapses physical files; **a** expands/collapses analysis

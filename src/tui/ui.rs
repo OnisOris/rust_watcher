@@ -161,7 +161,7 @@ fn footer_text(app: &App) -> &'static str {
         Overlay::Help => " ? / Esc close help · q quit",
         Overlay::None => match app.view {
             View::Map => {
-                " j/k · Enter focus · g layout · v mode · p review · o source · Esc · q quit"
+                " j/k select · PgUp/PgDn pages · Enter focus · g/v · p review · o · Esc · q quit"
             }
             View::Overview if app.pane == Pane::Details => {
                 " j/k scroll · Ctrl+h exploration · 1–5 views · ? help · q quit"
@@ -208,6 +208,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::raw("Map: j/k nodes · Enter focus · m modules · o exact source"),
         Line::raw("Modules: v Hierarchy/Imports/Used by · f files · a limitations · t target"),
         Line::raw("Visual Map: g Diagram/List · p actionable priorities · c exact Calls"),
+        Line::raw("Module pages: PgUp/PgDn or [/] · j/k select visible nodes only"),
         Line::raw("Map: t module target · Esc previous scope / Cargo map"),
         heading("Session"),
         Line::raw("? / Esc close help · q / Ctrl+C quit"),

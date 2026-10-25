@@ -46,6 +46,7 @@ pub(super) struct ReturnPoint {
         String,
         super::module_map::Mode,
         bool,
+        usize,
     )>,
 }
 #[derive(Default)]
@@ -72,6 +73,7 @@ pub(super) fn point(app: &App, to: View) -> ReturnPoint {
                 s.selected.clone(),
                 s.mode,
                 s.diagram,
+                s.page.get(),
             )
         }),
     }
@@ -112,7 +114,7 @@ pub(super) fn back(app: &mut App) -> bool {
     app.switch_view(p.from);
     app.pane = p.pane;
     app.explorer.right_mode = p.explorer_mode;
-    if let Some((c, t, f, s, m, d)) = p.module {
+    if let Some((c, t, f, s, m, d, page)) = p.module {
         let map = &mut app.module_map;
         map.crate_id = c;
         map.target_id = t;
@@ -120,6 +122,7 @@ pub(super) fn back(app: &mut App) -> bool {
         map.selected = s;
         map.mode = m;
         map.diagram = d;
+        map.page.set(page);
     }
     // InspectFile/Inspect can supersede the worker's remaining Calls phase.
     // Resume an incomplete target on return, with a fresh ID rejecting late replies.

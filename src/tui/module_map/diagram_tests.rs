@@ -2,13 +2,22 @@ use super::{diagram::*, *};
 #[test]
 fn geometry_is_bounded_directed_disjoint_stable_and_selection_is_visible() {
     for (w, h) in [(40, 9), (50, 19), (64, 24), (85, 34)] {
-        for total in [0, 1, 2, 5, 12, 40, 47, 2000] {
-            for selected in [0, total.min(13), total / 2, total] {
+        for total in [0usize, 1, 2, 5, 12, 40, 47, 2000] {
+            for page in 0..=total.saturating_sub(1) / capacity(w, h) {
                 for mode in [Mode::Hierarchy, Mode::Imports, Mode::UsedBy] {
-                    let d = layout(w, h, total, selected, mode, true).unwrap();
-                    assert_eq!(d, layout(w, h, total, selected, mode, true).unwrap());
+                    let d = layout(w, h, total, page, mode, true).unwrap();
+                    assert_eq!(d, layout(w, h, total, page, mode, true).unwrap());
                     assert_eq!(d.nodes.iter().filter(|n| n.ordinal == 0).count(), 1);
-                    assert!(d.nodes.iter().any(|n| n.ordinal == selected));
+                    assert_eq!(
+                        d.nodes
+                            .iter()
+                            .skip(1)
+                            .map(|n| n.ordinal)
+                            .collect::<Vec<_>>(),
+                        (page * capacity(w, h) + 1
+                            ..=(page * capacity(w, h) + capacity(w, h)).min(total))
+                            .collect::<Vec<_>>()
+                    );
                     assert!(d.nodes.len() <= 13);
                     for n in &d.nodes {
                         assert!(n.rect.right() <= w && n.rect.bottom() <= h);
@@ -111,21 +120,11 @@ fn dense_indexed_neighborhood_preserves_records_direction_and_thirteenth_selecti
             .iter()
             .filter(|l| l.id != center)
             .all(|l| l.records == 2 && l.conditional == 1));
-        for _ in 0..13 {
-            app.module_map.move_by(1);
-        }
-        assert_eq!(
-            app.module_map
-                .graph
-                .as_ref()
-                .unwrap()
-                .node(&app.module_map.selected)
-                .unwrap()
-                .name,
-            "m12"
-        );
         for (w, h) in [(80, 20), (100, 30), (120, 35), (160, 45)] {
             let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            t.draw(|f| super::super::ui::render(f, &app)).unwrap();
+            app.module_map.change_page(1);
+            let selected = app.module_map.selected.clone();
             t.draw(|f| super::super::ui::render(f, &app)).unwrap();
             let text = t
                 .backend()
@@ -134,12 +133,26 @@ fn dense_indexed_neighborhood_preserves_records_direction_and_thirteenth_selecti
                 .iter()
                 .map(|c| c.symbol())
                 .collect::<String>();
-            assert!(text.contains("m12"));
+            assert!(text.contains(
+                &app.module_map
+                    .graph
+                    .as_ref()
+                    .unwrap()
+                    .node(&selected)
+                    .unwrap()
+                    .name
+            ));
             assert!(text.contains("↺×1"));
             let cache = app.module_map.diagram_cache.borrow();
             let d = cache.as_ref().unwrap().1.as_ref().unwrap();
             assert_eq!(d.total, 40);
-            assert!(d.nodes.iter().any(|n| n.ordinal == 13));
+            let ordinal = app
+                .module_map
+                .choices()
+                .iter()
+                .position(|n| n.id == selected)
+                .unwrap();
+            assert!(d.nodes.iter().any(|n| n.ordinal == ordinal));
             assert!(d.nodes.len() <= 13);
         }
     }
