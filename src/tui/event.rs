@@ -139,6 +139,9 @@ pub(super) async fn handle_key(
     if let Some(quit) = super::journey::handle_key(app, key, commands).await {
         return Ok(quit);
     }
+    if super::call_graph::handle_key(app, key, commands).await {
+        return Ok(false);
+    }
     if app.journey.pending.is_some()
         && matches!(
             key.code,
@@ -600,6 +603,9 @@ pub(super) async fn send_command(
     let message = "rust-analyzer worker is unavailable".to_owned();
     app.apply_event(AnalyzerEvent::Error(message.clone()));
     match failed {
+        AnalyzerCommand::ExpandCallGraph { request } => {
+            app.apply_event(super::call_graph::failed_event(request, message))
+        }
         AnalyzerCommand::Search { id, .. } => {
             app.apply_event(AnalyzerEvent::SearchFailed { id, message });
         }

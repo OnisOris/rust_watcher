@@ -65,12 +65,28 @@ pub(in crate::tui) async fn handle_key(
         return None;
     }
     if key.code == K::Char('o') && app.view == View::Calls {
-        if let Some(t) = app.calls.center.as_ref() {
+        if let Some(t) = if app.calls.graph.enabled {
+            app.calls.graph.selected_target()
+        } else {
+            app.calls.center.as_ref()
+        } {
+            if !t.is_workspace_local(&app.project.workspace_root)
+                || t.file
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                app.notice=Some("External source unavailable in repository Explorer; exact external target retained".into());
+                return Some(false);
+            }
             let mut s = crate::model::Symbol {
                 id: String::new(),
                 name: t.name.clone(),
                 kind: t.kind.clone(),
-                file: t.file.clone(),
+                file: t
+                    .file
+                    .strip_prefix(&app.project.workspace_root)
+                    .unwrap_or(&t.file)
+                    .to_path_buf(),
                 range: t.range,
                 selection_range: t.selection_range,
                 container: None,

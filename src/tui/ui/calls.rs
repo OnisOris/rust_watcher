@@ -8,6 +8,10 @@ pub(super) fn render_calls_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         return;
     }
+    if app.calls.graph.enabled && app.calls.center.is_some() {
+        super::super::call_graph::render(frame, area, app);
+        return;
+    }
     if let (Some(incoming), Some(outgoing)) = (&app.calls.callers_error, &app.calls.callees_error) {
         if incoming == outgoing && !(app.calls.callers_unsupported && app.calls.callees_unsupported)
         {

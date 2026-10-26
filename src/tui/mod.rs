@@ -1,4 +1,5 @@
 mod app;
+mod call_graph;
 mod components;
 mod event;
 mod explorer;

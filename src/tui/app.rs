@@ -111,6 +111,7 @@ const CALL_HISTORY_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct CallsState {
+    pub graph: super::call_graph::State,
     pub context_scroll: usize,
     pub context_scroll_limit: std::cell::Cell<Option<usize>>,
     pub unavailable: Option<String>,
@@ -128,11 +129,32 @@ pub(super) struct CallsState {
     pub callees_error: Option<String>,
     pub callers_unsupported: bool,
     pub callees_unsupported: bool,
-    pub history: Vec<CallTarget>,
+    pub history: Vec<CallVisit>,
     pub request_id: u64,
+}
+#[derive(Debug, Clone)]
+pub(super) struct CallVisit {
+    pub target: CallTarget,
+    pub state: Box<CallsState>,
+}
+impl std::ops::Deref for CallVisit {
+    type Target = CallTarget;
+    fn deref(&self) -> &CallTarget {
+        &self.target
+    }
+}
+impl From<CallTarget> for CallVisit {
+    fn from(target: CallTarget) -> Self {
+        Self {
+            target,
+            state: Box::default(),
+        }
+    }
 }
 
 pub(super) struct App {
+    pub graph_request: u64,
+    pub graph_expansions: usize,
     pub journey: super::journey::State,
     pub module_map: super::module_map::State,
     pub map: super::map::State,
@@ -170,6 +192,8 @@ impl App {
         let explorer = ExplorerState::new(&project);
         Self {
             journey: Default::default(),
+            graph_request: 0,
+            graph_expansions: 0,
             module_map: super::module_map::State::new(&project.architecture),
             map: super::map::State::new(&project.architecture),
             color_mode: super::theme::ColorMode::detect(),
@@ -209,6 +233,9 @@ impl App {
     }
 
     pub(super) fn switch_view(&mut self, view: View) {
+        if self.view == View::Calls && view != View::Calls {
+            self.calls.graph.cancel();
+        }
         super::journey::cancel(self);
         self.view = view;
         self.overlay = Overlay::None;
@@ -392,12 +419,34 @@ impl App {
             Overlay::None if self.pane == Pane::Details => self.pane = Pane::Project,
             Overlay::None if self.pane == Pane::Inspector => self.pane = Pane::Symbols,
             Overlay::None if matches!(self.pane, Pane::Callers | Pane::Callees) => {
+                if self.calls.graph.enabled {
+                    self.pane = Pane::CallCurrent;
+                    return self.escape();
+                }
                 self.pane = Pane::CallCurrent;
             }
             Overlay::None if self.pane == Pane::CallCurrent => {
-                if let Some(target) = self.calls.history.pop() {
+                self.calls.graph.cancel();
+                if let Some(visit) = self.calls.history.pop() {
                     self.notice = None;
-                    return Some(self.load_calls(target, false));
+                    if visit.state.center.is_some()
+                        && !visit.state.callers_loading
+                        && !visit.state.callees_loading
+                    {
+                        let id = self.calls.request_id + 1;
+                        let history = std::mem::take(&mut self.calls.history);
+                        self.calls = *visit.state;
+                        self.calls.history = history;
+                        self.calls.request_id = id;
+                        return None;
+                    }
+                    self.calls.scope = visit.state.scope;
+                    let graph = visit.state.graph;
+                    let command = self.load_calls(visit.target, false);
+                    if graph.focus.is_some() {
+                        self.calls.graph = graph;
+                    }
+                    return Some(command);
                 }
                 self.calls.request_id += 1;
                 if super::journey::back(self) {
@@ -470,6 +519,8 @@ impl App {
     }
 
     pub(super) fn open_calls_for_inspector(&mut self) -> Option<(u64, CallTarget, CallScope)> {
+        let from_calls_source =
+            self.view == View::Explorer && super::journey::source_returns_to_calls(self);
         let symbol = match self.view {
             View::Symbols => self
                 .symbols_results
@@ -497,8 +548,10 @@ impl App {
             self.calls=CallsState { request_id:id,unavailable:Some(format!("{} is a {}.\n\nCall hierarchy is available for functions and methods.\nSelect a callable symbol to explore execution flow.",qualified_symbol(&symbol),target.kind)),center:Some(target),..Default::default() };
             return None;
         }
-        self.calls.history.clear();
-        Some(self.load_calls(target, false))
+        if !from_calls_source {
+            self.calls.history.clear();
+        }
+        Some(self.load_calls(target, from_calls_source))
     }
 
     pub(super) fn begin_explorer_symbol_inspect(&mut self) -> Option<(u64, Symbol)> {
@@ -552,14 +605,22 @@ impl App {
         self.calls.unavailable = None;
         self.calls.context_scroll = 0;
         if remember {
-            if let Some(center) = self.calls.center.take() {
-                self.calls.history.push(center);
+            if let Some(center) = self.calls.center.clone() {
+                self.calls.graph.cancel();
+                let mut history = std::mem::take(&mut self.calls.history);
+                let state = Box::new(self.calls.clone());
+                history.push(CallVisit {
+                    target: center,
+                    state,
+                });
+                self.calls.history = history;
                 if self.calls.history.len() > CALL_HISTORY_LIMIT {
                     self.calls.history.remove(0);
                 }
             }
         }
         self.calls.request_id += 1;
+        self.calls.graph = super::call_graph::State::new(&target, self.calls.graph.enabled);
         self.calls.center = Some(target.clone());
         self.calls.callers.clear();
         self.calls.callees.clear();
@@ -585,9 +646,35 @@ impl App {
                 | AnalyzerEvent::Error(_)
         );
         match event {
+            AnalyzerEvent::CallGraphExpanded { request, result } => {
+                super::call_graph::apply(self, *request, result)
+            }
             AnalyzerEvent::Indexing => self.analyzer_state = AnalyzerState::Indexing,
             AnalyzerEvent::Ready => self.analyzer_state = AnalyzerState::Ready,
-            AnalyzerEvent::Error(message) => self.analyzer_state = AnalyzerState::Error(message),
+            AnalyzerEvent::Error(message) => {
+                self.calls.graph.cancel();
+                if let Some(focus) = self.calls.graph.focus.clone() {
+                    for incoming in [true, false] {
+                        let loading = if incoming {
+                            self.calls.callers_loading
+                        } else {
+                            self.calls.callees_loading
+                        };
+                        if loading {
+                            self.calls
+                                .graph
+                                .ingest(&focus, incoming, Err(message.clone()));
+                        }
+                    }
+                }
+                self.calls.callers_loading = false;
+                self.calls.callees_loading = false;
+                if self.calls.center.is_some() {
+                    self.calls.callers_error = Some(message.clone());
+                    self.calls.callees_error = Some(message.clone());
+                }
+                self.analyzer_state = AnalyzerState::Error(message);
+            }
             AnalyzerEvent::SearchResults { id, result } if id == self.search_request => {
                 self.symbols_results = result.items;
                 self.symbols_truncated = result.truncated;
@@ -621,9 +708,15 @@ impl App {
                 item.diagnostics = Some(values.len());
             }),
             AnalyzerEvent::CallersLoaded { id, result } if id == self.calls.request_id => {
+                if let Some(focus) = self.calls.graph.focus.clone() {
+                    self.calls.graph.ingest(&focus, true, Ok(result.clone()));
+                }
                 self.apply_callers(result);
             }
             AnalyzerEvent::CalleesLoaded { id, result } if id == self.calls.request_id => {
+                if let Some(focus) = self.calls.graph.focus.clone() {
+                    self.calls.graph.ingest(&focus, false, Ok(result.clone()));
+                }
                 self.apply_callees(result);
             }
             AnalyzerEvent::CallsFailed {
@@ -631,6 +724,11 @@ impl App {
                 incoming,
                 message,
             } if id == self.calls.request_id => {
+                if let Some(focus) = self.calls.graph.focus.clone() {
+                    self.calls
+                        .graph
+                        .ingest(&focus, incoming, Err(message.clone()));
+                }
                 if incoming {
                     self.calls.callers_loading = false;
                     self.calls.callers_unsupported = false;
@@ -1015,7 +1113,7 @@ mod tests {
         let mut app = App::new(project());
         app.calls.center = Some(call_target("root", 0));
         app.calls.callers = vec![call_target("old", 1)];
-        app.calls.history = vec![call_target("history", 2)];
+        app.calls.history = vec![call_target("history", 2).into()];
         let old_id = app.calls.request_id;
         let (new_id, target, scope) = app.toggle_call_scope().unwrap();
         assert_eq!(target.name, "root");

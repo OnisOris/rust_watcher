@@ -9,6 +9,9 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub(super) enum AnalyzerCommand {
+    ExpandCallGraph {
+        request: super::call_graph::Request,
+    },
     Search {
         id: u64,
         query: String,
@@ -30,6 +33,10 @@ pub(super) enum AnalyzerCommand {
 }
 
 pub(super) enum AnalyzerEvent {
+    CallGraphExpanded {
+        request: Box<super::call_graph::Request>,
+        result: Result<Option<CallTargets>, String>,
+    },
     Indexing,
     Ready,
     Error(String),
@@ -151,6 +158,7 @@ enum InteractiveWork {
 
 #[derive(Default)]
 struct Scheduler {
+    expansion: Option<super::call_graph::Request>,
     search: Option<(u64, String)>,
     work: Option<InteractiveWork>,
     shutdown: bool,
@@ -158,7 +166,14 @@ struct Scheduler {
 
 impl Scheduler {
     fn push(&mut self, command: AnalyzerCommand) {
+        if !matches!(
+            command,
+            AnalyzerCommand::ExpandCallGraph { .. } | AnalyzerCommand::Search { .. }
+        ) {
+            self.expansion = None;
+        }
         match command {
+            AnalyzerCommand::ExpandCallGraph { request } => self.expansion = Some(request),
             AnalyzerCommand::Search { id, query } => self.search = Some((id, query)),
             AnalyzerCommand::Inspect { id, symbol } => {
                 self.work = Some(InteractiveWork::Inspect {
@@ -250,6 +265,31 @@ pub(super) async fn analyzer_worker(
             scheduler.resume(continuation);
             continue;
         }
+        if let Some(request) = scheduler.expansion.take() {
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                if request.incoming {
+                    analyzer
+                        .callers_for_target_scoped(&request.target, request.scope)
+                        .await
+                } else {
+                    analyzer
+                        .callees_for_target_scoped(&request.target, request.scope)
+                        .await
+                }
+            })
+            .await
+            .map_err(|_| "Graph expansion RPC timeout (30s)".to_owned())
+            .and_then(|r| r.map_err(|e| format!("{e:#}")));
+            send(
+                &events,
+                AnalyzerEvent::CallGraphExpanded {
+                    request: Box::new(request),
+                    result,
+                },
+            )
+            .await;
+            continue;
+        }
         tokio::select! {
             command = commands.recv() => match command { Some(command) => scheduler.push(command), None => scheduler.push(AnalyzerCommand::Shutdown) },
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -265,6 +305,13 @@ async fn unavailable_worker(
 ) {
     while let Some(command) = commands.recv().await {
         match command {
+            AnalyzerCommand::ExpandCallGraph { request } => {
+                send(
+                    events,
+                    super::call_graph::failed_event(request, message.to_owned()),
+                )
+                .await
+            }
             AnalyzerCommand::Search { id, .. } => {
                 send(
                     events,
@@ -597,6 +644,45 @@ mod tests {
         });
         assert_eq!(scheduler.search.as_ref().unwrap().0, 2);
         assert!(scheduler.work.is_some());
+    }
+    #[test]
+    fn graph_expansion_is_bounded_and_never_preempts_initial_calls() {
+        let target = CallTarget::from_symbol(&symbol("root"));
+        let request = super::super::call_graph::Request {
+            id: 1,
+            generation: 1,
+            identity: super::super::call_graph::Identity::from(&target),
+            target: target.clone(),
+            incoming: false,
+            scope: CallScope::Workspace,
+        };
+        let mut scheduler = Scheduler::default();
+        scheduler.push(AnalyzerCommand::LoadCalls {
+            id: 1,
+            target: target.clone(),
+            scope: CallScope::Workspace,
+        });
+        scheduler.push(AnalyzerCommand::ExpandCallGraph {
+            request: request.clone(),
+        });
+        assert!(matches!(
+            scheduler.work,
+            Some(InteractiveWork::Calls { .. })
+        ));
+        scheduler.push(AnalyzerCommand::ExpandCallGraph {
+            request: super::super::call_graph::Request { id: 2, ..request },
+        });
+        assert_eq!(scheduler.expansion.as_ref().unwrap().id, 2);
+        scheduler.push(AnalyzerCommand::LoadCalls {
+            id: 3,
+            target,
+            scope: CallScope::All,
+        });
+        assert!(scheduler.expansion.is_none());
+        assert!(matches!(
+            scheduler.work,
+            Some(InteractiveWork::Calls { id: 3, .. })
+        ));
     }
     #[tokio::test]
     async fn unavailable_worker_keeps_channel_alive_and_reports_failures() {

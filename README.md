@@ -130,6 +130,68 @@ restores the original crate, target, module, map mode and Diagram/List selection
 The return history stores bounded identifiers, not App snapshots (50 entries).
 Zero calls, loading, unsupported hierarchy, RPC errors and truncation are distinct.
 
+### Interactive Call Graph
+
+Within **3 Calls**, **g** switches the existing List and a local **Graph**.
+No sixth tab or extra analyzer is started. The default is still List; without a
+target, Binary entrypoints and the existing exploration routes remain available.
+Graph initially reuses only the two one-hop RA results already requested for
+Calls. **x** on a direct caller requests its incoming side; on a direct callee it
+requests outgoing calls. Nothing expands automatically. Both initial sides must
+finish and RA must be Ready before expansion. Empty, unsupported, RPC error,
+cancelled and truncated directions remain distinct; an empty result while RA is
+indexing is explicitly provisional. No structural `use`/`mod` data enters Calls.
+
+Controls: **j/k** selects within the explicit page, **Enter** focuses the selected
+function, **PgUp/PgDn** (or **[ / ]**) pages, **e** changes Workspace/All scope,
+**o** opens the selected exact file/identifier anchor through Explorer/Inspector,
+**Esc** returns, **Tab / Ctrl+h/l** changes graph/details pane. Details scroll
+with j/k. Enter on the center is a no-op. `g` does not request RA or discard
+selection, page, loaded expansions or history. List retains its original spatial
+panes and Enter-to-follow behavior. A selected direct target is highlighted in
+its matching List pane. A second-level target cannot appear in the one-hop List:
+a notice explains that its Graph selection is retained for the return with g.
+
+The deterministic five-column diagram means **caller2 → caller → focus → callee
+→ callee2**. Labels retain a file/line badge; full location is in the selected
+header and details. Edges route around node boxes, not through source labels.
+Self-calls have a `↺ recursive` counter; repeated targets are one node and directed
+edges are deduplicated. Reciprocal edges stay directed. Off-page/non-routable
+relations are counted explicitly, never represented by fabricated endpoints.
+Expanded second-level nodes are paged with their direct parent as an anchor;
+overflow pages can repeat that parent, not duplicate its graph identity.
+Selection never changes geometry or focus. Layout caches viewport, graph revision
+and explicit page, excluding selection; a new focus creates a fresh local model.
+Below 80×12 graph-content cells a labeled compact directed List fallback is used.
+This is separate from the original three-pane List and keeps Graph controls.
+
+Budgets: **40 retained nodes**, **80 directed edges**, **2 hops**, **12 expansion
+requests per TUI session**, one queued/in-flight expansion, existing **20 targets
+per LSP side**, and a **30-second expansion RPC timeout**. Session attempts include
+failed/cancelled attempts. `Loading` is not `expanded`: a direction is complete
+only after its reply. Repeating a completed request sends no duplicate RPC;
+cancelled/failed directions can be retried within the session budget. Limit or
+truncation messages do not invent an exact unknown total. Focus transitions may
+start another bounded neighborhood; there is no workspace-wide call graph.
+
+Nodes use exact normalized file, selection range, declaration range, kind and
+name, not a name-only identity or the optional presentation detail. Existing RA
+`prepareCallHierarchy` exact/uniquely-provable fallback rules remain unchanged.
+Expansion replies must match request ID, focus generation, scope and active intent.
+Changing focus/scope, leaving Calls or Esc cancels stale intent; delayed events
+cannot reopen a view. The worker has one coalesced expansion slot below ordinary
+interactive phases; a new focus/source action supersedes queued expansion work.
+An in-flight RPC remains bounded and its stale result is ignored.
+
+The existing 50-entry Calls history stores bounded Calls-only snapshots (never
+App copies or nested histories), preserving graph/page/selection/scope/expansions.
+Completed neighborhoods restore without replaying expansions; interrupted first
+levels reload with fresh IDs. Journey handles source/Inspector return using the
+same retained Calls state. External targets are marked `[ext]`; repository
+Explorer refuses external/traversal locations with a notice. Without RA, exact
+binary source still opens with an explanation; existing cached graph data can
+remain visible after an analyzer failure, but semantic actions are unavailable.
+
 Explorer is a read-only, gitignore-aware physical repository tree that remains usable if rust-analyzer fails. Press `4`, navigate with `j`/`k`, expand or collapse directories with `l`/`h` (or the arrow keys), and press Enter on a file. Non-Rust files show metadata; Rust files load document symbols for that file only. Select a symbol and press Enter to reuse the Inspector, then press `c` to open Calls for that exact symbol:
 
 ```text

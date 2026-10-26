@@ -128,7 +128,9 @@ pub(super) fn back(app: &mut App) -> bool {
     // Resume an incomplete target on return, with a fresh ID rejecting late replies.
     if app.view == View::Calls && (app.calls.callers_loading || app.calls.callees_loading) {
         if let Some(target) = app.calls.center.clone() {
+            let graph = app.calls.graph.clone();
             let (id, target, scope) = app.load_calls(target, false);
+            app.calls.graph = graph;
             app.journey.dispatch = Some(AnalyzerCommand::LoadCalls { id, target, scope });
         }
     }

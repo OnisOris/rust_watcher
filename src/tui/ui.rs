@@ -172,8 +172,11 @@ fn footer_text(app: &App) -> &'static str {
             View::Symbols => {
                 " / search · j/k select · Enter inspect · c calls · Tab pane · ? help · q quit"
             }
+            View::Calls if app.calls.graph.enabled => {
+                " j/k select · Enter focus · x expand · g List · o source · PgUp/Dn · e · Esc · q quit"
+            }
             View::Calls => {
-                " j/k · Enter follow · o source · Tab pane · e scope · Esc back · ? · q quit"
+                " j/k · Enter follow · g Graph · o source · Tab pane · e scope · Esc · q quit"
             }
             View::Explorer
                 if app.explorer.right_mode == ExplorerRightMode::Inspector
@@ -208,6 +211,8 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::raw("Map: j/k nodes · Enter focus · m modules · o exact source"),
         Line::raw("Modules: v Hierarchy/Imports/Used by · f files · a limitations · t target"),
         Line::raw("Visual Map: g Diagram/List · p actionable priorities · c exact Calls"),
+        Line::raw("Calls: g Graph/List · x expand selected direct branch (depth 2)"),
+        Line::raw("Call Graph: j/k visible selection · PgUp/PgDn pages · Enter focus · o source"),
         Line::raw("Module pages: PgUp/PgDn or [/] · j/k select visible nodes only"),
         Line::raw("Map: t module target · Esc previous scope / Cargo map"),
         heading("Session"),
@@ -846,7 +851,7 @@ mod tests {
         let mut caller = calls_app(call_target("execute", None, 80));
         caller.calls.callers = vec![call_target("run_command", None, 70)];
         caller.calls.callees = vec![call_target("request", Some("LspClient"), 134)];
-        caller.calls.history = vec![call_target("request", Some("LspClient"), 134)];
+        caller.calls.history = vec![call_target("request", Some("LspClient"), 134).into()];
         caller.pane = Pane::Callers;
         std::fs::write(
             directory.join("10-calls-follow-caller.txt"),
@@ -857,8 +862,8 @@ mod tests {
         callee.calls.callers = vec![call_target("request", Some("LspClient"), 134)];
         callee.calls.callees = vec![call_target("serialize", None, 500)];
         callee.calls.history = vec![
-            call_target("request", Some("LspClient"), 134),
-            call_target("execute", None, 80),
+            call_target("request", Some("LspClient"), 134).into(),
+            call_target("execute", None, 80).into(),
         ];
         callee.pane = Pane::Callees;
         std::fs::write(
