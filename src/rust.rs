@@ -1052,6 +1052,7 @@ fn kind_name(kind: lsp_types::SymbolKind) -> &'static str {
         lsp_types::SymbolKind::ARRAY => "array",
         lsp_types::SymbolKind::OBJECT => "object",
         lsp_types::SymbolKind::ENUM => "enum",
+        lsp_types::SymbolKind::ENUM_MEMBER => "enum_variant",
         lsp_types::SymbolKind::INTERFACE => "trait",
         lsp_types::SymbolKind::STRUCT => "struct",
         lsp_types::SymbolKind::EVENT => "event",
