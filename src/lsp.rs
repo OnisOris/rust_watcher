@@ -780,3 +780,7 @@ mod tests {
         assert!(error.downcast_ref::<AnalyzerNotFound>().is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "lsp/diagnostics_tests.rs"]
+mod diagnostics_tests;

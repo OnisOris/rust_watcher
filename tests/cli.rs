@@ -25,6 +25,7 @@ fn fixture(name: &str) -> PathBuf {
 
 fn watcher(project: &str, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_wt"))
+        .env("WT_LSP_TRACE", "1")
         .current_dir(fixture(project))
         .args(arguments)
         .output()
@@ -40,8 +41,23 @@ fn json_success(project: &str, arguments: &[&str]) -> Value {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let envelope: Value =
-        serde_json::from_slice(&output.stdout).expect("stdout should be one JSON value");
+    if arguments
+        .iter()
+        .any(|arg| matches!(*arg, "diagnostics" | "explain"))
+    {
+        eprintln!(
+            "watcher {arguments:?}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid JSON: {error}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
     assert_eq!(envelope["schemaVersion"], 1);
     assert_eq!(envelope["ok"], true);
     envelope["data"].clone()
@@ -182,12 +198,43 @@ fn diagnostics_settle_and_explain_uses_full_range() {
         .unwrap()
         .iter()
         .any(|diagnostic| diagnostic["severity"] == "warning"));
+    assert!(
+        diagnostics
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["severity"] == "warning" && d["file"] == "src/extra.rs"),
+        "{diagnostics}"
+    );
+    for (flag, severity) in [("--errors", "error"), ("--warnings", "warning")] {
+        let filtered = json_success("diagnostics_project", &["diagnostics", flag, "--json"]);
+        let items = filtered.as_array().unwrap();
+        assert!(!items.is_empty(), "{filtered}");
+        assert!(
+            items.iter().all(|d| d["severity"] == severity),
+            "{filtered}"
+        );
+    }
     let explanation = json_success("diagnostics_project", &["explain", "broken", "--json"]);
     assert!(explanation["diagnostics"]
         .as_array()
         .unwrap()
         .iter()
         .any(|diagnostic| diagnostic["severity"] == "error"));
+    assert!(
+        explanation["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["severity"] == "error"
+                && d["file"] == "src/main.rs"
+                && d["range"]["start"]["line"] == 1
+                && d["range"]["start"]["line"].as_u64().unwrap()
+                    > explanation["symbol"]["selection_range"]["end"]["line"]
+                        .as_u64()
+                        .unwrap()),
+        "{explanation}"
+    );
     assert!(explanation["source"].as_str().unwrap().lines().count() <= 5);
     assert!(
         explanation["symbol"]["range"]["end"]["line"]
