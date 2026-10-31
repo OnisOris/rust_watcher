@@ -1261,7 +1261,22 @@ mod tests {
 
     #[test]
     fn normalizes_kind_names() {
-        assert_eq!(kind_name(lsp_types::SymbolKind::STRUCT), "struct");
+        for (kind, expected) in [
+            (lsp_types::SymbolKind::ENUM, "enum"),
+            (lsp_types::SymbolKind::STRUCT, "struct"),
+            (lsp_types::SymbolKind::METHOD, "method"),
+            (lsp_types::SymbolKind::FUNCTION, "function"),
+        ] {
+            assert_eq!(kind_name(kind), expected);
+        }
+    }
+
+    #[test]
+    fn enum_member_has_specific_kind() {
+        assert_eq!(
+            kind_name(lsp_types::SymbolKind::ENUM_MEMBER),
+            "enum_variant"
+        );
     }
 
     #[test]

@@ -728,3 +728,30 @@ fn modules_are_exact_structural_reports_without_ra_or_git() {
     assert!(v["data"]["crateId"].is_null());
     assert_eq!(v["data"]["targets"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn enum_variants_keep_real_analyzer_kinds() {
+    if !require_analyzer() {
+        return;
+    }
+    let symbols = json_success("simple_project", &["symbol", "DivisionError", "--json"]);
+    assert!(
+        symbols["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "DivisionError" && s["kind"] == "enum"),
+        "{symbols}"
+    );
+    for variant in ["DivideByZero", "IntegerOverflow", "NotDivisible"] {
+        let symbols = json_success("simple_project", &["symbol", variant, "--json"]);
+        assert!(
+            symbols["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == variant && s["kind"] == "enum_variant"),
+            "{symbols}"
+        );
+    }
+}

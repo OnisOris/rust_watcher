@@ -36,3 +36,10 @@ mod second {
 fn invoke_first() {
     first::run();
 }
+
+#[allow(dead_code)]
+enum DivisionError {
+    DivideByZero,
+    IntegerOverflow,
+    NotDivisible,
+}
