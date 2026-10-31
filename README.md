@@ -764,9 +764,9 @@ wt summary
 wt /path/to/project summary
 ```
 
-The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and binary entrypoints from Cargo targets. Empty diagnostics are reported only after rust-analyzer reports a quiescent server and every opened workspace file has produced an initial diagnostic notification. A timeout is an error, never a clean result. `wt --json` without a subcommand remains a non-interactive JSON summary for scripting.
+The summary reports workspace crates, Rust files, semantic symbols, diagnostics, and binary entrypoints from Cargo targets. Diagnostics wait for every newly opened workspace file to publish, a requested rust-analyzer flycheck cycle to begin and end, quiescent analysis, and no active work progress. The latest publication replaces earlier diagnostics for each URI. A 500 ms quiet window after diagnostic, progress, or status activity lets queued publications settle; an initial empty publication alone cannot complete the wait. A timeout is an error, never a clean result. `wt --json` without a subcommand remains a non-interactive JSON summary for scripting.
 
-The summary and `diagnostics` command wait for a fully quiescent analyzer. TUI search may display partial results while indexing. Authoritative headless resolution confirms provisional zero-or-one matches after readiness, then enriches only candidate files. A workspace-wide document-symbol scan is reserved for the exact summary count and the fallback where a ready `workspace/symbol` still returns no usable candidate.
+The summary and `diagnostics` command observe both analyzer readiness and RA’s own cargo-check progress. Push diagnostics have no per-request completion identifier: this is a bounded settled snapshot, not a guarantee against future edits, delayed reloads, or arbitrary future publications. RA reports cancellation and completion with the same progress end; a subsequent begin blocks the wait again. Missing progress support or a check that never starts/finishes produces a timeout with state counts. Passive TUI sessions keep checks disabled and wait only for native diagnostics and analysis readiness. TUI search may display partial results while indexing. Authoritative headless resolution confirms provisional zero-or-one matches after readiness, then enriches only candidate files. A workspace-wide document-symbol scan is reserved for the exact summary count and the fallback where a ready `workspace/symbol` still returns no usable candidate.
 
 ## Semantic commands
 
@@ -785,7 +785,7 @@ wt diagnostics --warnings
 wt explain Engine::run
 ```
 
-`explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It opens and waits for diagnostics from the selected file only; the standalone `diagnostics` command still waits for the complete workspace diagnostic state. `explain` is intended to be useful both in a terminal and as compact context for an AI coding agent.
+`explain` combines the selected symbol, signature and hover documentation, definition, a small source fragment, callers, callees, reference count, and diagnostics on the symbol. It opens the selected file and waits for its diagnostics using the same check-completion contract (the check itself may cover its workspace); the standalone `diagnostics` command still waits for the complete workspace diagnostic state. `explain` is intended to be useful both in a terminal and as compact context for an AI coding agent.
 
 Unqualified commands fail when multiple symbols match instead of choosing one arbitrarily. Add a module or type qualifier such as `Engine::run` to disambiguate.
 

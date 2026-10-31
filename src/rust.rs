@@ -565,8 +565,9 @@ impl RustAnalyzer {
         } else {
             generation.saturating_sub(1)
         };
+        let check_after = self.client.start_diagnostics_check().await?;
         self.client
-            .wait_for_diagnostics(&expected, after, Duration::from_secs(30), true)
+            .wait_for_diagnostics(&expected, after, Duration::from_secs(30), check_after)
             .await?;
         self.collect_diagnostics(&expected)
     }
@@ -582,8 +583,10 @@ impl RustAnalyzer {
         } else {
             generation.saturating_sub(1)
         };
+        self.wait_ready().await?;
+        let check_after = self.client.start_diagnostics_check().await?;
         self.client
-            .wait_for_diagnostics(&expected, after, Duration::from_secs(15), false)
+            .wait_for_diagnostics(&expected, after, Duration::from_secs(30), check_after)
             .await?;
         self.collect_diagnostics(&expected)
     }

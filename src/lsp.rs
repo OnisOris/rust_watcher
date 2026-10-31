@@ -1,16 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Notify};
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use url::Url;
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -34,7 +34,12 @@ impl std::error::Error for AnalyzerNotFound {}
 struct NotificationState {
     diagnostics: HashMap<String, Vec<lsp_types::Diagnostic>>,
     diagnostic_generation: u64,
-    last_diagnostic_at: Option<Instant>,
+    started_checks: u64,
+    check_runs: HashMap<String, u64>,
+    completed_checks: u64,
+    last_activity_at: Option<Instant>,
+    notification_error: Option<String>,
+    recent_events: VecDeque<String>,
     active_progress: HashSet<String>,
     saw_progress: bool,
     last_progress_at: Option<Instant>,
@@ -51,6 +56,7 @@ pub struct LspClient {
     reader_error: Arc<Mutex<Option<String>>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     next_id: AtomicU64,
+    checks_enabled: bool,
 }
 
 impl LspClient {
@@ -119,6 +125,7 @@ impl LspClient {
             reader_error,
             stderr_tail,
             next_id: AtomicU64::new(1),
+            checks_enabled: !passive,
         };
         let root_uri = path_uri(root, true)?;
         let _: Value = client
@@ -132,6 +139,7 @@ impl LspClient {
                     "capabilities": {
                         "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}, "callHierarchy": {}, "hover": {}, "references": {}, "definition": {}, "publishDiagnostics": {}},
                         "workspace": {"symbol": {}},
+                        "window": {"workDoneProgress": true},
                         "experimental": {"serverStatusNotification": true}
                     }
                 }),
@@ -210,6 +218,11 @@ impl LspClient {
     }
 
     pub async fn open(&self, file: &Path) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .diagnostics
+            .remove(&path_uri(file, false)?);
         let text = std::fs::read_to_string(file)
             .with_context(|| format!("failed to read {}", file.display()))?;
         self.notify(
@@ -221,6 +234,12 @@ impl LspClient {
     pub async fn wait_ready(&self, maximum: Duration) -> Result<()> {
         let started = Instant::now();
         loop {
+            if let Some(error) = self.error() {
+                return Err(anyhow!(self.with_stderr(error)));
+            }
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let ready = {
                 let state = self.state.lock().unwrap();
                 let progress_quiet = state
@@ -240,11 +259,7 @@ impl LspClient {
                 .with_context(|| {
                     "timed out waiting for rust-analyzer readiness; no quiescent server status or completed progress cycle"
                 })?;
-            let _ = timeout(
-                remaining.min(Duration::from_millis(250)),
-                self.changed.notified(),
-            )
-            .await;
+            let _ = timeout(remaining.min(Duration::from_millis(250)), notified).await;
         }
     }
 
@@ -289,42 +304,36 @@ impl LspClient {
         self.state.lock().unwrap().diagnostic_generation
     }
 
+    /// Explicitly restart RA's own check, observing its progress rather than guessing
+    /// that serverStatus.quiescent also means cargo check has finished.
+    pub async fn start_diagnostics_check(&self) -> Result<Option<u64>> {
+        if !self.checks_enabled {
+            return Ok(None);
+        }
+        let after = self.state.lock().unwrap().started_checks;
+        self.notify("rust-analyzer/runFlycheck", json!({"textDocument": null}))
+            .await?;
+        Ok(Some(after))
+    }
+
     pub async fn wait_for_diagnostics(
         &self,
         expected_uris: &HashSet<String>,
         after: u64,
         maximum: Duration,
-        require_analysis_ready: bool,
+        check_after: Option<u64>,
     ) -> Result<()> {
-        let started = Instant::now();
-        loop {
-            let ready = {
-                let state = self.state.lock().unwrap();
-                let analysis_ready = (state.server_status_seen && state.server_quiescent)
-                    || (!state.server_status_seen
-                        && state.saw_progress
-                        && state.active_progress.is_empty());
-                state.diagnostic_generation > after
-                    && expected_uris
-                        .iter()
-                        .all(|uri| state.diagnostics.contains_key(uri))
-                    && (!require_analysis_ready || analysis_ready)
-                    && state
-                        .last_diagnostic_at
-                        .is_some_and(|time| time.elapsed() >= Duration::from_millis(500))
-            };
-            if ready {
-                return Ok(());
-            }
-            let remaining = maximum
-                .checked_sub(started.elapsed())
-                .context("timed out waiting for rust-analyzer diagnostics")?;
-            let _ = timeout(
-                remaining.min(Duration::from_millis(250)),
-                self.changed.notified(),
-            )
-            .await;
-        }
+        wait_for_diagnostics_state(
+            &self.state,
+            &self.changed,
+            &self.reader_error,
+            expected_uris,
+            after,
+            maximum,
+            check_after,
+        )
+        .await
+        .map_err(|error| anyhow!(self.with_stderr(error.to_string())))
     }
 
     pub async fn shutdown(&mut self) {
@@ -354,6 +363,73 @@ impl LspClient {
     }
 }
 
+// Push diagnostics have no per-request completion ID. Require a subsequent RA
+// flycheck end, all expected documents, idle analysis/progress, then a quiet
+// publication window. End can also mean cancellation; a restarted check blocks
+// again as soon as its begin arrives. This is a bounded snapshot, not a promise
+// against future edits/reloads or arbitrarily delayed future notifications.
+async fn wait_for_diagnostics_state(
+    state: &Mutex<NotificationState>,
+    changed: &Notify,
+    reader_error: &Mutex<Option<String>>,
+    expected: &HashSet<String>,
+    after: u64,
+    maximum: Duration,
+    check_after: Option<u64>,
+) -> Result<()> {
+    let deadline = Instant::now() + maximum;
+    loop {
+        // Register before inspecting state: notify_waiters does not retain permits.
+        let notified = changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(error) = reader_error.lock().unwrap().as_ref() {
+            return Err(anyhow!("waiting for rust-analyzer diagnostics: {error}"));
+        }
+        let context = {
+            let state = state.lock().unwrap();
+            if let Some(error) = &state.notification_error {
+                return Err(anyhow!("waiting for rust-analyzer diagnostics: {error}"));
+            }
+            let missing = expected
+                .iter()
+                .filter(|uri| !state.diagnostics.contains_key(*uri))
+                .count();
+            let analysis_ready = if state.server_status_seen {
+                state.server_quiescent
+            } else {
+                state.saw_progress
+            };
+            let checked = check_after.is_none_or(|after| state.completed_checks > after);
+            if state.diagnostic_generation > after
+                && missing == 0
+                && analysis_ready
+                && state.active_progress.is_empty()
+                && checked
+                && state
+                    .last_activity_at
+                    .is_some_and(|at| at.elapsed() >= Duration::from_millis(500))
+            {
+                if std::env::var_os("WT_LSP_TRACE").is_some() {
+                    eprintln!("LSP diagnostics settled: generation={}, documents={}, completed_checks={}, active_progress=0", state.diagnostic_generation, expected.len(), state.completed_checks);
+                    eprintln!("LSP diagnostics recent events: {:?}", state.recent_events);
+                }
+                return Ok(());
+            }
+            format!("generation={}/{after}, missing_documents={missing}/{}, quiescent={}, active_progress={}, completed_checks={}, check_after={check_after:?}, recent_events={:?}",
+                state.diagnostic_generation, expected.len(), state.server_quiescent,
+                state.active_progress.len(), state.completed_checks, state.recent_events)
+        };
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for rust-analyzer diagnostics: {context}"
+            ));
+        }
+        let _ = timeout((deadline - now).min(Duration::from_millis(250)), notified).await;
+    }
+}
+
 fn passive_options() -> Value {
     json!({"check": {"enable": false}, "cargo": {"buildScripts": {"enable": false}}, "procMacro": {"enable": false}})
 }
@@ -378,7 +454,11 @@ fn spawn_reader(
             if message.get("id").is_some() {
                 if message.get("method").is_some() {
                     if let Some(response) = server_request_response(&message) {
-                        let _ = write_message(&input, &response).await;
+                        if let Err(error) = write_message(&input, &response).await {
+                            break format!(
+                                "rust-analyzer server request response failed: {error:#}"
+                            );
+                        }
                     }
                 } else {
                     route_response(message, &pending);
@@ -401,6 +481,7 @@ fn spawn_reader(
             format!("{terminal_error}\nrust-analyzer stderr (tail):\n{tail}")
         };
         *reader_error.lock().unwrap() = Some(terminal_error.clone());
+        changed.notify_waiters();
         for (_, sender) in pending.lock().unwrap().drain() {
             let _ = sender.send(Err(terminal_error.clone()));
         }
@@ -462,17 +543,21 @@ fn record_notification(method: &str, params: Value, state: &Arc<Mutex<Notificati
     let mut state = state.lock().unwrap();
     match method {
         "textDocument/publishDiagnostics" => {
-            if let Ok(params) =
-                serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params)
-            {
-                state.diagnostic_generation += 1;
-                state.last_diagnostic_at = Some(Instant::now());
-                state
-                    .diagnostics
-                    .insert(params.uri.to_string(), params.diagnostics);
+            match serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params) {
+                Ok(params) => {
+                    state.last_activity_at = Some(Instant::now());
+                    state.diagnostic_generation += 1;
+                    state
+                        .diagnostics
+                        .insert(params.uri.to_string(), params.diagnostics);
+                }
+                Err(error) => {
+                    state.notification_error = Some(format!("invalid publishDiagnostics: {error}"))
+                }
             }
         }
         "$/progress" => {
+            state.last_activity_at = Some(Instant::now());
             state.saw_progress = true;
             state.last_progress_at = Some(Instant::now());
             let token = params
@@ -481,15 +566,32 @@ fn record_notification(method: &str, params: Value, state: &Arc<Mutex<Notificati
                 .unwrap_or_default();
             match params.pointer("/value/kind").and_then(Value::as_str) {
                 Some("begin") => {
+                    if params
+                        .get("token")
+                        .and_then(Value::as_str)
+                        .is_some_and(|token| token.starts_with("rust-analyzer/flycheck/"))
+                    {
+                        state.started_checks += 1;
+                        let generation = state.started_checks;
+                        state.check_runs.insert(token.clone(), generation);
+                    }
                     state.active_progress.insert(token);
                 }
                 Some("end") => {
                     state.active_progress.remove(&token);
+                    if let Some(generation) = state.check_runs.remove(&token) {
+                        state.completed_checks = state.completed_checks.max(generation);
+                    }
                 }
                 _ => {}
             }
         }
         "experimental/serverStatus" => {
+            state.last_activity_at = Some(Instant::now());
+            if params.get("health").and_then(Value::as_str) == Some("error") {
+                state.notification_error =
+                    Some("rust-analyzer server reported health=error".into());
+            }
             state.server_status_seen = true;
             state.server_quiescent = params
                 .get("quiescent")
@@ -497,6 +599,24 @@ fn record_notification(method: &str, params: Value, state: &Arc<Mutex<Notificati
                 .unwrap_or(false);
         }
         _ => {}
+    }
+    if matches!(
+        method,
+        "textDocument/publishDiagnostics" | "$/progress" | "experimental/serverStatus"
+    ) {
+        let event = format!(
+            "{method}: generation={}, documents={}, quiescent={}, active={}, check={}/{}",
+            state.diagnostic_generation,
+            state.diagnostics.len(),
+            state.server_quiescent,
+            state.active_progress.len(),
+            state.completed_checks,
+            state.started_checks
+        );
+        if state.recent_events.len() == 32 {
+            state.recent_events.pop_front();
+        }
+        state.recent_events.push_back(event);
     }
 }
 
