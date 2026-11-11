@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols  >3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+CALL GRAPH · workspace · depth 1/2
+Focus: main · app/src/main.rs:1:4
+Selected: main · app/src/main.rs:1:4
+╭ CALLERS → FOCUS → CALLEES · RA verified ───────────────────────────────────────────────────╮╭ DETAILS · Tab / j/k scr╮
+│                                                                                            ││SELECTED SYMBOL         │
+│                                                                                            ││main                    │
+│                                                                                            ││                        │
+│                                                                                            ││app/src/main.rs         │
+│                                                                                            ││Line 1 · function       │
+│                                                                                            ││                        │
+│                                                                                            ││Incoming: 0 · complete  │
+│                                                                                            ││Outgoing: 1 · complete  │
+│                                                                                            ││                        │
+│                                                                                            ││x expand direct neighbor│
+│                                      ┌>◎ focus──────┐   ┌L1────────────┐                   ││Enter focus · o source  │
+│                                      │main          │──▶│shared        │                   ││g List · e scope        │
+│                                      └main.rs:1─────┘   └lib.rs:1──────┘                   ││1 confirmed edges       │
+│                                                                                            ││0 ↺ recursive edges     │
+│                                                                                            ││0 edges outside page / ↻│
+│                                                                                            ││repeated                │
+│                                                                                            ││                        │
+│                                                                                            ││                        │
+│                                                                                            ││                        │
+│                                                                                            ││                        │
+│                                                                                            ││                        │
+│                                                                                            ││                        │
+│                                                                                            ││                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯╰────────────────────────╯
+Page 1/1 · Showing 2 of 2 retained nodes · PgUp/PgDn
+Callers: 0 · complete · Callees: 1 · complete
+RA call hierarchy · no inferred cfg · 0 ↺ recursive · 0 off-page/repeated edges
+ j/k select · Enter focus · x expand · g List · o source · PgUp/Dn · e · Esc · q quit

@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols  >3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ CALLERS → ─────────────────────────╮╭ CURRENT · workspace ─────────────────────╮╭ → CALLEES ─────────────────────────╮
+│No callers in selected scope        ││main                                      ││> shared                            │
+│                                    ││Selected binary: fixture_app · fixture_app││    core/src/lib.rs:1               │
+│                                    ││                                          ││                                    │
+│                                    ││kind      function                        ││                                    │
+│                                    ││location  app/src/main.rs:1               ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││callers   0                               ││                                    │
+│                                    ││callees   1                               ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││history   0                               ││                                    │
+│                                    ││o exact source / Inspector                ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+│                                    ││                                          ││                                    │
+╰────────────────────────────────────╯╰──────────────────────────────────────────╯╰────────────────────────────────────╯
+ j/k · Enter follow · g Graph · o source · Tab pane · e scope · Esc · q quit

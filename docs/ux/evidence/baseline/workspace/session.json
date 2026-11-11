@@ -1,0 +1,43 @@
+{
+  "binary": "/tmp/wt-ux-v2-baseline",
+  "project": "tests/fixtures/workspace_project",
+  "events": [
+    {
+      "first_output_seconds": 0.057637939986307174
+    },
+    {
+      "seconds": 9.139981598011218,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90,
+        "capture": "overview"
+      }
+    },
+    {
+      "seconds": 9.875268761010375,
+      "step": {
+        "keys": "3\r",
+        "capture": "binary-picker"
+      }
+    },
+    {
+      "seconds": 13.113168255018536,
+      "step": {
+        "keys": "\r",
+        "settle": 3,
+        "capture": "calls"
+      }
+    },
+    {
+      "seconds": 13.6878105889773,
+      "step": {
+        "keys": "g",
+        "capture": "call-graph"
+      }
+    },
+    {
+      "quit_seconds": 0.2944870939827524,
+      "exit_code": 0
+    }
+  ]
+}

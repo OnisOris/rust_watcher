@@ -1,0 +1,35 @@
+ wt workspace_project  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ REPOSITORY OVERVIEW ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│7 source LOC   2 functions   0 review files                                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ EXPLORATION ────────────────────────────╮╭ SELECTED ITEM · j/k scroll ───────────────────────────────────────────────╮
+│> Workspace summary                      ││workspace_project                                                          │
+│  ▾ START EXPLORING                      ││Read-only repository exploration                                           │
+│    Explore architecture →               ││                                                                           │
+│    Open main entrypoint →               ││Metrics ready                                                              │
+│    Review hotspots →                    ││Files                 5                                                    │
+│    Find longest functions →             ││Source nonblank LOC   7                                                    │
+│  ▾ GIT HOTSPOTS                         ││Test files            0                                                    │
+│    Cargo.toml       1 changes · history ││MAINTAINABILITY · Rust                                                     │
+│  app/Cargo.toml                         ││Functions             2                                                    │
+│    main.rs          1 changes · history ││Median / P95          3 / 4 lines                                          │
+│  app/src/main.rs                        ││Max control depth     0                                                    │
+│    Cargo.toml       1 changes · history ││Languages · nonblank lines                                                 │
+│  core/Cargo.toml                        ││TOML                  13                                                   │
+│    Cargo.toml       1 changes · history ││Rust                  7                                                    │
+│  Cargo.toml                             ││Largest packages · source lines                                            │
+│    lib.rs           1 changes · history ││fixture_app           4                                                    │
+│  core/src/lib.rs                        ││fixture_core          3                                                    │
+│  ▸ LARGEST SOURCE FILES                 ││Git history                                                                │
+│  ▸ LONGEST FUNCTIONS                    ││Insufficient change history for hotspot candidates                         │
+│  ▸ DEEPEST CONTROL FLOW                 ││History              complete                                              │
+│  ▸ CRATES                               ││Co-change            complete                                              │
+│  ▸ ENTRYPOINTS                          ││Current metrics      complete                                              │
+│  ▸ LANGUAGES                            ││5 Map → crate architecture · Enter expands groups                          │
+│  ▸ HISTORICAL PATHS                     ││                                                                           │
+│  ▸ ANALYSIS & LIMITATIONS               ││                                                                           │
+│                                         ││                                                                           │
+╰─────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter expand/open · Tab pane · 1–5 views · ? help · q quit

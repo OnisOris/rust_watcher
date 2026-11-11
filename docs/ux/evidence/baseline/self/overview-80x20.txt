@@ -1,0 +1,20 @@
+ wt rust_watcher  >1 OVR   2 SYM   3 CALL   4 FILE   5 MAP
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+────────────────────────────────────────────────────────────────────────────────
+╭ REPOSITORY OVERVIEW ─────────────────────────────────────────────────────────╮
+│25.9k source LOC   885 functions   22 review files                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ EXPLORATION ───────────────────╮╭ SELECTED ITEM · j/k scroll ────────────────╮
+│> Workspace summary             ││rust_watcher                                │
+│  ▾ START EXPLORING             ││Read-only repository exploration            │
+│    Explore architecture →      ││                                            │
+│    Open main entrypoint →      ││Metrics ready                               │
+│    Review hotspots →           ││Files                 103                   │
+│    Find longest functions →    ││Source nonblank LOC   25876                 │
+│  ▾ GIT HOTSPOTS                ││Test files            11                    │
+│    event.rs         18 changes ││MAINTAINABILITY · Rust                      │
+│  src/tui/event.rs              ││Functions             885                   │
+│    ui.rs            14 changes ││Median / P95          13 / 92 lines         │
+│  src/tui/ui.rs                 ││Max control depth     8                     │
+╰────────────────────────────────╯╰────────────────────────────────────────────╯
+ j/k select · Enter expand/open · Tab pane · 1–5 views · ? help · q quit

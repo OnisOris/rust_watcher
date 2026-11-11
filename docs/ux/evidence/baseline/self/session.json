@@ -1,0 +1,53 @@
+{
+  "binary": "/tmp/wt-ux-v2-baseline",
+  "project": ".",
+  "events": [
+    {
+      "seconds": 0.3174274630146101,
+      "step": {
+        "settle": 0.05,
+        "capture": "first-frame"
+      }
+    },
+    {
+      "first_output_seconds": 0.3225867369910702
+    },
+    {
+      "seconds": 14.829226027999539,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90,
+        "capture": "overview-120x35"
+      }
+    },
+    {
+      "seconds": 15.409602778032422,
+      "step": {
+        "keys": "5",
+        "capture": "cargo-map"
+      }
+    },
+    {
+      "seconds": 15.952032633009367,
+      "step": {
+        "keys": "m",
+        "capture": "module-inspector"
+      }
+    },
+    {
+      "seconds": 16.34507133299485,
+      "step": {
+        "keys": "1",
+        "size": [
+          80,
+          20
+        ],
+        "capture": "overview-80x20"
+      }
+    },
+    {
+      "quit_seconds": 0.27653535100398585,
+      "exit_code": 0
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+ wt rust_watcher   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Workspace > rust_watcher > Modules · Focus: crate
+ >Hierarchy   Imports   Used by  · g Diagram
+Coverage: Complete · Resolution: Limited · cfg 230
+╭ MODULE MAP · wt · Hierarchy ───────────────────────────────────╮╭ MODULE INSPECTOR · p priorities ───────────────────╮
+│                     ┌>0 · focus──────────┐                     ││MODULE · crate                                      │
+│                     │crate               │                     ││Selected: crate                                     │
+│                     └──────────┬─────────┘                     ││Center: crate                                       │
+│┌───────────────────────────────┘                               ││src/main.rs                                         │
+│├───────────┬───────────────────┬───────────────────┐           ││Resolved · src/main.rs:1 · o source                 │
+││           ▼                   ▼                   ▼           ││STRUCTURE · physical subtree                        │
+││  ┌────────┴───────┐  ┌────────┴───────┐  ┌────────┴───────┐   ││Child modules              13                       │
+││  │architecture    │  │cli             │  │git_analysis    │   ││Physical subtree files     79                       │
+││  └1 · mod─────────┘  └2 · mod─────────┘  └3 · mod─────────┘   ││Subtree file LOC           24887                    │
+││                                                               ││Subtree file functions     739                      │
+│├───────────┬───────────────────┬───────────────────┐           ││Max file control depth     8                        │
+││           ▼                   ▼                   ▼           ││Own module LOC/functions: unknown                   │
+││  ┌────────┴───────┐  ┌────────┴───────┐  ┌────────┴───────┐   ││Physical files deduped; not exclusive inline        │
+││  │lsp             │  │maintainability │  │metrics         │   ││contents.                                           │
+││  └4 · mod─────────┘  └5 · mod─────────┘  └6 · mod─────────┘   ││RELATIONSHIPS · records, not calls                  │
+││                                                               ││Direct verified imports    0                        │
+│└───────────┬───────────────────┬───────────────────┐           ││Subtree verified imports   248                      │
+│            ▼                   ▼                   ▼           ││Direct imported by modules 0                        │
+│   ┌────────┴───────┐  ┌────────┴───────┐  ┌────────┴───────┐   ││Direct unclassified        13                       │
+│   │model           │  │module_graph    │  │output          │   ││Subtree unclassified       485                      │
+│   └7 · mod─────────┘  └8 · mod─────────┘  └9 · mod─────────┘   ││REVIEW PRIORITIES                                   │
+│                                                                ││crate::tui · 15020 file LOC                         │
+│                                                                ││crate::module_graph · 2070 file LOC                 │
+│                                                                ││crate::git_analysis · 1591 file LOC                 │
+│Page 1/2 · Nodes 1–9 of 13 · Diagram                            ││Hotspot files              21                       │
+│mod: parent → child · PgUp/PgDn pages                           ││Hotspot: src/tui/event.rs · 18 changes              │
+╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────╯
+ j/k select · PgUp/PgDn pages · Enter focus · g/v · p review · o · Esc · q quit
