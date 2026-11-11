@@ -1,12 +1,12 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": ".",
   "events": [
     {
-      "first_output_seconds": 0.4564623979968019
+      "first_output_seconds": 0.059420141973532736
     },
     {
-      "seconds": 1.4350897860131226,
+      "seconds": 0.742283048981335,
       "step": {
         "wait": "Explore execution",
         "timeout": 20,
@@ -14,7 +14,7 @@
       }
     },
     {
-      "seconds": 2.216878160019405,
+      "seconds": 1.3236981490044855,
       "step": {
         "wait": "RA \u25d0 Indexing",
         "timeout": 30,
@@ -22,7 +22,7 @@
       }
     },
     {
-      "seconds": 26.80719813401811,
+      "seconds": 12.262851230974775,
       "step": {
         "wait": "RA \u25cf Ready",
         "timeout": 90,
@@ -30,7 +30,7 @@
       }
     },
     {
-      "seconds": 27.532668152009137,
+      "seconds": 12.942058497981634,
       "step": {
         "size": [
           80,
@@ -40,7 +40,7 @@
       }
     },
     {
-      "seconds": 28.46793487400282,
+      "seconds": 13.62238479097141,
       "step": {
         "size": [
           100,
@@ -50,7 +50,7 @@
       }
     },
     {
-      "seconds": 29.62340328504797,
+      "seconds": 14.527426833985373,
       "step": {
         "size": [
           160,
@@ -60,7 +60,7 @@
       }
     },
     {
-      "seconds": 30.12700085801771,
+      "seconds": 15.028312249982264,
       "step": {
         "size": [
           120,
@@ -69,7 +69,7 @@
       }
     },
     {
-      "seconds": 31.326801586023066,
+      "seconds": 15.852250739990268,
       "step": {
         "keys": "jjjj\rjjjjj",
         "capture": "03-selected-depth",
@@ -77,25 +77,25 @@
       }
     },
     {
-      "seconds": 31.956425386015326,
+      "seconds": 16.382518686994445,
       "step": {
         "keys": "?",
         "capture": "04-depth-interpretation"
       }
     },
     {
-      "seconds": 32.83122276799986,
+      "seconds": 16.936589939985424,
       "step": {
         "keys": "\u001b",
         "capture": "depth-return"
       }
     },
     {
-      "quit_seconds": 0.32307714701164514,
+      "quit_seconds": 0.3067358100088313,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35

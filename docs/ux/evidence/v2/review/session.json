@@ -1,19 +1,19 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": ".",
   "events": [
     {
-      "first_output_seconds": 0.03009563300292939
+      "first_output_seconds": 0.04006321099586785
     },
     {
-      "seconds": 3.5412962699774653,
+      "seconds": 5.361595214984845,
       "step": {
         "wait": "Git \u25cf Complete",
         "timeout": 90
       }
     },
     {
-      "seconds": 4.569161886989605,
+      "seconds": 6.226999111007899,
       "step": {
         "keys": "jjj\r",
         "capture": "05-review-evidence",
@@ -21,7 +21,7 @@
       }
     },
     {
-      "seconds": 5.367195856990293,
+      "seconds": 6.920974946988281,
       "step": {
         "keys": "p",
         "capture": "review-next-actions",
@@ -29,7 +29,7 @@
       }
     },
     {
-      "seconds": 8.072421154996846,
+      "seconds": 9.341340031998698,
       "step": {
         "keys": "\r",
         "wait": "INSPECTOR",
@@ -39,18 +39,18 @@
       }
     },
     {
-      "seconds": 8.981921611004509,
+      "seconds": 9.9906502480153,
       "step": {
         "keys": "\u001b\u001b",
         "capture": "review-return"
       }
     },
     {
-      "quit_seconds": 0.27251387998694554,
+      "quit_seconds": 0.2652645279886201,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35

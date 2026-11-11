@@ -1,12 +1,12 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": "/home/poke/code/QymCAD",
   "events": [
     {
-      "first_output_seconds": 0.06806503603002056
+      "first_output_seconds": 0.06477732403436676
     },
     {
-      "seconds": 0.6925555189955048,
+      "seconds": 0.7205856180517003,
       "step": {
         "wait": "Explore architecture",
         "timeout": 20,
@@ -14,7 +14,7 @@
       }
     },
     {
-      "seconds": 1.555975510040298,
+      "seconds": 1.421812241023872,
       "step": {
         "keys": "5",
         "wait": "CRATE INSPECTOR",
@@ -22,7 +22,7 @@
       }
     },
     {
-      "seconds": 64.23097688698908,
+      "seconds": 58.710648048028816,
       "step": {
         "keys": "m",
         "wait": "MODULE INSPECTOR",
@@ -31,7 +31,7 @@
       }
     },
     {
-      "seconds": 65.146392544033,
+      "seconds": 59.78425203601364,
       "step": {
         "size": [
           80,
@@ -41,7 +41,7 @@
       }
     },
     {
-      "seconds": 66.61809628200717,
+      "seconds": 61.33363108400954,
       "step": {
         "size": [
           160,
@@ -51,11 +51,11 @@
       }
     },
     {
-      "quit_seconds": 0.3082497729919851,
+      "quit_seconds": 0.39601162797771394,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35

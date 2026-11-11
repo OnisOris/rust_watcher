@@ -107,9 +107,9 @@ The PTY verifier confirms all ten captures and that module content after return
 equals the initial content (excluding the changing global header). Calls Focus
 before and after source is `main · app/src/main.rs:1:4`.
 The complete sequential six-scenario QA harness also exited successfully;
-[its session manifests](evidence/qa-harness.json) retain the actual second replay.
-The debug binary SHA-256 is
-`5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95`;
+[its session manifests](evidence/qa-harness.json) retain the pinned replay.
+The captured debug binary SHA-256 is
+`6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a`;
 the release binary SHA-256 is
 `f69c1d4b3d56c9e1210a4f1c36052dcec4d6ba09342f7031fcd1d99f54a5f496`.
 
@@ -118,10 +118,10 @@ j/k/2/1 per version (20 samples), after RA/Git readiness:
 
 | Measurement | Baseline | v2 |
 | --- | ---: | ---: |
-| Median input → first terminal output | 48.35 ms | 48.91 ms |
-| Maximum of 20 samples | 112.28 ms | 72.09 ms |
-| First terminal bytes after process spawn | 69 ms | 61 ms |
-| Quit after stable input smoke | 300 ms | 289 ms |
+| Median input → first terminal output | 48.35 ms | 49.51 ms |
+| Maximum of 20 samples | 112.28 ms | 65.05 ms |
+| First terminal bytes after process spawn | 69 ms | 39 ms |
+| Quit after stable input smoke | 300 ms | 276 ms |
 
 See `evidence/{baseline,v2}/latency/session.json`. These are first-output transport
 measurements, **not** semantic completion or precise time-to-first-frame. Small
@@ -129,8 +129,8 @@ samples, a shared machine and warm caches do not establish a speedup or prove
 absence of all regressions. Startup still draws before RA/repository workers;
 the implementation did not alter that ordering or add synchronous LSP work.
 
-In the 19-crate workspace, final first output was ~68 ms, Cargo view at ~1.6 s,
-module Inspector at ~64.2 s, quit ~308 ms while Git was still analyzing. The
+In the 19-crate workspace, final first output was ~65 ms, Cargo view at ~1.4 s,
+module Inspector at ~58.7 s, quit ~396 ms while RA and Git were still analyzing. The
 baseline loaded-run module sample was ~84.7 s. Conditions differed; no speedup is
 claimed. The long existing module-analysis delay is a limitation, clearly shown
 as loading/unknown rather than blocking navigation. Final large-module coverage
@@ -178,9 +178,15 @@ separate final review and benchmark before declaring all Product UX v2 gates met
 python3 -m venv /tmp/wt-ux-qa
 /tmp/wt-ux-qa/bin/pip install pyte Pillow
 cargo build
-QA_PYTHON=/tmp/wt-ux-qa/bin/python bash scripts/ux_qa.sh
-/tmp/wt-ux-qa/bin/python scripts/ux_verify.py
+cp target/debug/wt /tmp/wt-ux-reviewed
+QA_PYTHON=/tmp/wt-ux-qa/bin/python QA_BINARY=/tmp/wt-ux-reviewed bash scripts/ux_qa.sh
+/tmp/wt-ux-qa/bin/python scripts/ux_verify.py --binary /tmp/wt-ux-reviewed
 ```
+
+Archive-only verification can omit `--binary` to check consistency of the saved
+batch, or pass `--expected-sha256` with the recorded hash. A later Cargo build can
+replace target/debug/wt; pin the executable before capture rather than depending
+on that mutable path.
 
 The large-workspace and latency scenarios are separate, optional invocations of
 `scripts/ux_pty.py`; use an approved local project and retain its provenance.

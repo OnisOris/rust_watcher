@@ -1,33 +1,33 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": "tests/fixtures/workspace_project",
   "events": [
     {
-      "first_output_seconds": 0.02673612895887345
+      "first_output_seconds": 0.042511332023423165
     },
     {
-      "seconds": 4.554310792998876,
+      "seconds": 6.382220353989396,
       "step": {
         "wait": "RA \u25cf Ready",
         "timeout": 90
       }
     },
     {
-      "seconds": 5.032601801969577,
+      "seconds": 6.911645842017606,
       "step": {
         "keys": "j\r",
         "capture": "architecture"
       }
     },
     {
-      "seconds": 5.504236890992615,
+      "seconds": 7.473589662986342,
       "step": {
         "keys": "m",
         "capture": "06-module-inspector"
       }
     },
     {
-      "seconds": 6.649604596954305,
+      "seconds": 8.639278826012742,
       "step": {
         "keys": "o",
         "wait": "function",
@@ -37,7 +37,7 @@
       }
     },
     {
-      "seconds": 7.202393916959409,
+      "seconds": 9.226468027976807,
       "step": {
         "keys": "\r",
         "wait": "INSPECTOR",
@@ -46,7 +46,7 @@
       }
     },
     {
-      "seconds": 9.305026372952852,
+      "seconds": 11.331162495014723,
       "step": {
         "keys": "c",
         "wait": "CURRENT",
@@ -55,14 +55,14 @@
       }
     },
     {
-      "seconds": 9.757955421984661,
+      "seconds": 11.880538130993955,
       "step": {
         "keys": "g",
         "capture": "module-call-graph"
       }
     },
     {
-      "seconds": 10.328660223982297,
+      "seconds": 12.5309136689757,
       "step": {
         "keys": "\u001b",
         "wait": "MODULE MAP",
@@ -70,11 +70,11 @@
       }
     },
     {
-      "quit_seconds": 0.14449539897032082,
+      "quit_seconds": 0.2160186900291592,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35

@@ -1,26 +1,26 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": "tests/fixtures/simple_project",
   "events": [
     {
-      "first_output_seconds": 0.026783709996379912
+      "first_output_seconds": 0.03349419601727277
     },
     {
-      "seconds": 4.555563142988831,
+      "seconds": 6.590464818000328,
       "step": {
         "wait": "RA \u25cf Ready",
         "timeout": 90
       }
     },
     {
-      "seconds": 5.01445556699764,
+      "seconds": 7.090064620017074,
       "step": {
         "keys": "jj\r",
         "capture": "symbol-search"
       }
     },
     {
-      "seconds": 7.156286685960367,
+      "seconds": 9.407663402031176,
       "step": {
         "keys": "calculate",
         "settle": 2,
@@ -28,7 +28,7 @@
       }
     },
     {
-      "seconds": 9.309608307958115,
+      "seconds": 11.585163633048069,
       "step": {
         "keys": "\r",
         "wait": "INSPECTOR",
@@ -38,11 +38,11 @@
       }
     },
     {
-      "quit_seconds": 0.17152275098487735,
+      "quit_seconds": 0.18907682300778106,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35

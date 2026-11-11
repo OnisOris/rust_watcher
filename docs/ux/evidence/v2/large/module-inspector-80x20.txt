@@ -1,5 +1,5 @@
  wt QymCAD   1 OVR   2 SYM   3 CALL   4 FILE  >5 MAP
-RA ● Ready   Git ◐ Analyzing
+RA ◐ Indexing   Git ◐ Analyzing
 Architecture · Esc back · ? context help────────────────────────────────────────
 Workspace > qymcad > Modules · Focus: crate
  >Hierarchy   Imports   Used by  · g Diagram

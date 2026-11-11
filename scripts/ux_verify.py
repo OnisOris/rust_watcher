@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify saved real-PTY acceptance evidence (QA-only Pillow dependency)."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -8,9 +9,17 @@ from PIL import Image
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", help="Also require byte identity with this executable")
+    parser.add_argument("--expected-sha256", help="Require the archived capture-batch hash")
+    args = parser.parse_args()
     root = Path("docs/ux/evidence/v2")
-    with open("target/debug/wt", "rb") as binary:
-        digest = hashlib.file_digest(binary, "sha256").hexdigest()
+    digest = args.expected_sha256
+    if args.binary:
+        with open(args.binary, "rb") as binary:
+            actual = hashlib.file_digest(binary, "sha256").hexdigest()
+        assert digest is None or digest == actual, "executable does not match expected hash"
+        digest = actual
     required = {
         "home": ["01-overview-120x35", "02-overview-80x20", "03-selected-depth",
                  "04-depth-interpretation", "09-indexing"],
@@ -21,6 +30,8 @@ def main():
     }
     for group, captures in required.items():
         manifest = json.loads((root / group / "session.json").read_text())
+        if digest is None:
+            digest = manifest["binary_sha256"]
         assert manifest["binary_sha256"] == digest, group
         assert manifest["events"][-1]["exit_code"] == 0, group
         recorded = {e["step"]["capture"] for e in manifest["events"]

@@ -1,12 +1,12 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": "tests/fixtures/workspace_project",
   "events": [
     {
-      "first_output_seconds": 0.046180567995179445
+      "first_output_seconds": 0.04451457899995148
     },
     {
-      "seconds": 0.709531745989807,
+      "seconds": 0.6351667420240119,
       "step": {
         "wait": "RA \u00d7 Error",
         "timeout": 30,
@@ -14,7 +14,7 @@
       }
     },
     {
-      "seconds": 1.23973017296521,
+      "seconds": 1.118084790010471,
       "step": {
         "keys": "\r\r",
         "wait": "Source available",
@@ -23,18 +23,18 @@
       }
     },
     {
-      "seconds": 1.831158090964891,
+      "seconds": 1.6843443700345233,
       "step": {
         "keys": "\u001b\u001b",
         "capture": "return-without-ra"
       }
     },
     {
-      "quit_seconds": 0.026978211011737585,
+      "quit_seconds": 0.03477447299519554,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35

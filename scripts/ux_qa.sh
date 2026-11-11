@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Real-PTY developer QA. Set QA_PYTHON to a Python with pyte and Pillow.
-# Example: QA_PYTHON=/tmp/wt-ux-qa/bin/python bash scripts/ux_qa.sh
+# Example: QA_PYTHON=/tmp/wt-ux-qa/bin/python QA_BINARY=/tmp/wt-reviewed bash scripts/ux_qa.sh
+# Pin/copy a reviewed binary before replay; concurrent Cargo builds may replace target/debug/wt.
 set -euo pipefail
 qa_python="${QA_PYTHON:-python3}"
 qa_binary="${QA_BINARY:-target/debug/wt}"

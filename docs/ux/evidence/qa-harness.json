@@ -1,15 +1,16 @@
 {
   "implementation": "9f3d27eaf317235512cc36ca43ef986268cd5660",
+  "pinned_binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "sessions": {
     "home": {
-      "binary": "target/debug/wt",
+      "binary": "/tmp/wt-ux-v2-reviewed",
       "project": ".",
       "events": [
         {
-          "first_output_seconds": 0.06756469700485468
+          "first_output_seconds": 0.059420141973532736
         },
         {
-          "seconds": 0.7865629059961066,
+          "seconds": 0.742283048981335,
           "step": {
             "wait": "Explore execution",
             "timeout": 20,
@@ -17,7 +18,7 @@
           }
         },
         {
-          "seconds": 1.4760123020387255,
+          "seconds": 1.3236981490044855,
           "step": {
             "wait": "RA \u25d0 Indexing",
             "timeout": 30,
@@ -25,7 +26,7 @@
           }
         },
         {
-          "seconds": 12.358576847997028,
+          "seconds": 12.262851230974775,
           "step": {
             "wait": "RA \u25cf Ready",
             "timeout": 90,
@@ -33,7 +34,7 @@
           }
         },
         {
-          "seconds": 12.959100090025458,
+          "seconds": 12.942058497981634,
           "step": {
             "size": [
               80,
@@ -43,7 +44,7 @@
           }
         },
         {
-          "seconds": 13.628311237029266,
+          "seconds": 13.62238479097141,
           "step": {
             "size": [
               100,
@@ -53,7 +54,7 @@
           }
         },
         {
-          "seconds": 14.44634213700192,
+          "seconds": 14.527426833985373,
           "step": {
             "size": [
               160,
@@ -63,7 +64,7 @@
           }
         },
         {
-          "seconds": 14.946824306040071,
+          "seconds": 15.028312249982264,
           "step": {
             "size": [
               120,
@@ -72,7 +73,7 @@
           }
         },
         {
-          "seconds": 15.64599760103738,
+          "seconds": 15.852250739990268,
           "step": {
             "keys": "jjjj\rjjjjj",
             "capture": "03-selected-depth",
@@ -80,53 +81,53 @@
           }
         },
         {
-          "seconds": 16.149241820035968,
+          "seconds": 16.382518686994445,
           "step": {
             "keys": "?",
             "capture": "04-depth-interpretation"
           }
         },
         {
-          "seconds": 16.748544945032336,
+          "seconds": 16.936589939985424,
           "step": {
             "keys": "\u001b",
             "capture": "depth-return"
           }
         },
         {
-          "quit_seconds": 0.2926994899753481,
+          "quit_seconds": 0.3067358100088313,
           "exit_code": 0
         }
       ],
-      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
       "initial_size": [
         120,
         35
       ]
     },
     "execution": {
-      "binary": "target/debug/wt",
+      "binary": "/tmp/wt-ux-v2-reviewed",
       "project": "tests/fixtures/workspace_project",
       "events": [
         {
-          "first_output_seconds": 0.04253674496430904
+          "first_output_seconds": 0.045942262979224324
         },
         {
-          "seconds": 6.564077926974278,
+          "seconds": 6.496934914961457,
           "step": {
             "wait": "RA \u25cf Ready",
             "timeout": 90
           }
         },
         {
-          "seconds": 7.093221686955076,
+          "seconds": 7.0482261319993995,
           "step": {
             "keys": "\r",
             "capture": "binary-picker"
           }
         },
         {
-          "seconds": 9.370529395993799,
+          "seconds": 9.317674589983653,
           "step": {
             "keys": "\r",
             "wait": "CURRENT",
@@ -136,14 +137,14 @@
           }
         },
         {
-          "seconds": 9.847233813954517,
+          "seconds": 9.799205095972866,
           "step": {
             "keys": "g",
             "capture": "07-call-graph"
           }
         },
         {
-          "seconds": 11.134319971955847,
+          "seconds": 11.11960488097975,
           "step": {
             "keys": "o",
             "wait": "INSPECTOR",
@@ -153,7 +154,7 @@
           }
         },
         {
-          "seconds": 11.71152324497234,
+          "seconds": 11.748555483005475,
           "step": {
             "keys": "\u001b",
             "wait": "CALL GRAPH",
@@ -161,7 +162,7 @@
           }
         },
         {
-          "seconds": 12.299581877945457,
+          "seconds": 12.358941801008768,
           "step": {
             "keys": "\u001b",
             "wait": "UNDERSTAND THIS",
@@ -169,46 +170,46 @@
           }
         },
         {
-          "quit_seconds": 0.20366714498959482,
+          "quit_seconds": 0.30557283997768536,
           "exit_code": 0
         }
       ],
-      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
       "initial_size": [
         120,
         35
       ]
     },
     "architecture": {
-      "binary": "target/debug/wt",
+      "binary": "/tmp/wt-ux-v2-reviewed",
       "project": "tests/fixtures/workspace_project",
       "events": [
         {
-          "first_output_seconds": 0.03931586700491607
+          "first_output_seconds": 0.042511332023423165
         },
         {
-          "seconds": 6.574826153984759,
+          "seconds": 6.382220353989396,
           "step": {
             "wait": "RA \u25cf Ready",
             "timeout": 90
           }
         },
         {
-          "seconds": 7.109655583975837,
+          "seconds": 6.911645842017606,
           "step": {
             "keys": "j\r",
             "capture": "architecture"
           }
         },
         {
-          "seconds": 7.612066734000109,
+          "seconds": 7.473589662986342,
           "step": {
             "keys": "m",
             "capture": "06-module-inspector"
           }
         },
         {
-          "seconds": 8.782801230961923,
+          "seconds": 8.639278826012742,
           "step": {
             "keys": "o",
             "wait": "function",
@@ -218,7 +219,7 @@
           }
         },
         {
-          "seconds": 9.424729374994058,
+          "seconds": 9.226468027976807,
           "step": {
             "keys": "\r",
             "wait": "INSPECTOR",
@@ -227,7 +228,7 @@
           }
         },
         {
-          "seconds": 11.528260211984161,
+          "seconds": 11.331162495014723,
           "step": {
             "keys": "c",
             "wait": "CURRENT",
@@ -236,14 +237,14 @@
           }
         },
         {
-          "seconds": 12.0452096730005,
+          "seconds": 11.880538130993955,
           "step": {
             "keys": "g",
             "capture": "module-call-graph"
           }
         },
         {
-          "seconds": 12.709225462982431,
+          "seconds": 12.5309136689757,
           "step": {
             "keys": "\u001b",
             "wait": "MODULE MAP",
@@ -251,39 +252,39 @@
           }
         },
         {
-          "quit_seconds": 0.30097553704399616,
+          "quit_seconds": 0.2160186900291592,
           "exit_code": 0
         }
       ],
-      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
       "initial_size": [
         120,
         35
       ]
     },
     "search": {
-      "binary": "target/debug/wt",
+      "binary": "/tmp/wt-ux-v2-reviewed",
       "project": "tests/fixtures/simple_project",
       "events": [
         {
-          "first_output_seconds": 0.05524376599350944
+          "first_output_seconds": 0.03349419601727277
         },
         {
-          "seconds": 6.6687103130389005,
+          "seconds": 6.590464818000328,
           "step": {
             "wait": "RA \u25cf Ready",
             "timeout": 90
           }
         },
         {
-          "seconds": 7.19567318103509,
+          "seconds": 7.090064620017074,
           "step": {
             "keys": "jj\r",
             "capture": "symbol-search"
           }
         },
         {
-          "seconds": 9.406552770000417,
+          "seconds": 9.407663402031176,
           "step": {
             "keys": "calculate",
             "settle": 2,
@@ -291,7 +292,7 @@
           }
         },
         {
-          "seconds": 11.598272939037997,
+          "seconds": 11.585163633048069,
           "step": {
             "keys": "\r",
             "wait": "INSPECTOR",
@@ -301,32 +302,32 @@
           }
         },
         {
-          "quit_seconds": 0.2297726589604281,
+          "quit_seconds": 0.18907682300778106,
           "exit_code": 0
         }
       ],
-      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
       "initial_size": [
         120,
         35
       ]
     },
     "review": {
-      "binary": "target/debug/wt",
+      "binary": "/tmp/wt-ux-v2-reviewed",
       "project": ".",
       "events": [
         {
-          "first_output_seconds": 0.1388082259800285
+          "first_output_seconds": 0.04006321099586785
         },
         {
-          "seconds": 5.761529886978678,
+          "seconds": 5.361595214984845,
           "step": {
             "wait": "Git \u25cf Complete",
             "timeout": 90
           }
         },
         {
-          "seconds": 6.564759979955852,
+          "seconds": 6.226999111007899,
           "step": {
             "keys": "jjj\r",
             "capture": "05-review-evidence",
@@ -334,7 +335,7 @@
           }
         },
         {
-          "seconds": 7.292157446965575,
+          "seconds": 6.920974946988281,
           "step": {
             "keys": "p",
             "capture": "review-next-actions",
@@ -342,7 +343,7 @@
           }
         },
         {
-          "seconds": 9.735985361970961,
+          "seconds": 9.341340031998698,
           "step": {
             "keys": "\r",
             "wait": "INSPECTOR",
@@ -352,32 +353,32 @@
           }
         },
         {
-          "seconds": 10.390187921992037,
+          "seconds": 9.9906502480153,
           "step": {
             "keys": "\u001b\u001b",
             "capture": "review-return"
           }
         },
         {
-          "quit_seconds": 0.27588016900699586,
+          "quit_seconds": 0.2652645279886201,
           "exit_code": 0
         }
       ],
-      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
       "initial_size": [
         120,
         35
       ]
     },
     "unavailable": {
-      "binary": "target/debug/wt",
+      "binary": "/tmp/wt-ux-v2-reviewed",
       "project": "tests/fixtures/workspace_project",
       "events": [
         {
-          "first_output_seconds": 0.031491155037656426
+          "first_output_seconds": 0.04451457899995148
         },
         {
-          "seconds": 0.6309702140279114,
+          "seconds": 0.6351667420240119,
           "step": {
             "wait": "RA \u00d7 Error",
             "timeout": 30,
@@ -385,7 +386,7 @@
           }
         },
         {
-          "seconds": 1.1238008830114268,
+          "seconds": 1.118084790010471,
           "step": {
             "keys": "\r\r",
             "wait": "Source available",
@@ -394,18 +395,18 @@
           }
         },
         {
-          "seconds": 1.6357576610171236,
+          "seconds": 1.6843443700345233,
           "step": {
             "keys": "\u001b\u001b",
             "capture": "return-without-ra"
           }
         },
         {
-          "quit_seconds": 0.015792705991771072,
+          "quit_seconds": 0.03477447299519554,
           "exit_code": 0
         }
       ],
-      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
       "initial_size": [
         120,
         35

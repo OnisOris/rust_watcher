@@ -1,19 +1,19 @@
 {
-  "binary": "target/debug/wt",
+  "binary": "/tmp/wt-ux-v2-reviewed",
   "project": ".",
   "events": [
     {
-      "first_output_seconds": 0.06139730504946783
+      "first_output_seconds": 0.039216756995301694
     },
     {
-      "seconds": 14.953877140011173,
+      "seconds": 12.181292883004062,
       "step": {
         "wait": "RA \u25cf Ready",
         "timeout": 90
       }
     },
     {
-      "seconds": 15.956947999016847,
+      "seconds": 13.182469339983072,
       "step": {
         "wait": "Git \u25cf Complete",
         "timeout": 90,
@@ -24,108 +24,108 @@
       "input_to_first_terminal_output": [
         {
           "key": "j",
-          "first_output_ms": 48.61345101380721,
+          "first_output_ms": 39.27484399173409,
           "observed": true
         },
         {
           "key": "k",
-          "first_output_ms": 72.08676397567615,
+          "first_output_ms": 51.467704004608095,
           "observed": true
         },
         {
           "key": "2",
-          "first_output_ms": 22.433508012909442,
+          "first_output_ms": 42.003822047263384,
           "observed": true
         },
         {
           "key": "1",
-          "first_output_ms": 57.29001201689243,
+          "first_output_ms": 47.511501994449645,
           "observed": true
         },
         {
           "key": "j",
-          "first_output_ms": 63.35304700769484,
+          "first_output_ms": 60.25624898029491,
           "observed": true
         },
         {
           "key": "k",
-          "first_output_ms": 48.88618201948702,
+          "first_output_ms": 40.42813798878342,
           "observed": true
         },
         {
           "key": "2",
-          "first_output_ms": 29.98240402666852,
+          "first_output_ms": 56.678830995224416,
           "observed": true
         },
         {
           "key": "1",
-          "first_output_ms": 60.67205697763711,
+          "first_output_ms": 46.65999300777912,
           "observed": true
         },
         {
           "key": "j",
-          "first_output_ms": 40.30307801440358,
+          "first_output_ms": 50.34773499937728,
           "observed": true
         },
         {
           "key": "k",
-          "first_output_ms": 46.51460197055712,
+          "first_output_ms": 46.29133496200666,
           "observed": true
         },
         {
           "key": "2",
-          "first_output_ms": 47.29885398410261,
+          "first_output_ms": 55.393893038854,
           "observed": true
         },
         {
           "key": "1",
-          "first_output_ms": 60.98904897226021,
+          "first_output_ms": 65.052461985033,
           "observed": true
         },
         {
           "key": "j",
-          "first_output_ms": 48.939079977571964,
+          "first_output_ms": 31.25590499257669,
           "observed": true
         },
         {
           "key": "k",
-          "first_output_ms": 66.28267699852586,
+          "first_output_ms": 45.3788690501824,
           "observed": true
         },
         {
           "key": "2",
-          "first_output_ms": 29.0821980452165,
+          "first_output_ms": 52.06817900761962,
           "observed": true
         },
         {
           "key": "1",
-          "first_output_ms": 52.960701985284686,
+          "first_output_ms": 53.69085801066831,
           "observed": true
         },
         {
           "key": "j",
-          "first_output_ms": 50.087518990039825,
+          "first_output_ms": 51.61883501568809,
           "observed": true
         },
         {
           "key": "k",
-          "first_output_ms": 63.42367798788473,
+          "first_output_ms": 48.67363697849214,
           "observed": true
         },
         {
           "key": "2",
-          "first_output_ms": 37.1600899961777,
+          "first_output_ms": 51.10502103343606,
           "observed": true
         },
         {
           "key": "1",
-          "first_output_ms": 45.92761100502685,
+          "first_output_ms": 43.35886298213154,
           "observed": true
         }
       ]
     },
     {
-      "seconds": 19.25395661802031,
+      "seconds": 16.46412447403418,
       "step": {
         "probe_keys": [
           "j",
@@ -137,17 +137,17 @@
       }
     },
     {
-      "seconds": 19.80887457204517,
+      "seconds": 17.03137764602434,
       "step": {
         "capture": "latency-end"
       }
     },
     {
-      "quit_seconds": 0.2886790090124123,
+      "quit_seconds": 0.2759522700216621,
       "exit_code": 0
     }
   ],
-  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "binary_sha256": "6b76b6904ad0f6d624ffe344723f501023aef2d94a85ddc18305d7225a24f66a",
   "initial_size": [
     120,
     35
