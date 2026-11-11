@@ -390,6 +390,7 @@ fn render(app: &App, width: u16, height: u16) -> String {
 fn overview_renders_loading_candidates_errors_and_small_terminal() {
     let (_temp, mut app, _) = fixture();
     app.overview = overview::State::default();
+    app.overview.selected = overview::Target::Workspace.id();
     let text = render(&app, 120, 34);
     assert!(text.contains("MAINTAINABILITY · Rust"));
     assert!(text.contains("LONGEST FUNCTIONS"));

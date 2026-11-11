@@ -2,7 +2,9 @@ mod app;
 mod call_graph;
 mod components;
 mod event;
+mod explanations;
 mod explorer;
+mod help;
 mod highlight;
 mod hotspots;
 mod journey;
@@ -13,6 +15,8 @@ mod navigation_tests;
 mod overview;
 #[cfg(test)]
 mod performance_tests;
+#[cfg(test)]
+mod product_tests;
 mod theme;
 mod ui;
 mod worker;

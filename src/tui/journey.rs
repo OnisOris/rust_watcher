@@ -33,6 +33,23 @@ pub(super) struct Pending {
     pub deadline: std::time::Instant,
 }
 pub(super) const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub(super) fn entry_picker(app: &mut App) {
+    let (title, actions) = actions::available(app, actions::Start::Entry, true);
+    if actions.is_empty() {
+        app.notice = Some(actions::unavailable_reason(
+            app,
+            actions::Start::Entry,
+            true,
+        ));
+    } else {
+        app.journey.picker = Some(Picker {
+            title,
+            actions,
+            selected: 0,
+            calls: true,
+        });
+    }
+}
 #[derive(Clone)]
 pub(super) struct ReturnPoint {
     from: View,
@@ -83,7 +100,7 @@ pub(super) fn remember(app: &mut App, mut p: ReturnPoint) {
     if p.from == View::Explorer
         && p.to == View::Calls
         && app.journey.history.last().is_some_and(|old| {
-            old.to == View::Explorer && matches!(old.from, View::Map | View::Calls)
+            old.to == View::Explorer && matches!(old.from, View::Map | View::Calls | View::Overview)
         })
     {
         let old = app.journey.history.pop().unwrap();

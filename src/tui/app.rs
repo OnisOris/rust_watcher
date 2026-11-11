@@ -172,6 +172,8 @@ pub(super) struct App {
     pub view: View,
     pub pane: Pane,
     pub overlay: Overlay,
+    pub help_scroll: usize,
+    pub help_scroll_limit: std::cell::Cell<Option<usize>>,
     pub overview: super::overview::State,
     pub symbols_query: String,
     pub symbols_results: Vec<Symbol>,
@@ -210,6 +212,8 @@ impl App {
             view: View::Overview,
             pane: Pane::Project,
             overlay: Overlay::None,
+            help_scroll: 0,
+            help_scroll_limit: Default::default(),
             overview: super::overview::State::default(),
             symbols_query: String::new(),
             symbols_results: Vec::new(),
@@ -399,10 +403,14 @@ impl App {
                 if self.module_map.active {
                     self.module_map.back();
                     self.map.inspector_scroll = 0;
+                } else if self.map.history.is_empty() && self.map.focus.is_none() {
+                    super::journey::back(self);
                 } else {
                     self.map.back();
                 }
-                self.pane = Pane::MapGraph;
+                if self.view == View::Map {
+                    self.pane = Pane::MapGraph;
+                }
             }
             Overlay::Help | Overlay::Search => self.overlay = Overlay::None,
             Overlay::None

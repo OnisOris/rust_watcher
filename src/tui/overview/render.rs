@@ -24,7 +24,7 @@ pub(in crate::tui) fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &Ap
         ),
         (
             number(app.hotspots.as_ref().and_then(|h| h.candidate_files)),
-            " review files",
+            " review candidates",
         ),
     ] {
         spans.push(components::status_label(value, theme::NUMBER));
@@ -34,7 +34,10 @@ pub(in crate::tui) fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &Ap
         ));
     }
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(pane_block(" REPOSITORY OVERVIEW ", false)),
+        Paragraph::new(Line::from(spans)).block(pane_block(
+            " PROJECT SNAPSHOT · measured, not a quality score ",
+            false,
+        )),
         area,
     );
 }
@@ -44,10 +47,26 @@ pub(in crate::tui) fn render_project(frame: &mut Frame<'_>, area: Rect, app: &Ap
         .into_iter()
         .map(|target| {
             let lines = match target {
-                Target::Guide(g) => vec![Line::styled(
-                    format!("  {} →", g.label()),
-                    Style::default().fg(theme::ACTIVE),
-                )],
+                Target::Metric(m) => vec![Line::raw(format!("  {}", m.label()))],
+                Target::Guide(g) => vec![
+                    Line::styled(
+                        format!("  {} →", g.label()),
+                        Style::default().fg(theme::ACTIVE),
+                    ),
+                    Line::styled(
+                        components::compact(
+                            if g == Guide::Find
+                                && !matches!(app.analyzer_state, AnalyzerState::Ready)
+                            {
+                                "  Rust analysis indexing/unavailable"
+                            } else {
+                                g.description()
+                            },
+                            width,
+                        ),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                ],
                 Target::Workspace => vec![heading("Workspace summary")],
                 Target::Group(g) => vec![Line::styled(
                     format!(

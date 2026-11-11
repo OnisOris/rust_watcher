@@ -61,7 +61,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         rows[2],
     );
     match app.overlay {
-        Overlay::Help => render_help(frame, area),
+        Overlay::Help => super::help::render(frame, area, app),
         Overlay::Search => render_search(frame, area, app),
         Overlay::None => {}
     }
@@ -144,13 +144,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(5)]).split(area);
-    super::overview::render_summary(frame, rows[0], app);
-    let panes = Layout::horizontal([
-        Constraint::Percentage(if area.width < 100 { 42 } else { 36 }),
-        Constraint::Min(25),
-    ])
-    .split(rows[1]);
+    let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).split(area);
+    super::overview::render_summary(frame, rows[1], app);
+    let panes =
+        Layout::horizontal([Constraint::Percentage(46), Constraint::Min(25)]).split(rows[0]);
     super::overview::render_project(frame, panes[0], app);
     super::overview::render_details(frame, panes[1], app);
 }
@@ -192,38 +189,6 @@ fn footer_text(app: &App) -> &'static str {
             }
         },
     }
-}
-
-fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered(area, 90, 90);
-    frame.render_widget(Clear, popup);
-    let text = vec![
-        heading("Views"),
-        Line::raw("1 Overview · 2 Symbols · 3 Calls · 4 Explorer · 5 Map"),
-        heading("Navigation"),
-        Line::raw("j/k move or scroll · Ctrl+h/l focus panes"),
-        Line::raw("Tab / Shift+Tab next / previous pane"),
-        heading("Explore"),
-        Line::raw("Overview: Enter expands a group or opens a file"),
-        Line::raw("Symbols: / search · Enter Inspector · c Calls"),
-        Line::raw("Calls: Enter follow · o exact source/Inspector · e scope · Esc back"),
-        Line::raw("Explorer: h/l directories · Enter file / symbol"),
-        Line::raw("Map: j/k nodes · Enter focus · m modules · o exact source"),
-        Line::raw("Modules: v Hierarchy/Imports/Used by · f files · a limitations · t target"),
-        Line::raw("Visual Map: g Diagram/List · p actionable priorities · c exact Calls"),
-        Line::raw("Calls: g Graph/List · x expand selected direct branch (depth 2)"),
-        Line::raw("Call Graph: j/k visible selection · PgUp/PgDn pages · Enter focus · o source"),
-        Line::raw("Module pages: PgUp/PgDn or [/] · j/k select visible nodes only"),
-        Line::raw("Map: t module target · Esc previous scope / Cargo map"),
-        heading("Session"),
-        Line::raw("? / Esc close help · q / Ctrl+C quit"),
-    ];
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(pane_block(" HELP · keyboard reference ", true)),
-        popup,
-    );
 }
 
 fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -624,6 +589,7 @@ mod tests {
     #[test]
     fn metrics_loading_ready_partial_and_errors_render_independently() {
         let mut app = app();
+        app.overview.selected = super::super::overview::Target::Workspace.id();
         assert!(render_text(&app).contains("Repository Metrics: loading..."));
         app.metrics_error = Some("cannot read repository".into());
         assert!(render_text(&app).contains("Metrics error: cannot read repository"));

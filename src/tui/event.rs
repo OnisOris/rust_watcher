@@ -193,8 +193,16 @@ pub(super) async fn handle_key(
             if key.code == KeyCode::Char('q') {
                 return Ok(true);
             }
-            if key.code == KeyCode::Char('?') {
-                app.overlay = Overlay::None;
+            match key.code {
+                KeyCode::Char('?') => app.overlay = Overlay::None,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    app.help_scroll =
+                        (app.help_scroll + 1).min(app.help_scroll_limit.get().unwrap_or(0))
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    app.help_scroll = app.help_scroll.saturating_sub(1)
+                }
+                _ => {}
             }
         }
         Overlay::Search => match key.code {
@@ -309,7 +317,10 @@ pub(super) async fn handle_key(
             KeyCode::Char('e') if app.view == View::Calls => {
                 reload_calls_scope(app, commands).await?
             }
-            KeyCode::Char('?') => app.overlay = Overlay::Help,
+            KeyCode::Char('?') => {
+                app.help_scroll = 0;
+                app.overlay = Overlay::Help;
+            }
             KeyCode::Char('/') => {
                 if app.view != View::Symbols {
                     app.switch_view(View::Symbols);
@@ -431,88 +442,44 @@ async fn begin_inspect(app: &mut App, commands: &mpsc::Sender<AnalyzerCommand>) 
 
 async fn guided(
     app: &mut App,
-    commands: &mpsc::Sender<AnalyzerCommand>,
+    _commands: &mpsc::Sender<AnalyzerCommand>,
     guide: super::overview::Guide,
 ) {
     use super::overview::{Group, Guide, Target};
     match guide {
-        Guide::Architecture => app.switch_view(View::Map),
-        Guide::Entrypoint => {
-            let targets: Vec<_> = app
-                .project
-                .architecture
-                .nodes
-                .iter()
-                .flat_map(|n| n.targets.iter())
-                .filter(|t| {
-                    t.kinds.iter().any(|k| {
-                        matches!(
-                            k.as_str(),
-                            "bin"
-                                | "lib"
-                                | "rlib"
-                                | "proc-macro"
-                                | "cdylib"
-                                | "dylib"
-                                | "staticlib"
-                        )
-                    })
-                })
-                .cloned()
-                .collect();
-            if targets.len() == 1 {
-                open_exact_file(app, commands, targets[0].path.clone(), None).await;
-            } else if targets.is_empty() {
-                app.notice = Some("No Cargo binary/library entrypoint available".into());
+        Guide::Architecture | Guide::Find => {
+            let destination = if guide == Guide::Architecture {
+                View::Map
             } else {
-                app.switch_view(View::Map);
-                app.map.entry_targets = Some(targets);
-                app.map.target_picker = Some(0);
+                View::Symbols
+            };
+            let origin = super::journey::point(app, destination);
+            app.switch_view(destination);
+            super::journey::remember(app, origin);
+            if guide == Guide::Find {
+                app.open_search();
             }
         }
-        Guide::Hotspots | Guide::Longest => {
-            let group = if guide == Guide::Hotspots {
-                Group::Hotspots
-            } else {
-                Group::Longest
-            };
-            app.overview.expanded.insert(group);
-            let selected = super::overview::targets(app).into_iter().find(|t| match t {
-                Target::Hotspot(path) => {
-                    guide == Guide::Hotspots
-                        && app.hotspots.as_ref().is_some_and(|r| {
-                            r.hotspots
-                                .iter()
-                                .any(|f| f.path == *path && f.present_in_tree)
-                        })
-                }
-                Target::Longest(_) => guide == Guide::Longest,
-                _ => false,
-            });
-            if let Some(target) = selected {
+        Guide::Entrypoint => super::journey::entry_picker(app),
+        Guide::Hotspots => {
+            app.overview.expanded.extend([
+                Group::Hotspots,
+                Group::Longest,
+                Group::Deepest,
+                Group::Largest,
+            ]);
+            let items = super::overview::targets(app);
+            let target = items
+                .iter()
+                .find(|t| matches!(t, Target::Hotspot(_)))
+                .or_else(|| items.iter().find(|t| matches!(t, Target::Longest(_))))
+                .or_else(|| items.iter().find(|t| matches!(t, Target::File(..))));
+            if let Some(target) = target {
                 app.overview.selected = target.id();
                 app.metrics_scroll = 0;
                 app.notice = None;
             } else {
-                app.notice = Some(if guide == Guide::Hotspots {
-                    app.hotspots.as_ref().map_or_else(
-                        || {
-                            app.hotspots_error
-                                .clone()
-                                .unwrap_or("Git history is still analyzing".into())
-                        },
-                        |r| format!("No current review candidates: {}", r.status()),
-                    )
-                } else {
-                    app.maintainability.as_ref().map_or_else(
-                        || {
-                            app.maintainability_error
-                                .clone()
-                                .unwrap_or("Maintainability is still analyzing".into())
-                        },
-                        |_| "No measured Rust functions available".into(),
-                    )
-                });
+                app.notice = Some("No measured review areas yet · local analysis loading/unavailable; explore architecture".into());
             }
         }
     }

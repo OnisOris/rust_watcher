@@ -10,23 +10,41 @@ pub(in crate::tui) fn details(app: &App) -> Vec<Line<'static>> {
         ];
     };
     let mut lines = match target {
+        Target::Metric(m) => {
+            let mut l = vec![
+                heading(m.label()),
+                Line::raw(metric_value(app, m)),
+                Line::raw(m.explanation().what),
+                heading("WHY"),
+                Line::raw(m.explanation().why),
+                heading("LIMITATIONS"),
+                Line::raw(m.explanation().limitations),
+                heading("NEXT ACTION"),
+                Line::raw(m.explanation().next),
+                Line::raw("? full interpretation · Tab then j/k scroll"),
+            ];
+            if let Some(r) = &app.maintainability {
+                l.push(Line::raw(if r.partial {
+                    "Rust structure PARTIAL · measured bodies only"
+                } else {
+                    "Rust structure ready · bounded syntax measurement"
+                }));
+            }
+            l
+        }
         Target::Guide(g) => vec![
             heading(g.label()),
-            Line::raw("Press Enter to start this exploration route."),
-            Line::raw(match g {
-                Guide::Architecture => {
-                    "Cargo crates → declared Rust modules → exact source → RA symbols."
-                }
-                Guide::Entrypoint => {
-                    "Open an exact Cargo binary/library target; multiple targets offer a choice."
-                }
-                Guide::Hotspots => {
-                    "Select the first current review candidate; unavailable history is explained."
-                }
-                Guide::Longest => {
-                    "Select the longest measured Rust function and explore its exact location."
-                }
-            }),
+            Line::raw(g.description()),
+            Line::raw(""),
+            heading("Availability"),
+            Line::raw(g.availability(app)),
+            heading("Next action"),
+            Line::raw("Enter starts · Esc returns along the exploration route"),
+            Line::raw("? explains this view · Tab focuses scrollable details"),
+            heading("What you can trust"),
+            Line::raw("Cargo identifies targets. RA supplies symbols and static calls."),
+            Line::raw("Module relationships are conservative syntax, not runtime behavior."),
+            Line::raw("Review areas are measured signals, not defect predictions."),
         ],
         Target::Workspace => summary(app),
         Target::Group(Group::Analysis) => return analysis::analysis_details(app),
@@ -214,4 +232,55 @@ fn package(app: &App, name: &str) -> Vec<Line<'static>> {
     }
     l.push(Line::raw("5 Map → dependencies and dependents"));
     l
+}
+
+fn metric_value(app: &App, metric: super::super::explanations::Metric) -> String {
+    use super::super::explanations::Metric as M;
+    let n = match metric {
+        M::SourceLoc => app.metrics.as_ref().map(|r| {
+            format!(
+                "{} nonblank source lines{}",
+                r.code_nonblank_lines,
+                if r.partial { " · PARTIAL" } else { "" }
+            )
+        }),
+        M::PhysicalLoc => app.metrics.as_ref().map(|r| {
+            format!(
+                "{} repository physical lines{}",
+                r.physical_lines,
+                if r.partial { " · PARTIAL" } else { "" }
+            )
+        }),
+        M::Functions => app
+            .maintainability
+            .as_ref()
+            .map(|r| format!("{} measured bodies", r.functions)),
+        M::Length => app.maintainability.as_ref().map(|r| {
+            if r.functions == 0 {
+                "No measured bodies · median/P95 not applicable".into()
+            } else {
+                format!(
+                    "Median {} · P95 {} physical lines",
+                    r.median_function_lines, r.p95_function_lines
+                )
+            }
+        }),
+        M::Depth => app
+            .maintainability
+            .as_ref()
+            .map(|r| format!("Depth {} · nested control structures", r.max_control_depth)),
+        M::Candidates => app.hotspots.as_ref().and_then(|r| {
+            r.candidate_files.map(|n| {
+                format!(
+                    "{n} Git + structural candidates{}",
+                    if r.partial { " · PARTIAL" } else { "" }
+                )
+            })
+        }),
+        _ => {
+            return "Context-specific measurement · select a file, module or callable for its value"
+                .into()
+        }
+    };
+    n.unwrap_or_else(|| "Unknown · measurement loading or unavailable; not zero".into())
 }

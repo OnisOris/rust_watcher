@@ -717,7 +717,7 @@ async fn guided_routes_have_observable_outcomes_and_unavailable_notices() {
         Guide::Architecture,
         Guide::Entrypoint,
         Guide::Hotspots,
-        Guide::Longest,
+        Guide::Find,
     ] {
         app.switch_view(View::Overview);
         app.overview.selected = Target::Guide(guide).id();
@@ -725,14 +725,8 @@ async fn guided_routes_have_observable_outcomes_and_unavailable_notices() {
         match guide {
             Guide::Architecture => assert!(app.view == View::Map && app.module_map.active),
             Guide::Entrypoint => {
-                assert!(app.map.target_picker.is_some());
-                let targets = super::super::map::targets(&app);
-                app.map.target_picker = Some(
-                    targets
-                        .iter()
-                        .position(|t| t.path == std::path::Path::new("src/main.rs"))
-                        .unwrap(),
-                );
+                let picker = app.journey.picker.as_mut().unwrap();
+                picker.selected = picker.actions.iter().position(|a| matches!(a, super::super::journey::Action::BinaryEntrypoint(t) if t.path == std::path::Path::new("src/main.rs"))).unwrap();
                 press(&mut app, K::Enter, &tx).await;
                 assert_eq!(
                     app.explorer.file.as_ref().unwrap().path,
@@ -743,11 +737,13 @@ async fn guided_routes_have_observable_outcomes_and_unavailable_notices() {
                     Some(AnalyzerCommand::InspectFile { .. })
                 ));
             }
-            Guide::Hotspots => assert!(app.notice.as_ref().unwrap().contains("analyzing")),
-            Guide::Longest => assert!(matches!(
+            Guide::Hotspots => assert!(matches!(
                 super::super::overview::selected(&app),
                 Some(Target::Longest(_))
             )),
+            Guide::Find => assert!(
+                app.view == View::Symbols && app.overlay == super::super::app::Overlay::Search
+            ),
         }
     }
     let mut history = crate::git_analysis::History::default();
@@ -767,6 +763,7 @@ async fn guided_routes_have_observable_outcomes_and_unavailable_notices() {
         app.maintainability.as_ref().unwrap(),
         app.explorer.tree.as_ref().unwrap(),
     ));
+    app.switch_view(View::Overview);
     app.overview.selected = Target::Guide(Guide::Hotspots).id();
     press(&mut app, K::Enter, &tx).await;
     assert!(
