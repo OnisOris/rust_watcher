@@ -35,7 +35,14 @@ pub(in crate::tui) fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &Ap
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).block(pane_block(
-            " PROJECT SNAPSHOT · measured, not a quality score ",
+            if app.metrics.as_ref().is_some_and(|r| r.partial)
+                || app.maintainability.as_ref().is_some_and(|r| r.partial)
+                || app.hotspots.as_ref().is_some_and(|r| r.partial)
+            {
+                " PROJECT SNAPSHOT · PARTIAL · ? explains limits "
+            } else {
+                " PROJECT SNAPSHOT · measured, not a quality score "
+            },
             false,
         )),
         area,
@@ -54,11 +61,22 @@ pub(in crate::tui) fn render_project(frame: &mut Frame<'_>, area: Rect, app: &Ap
                         Style::default().fg(theme::ACTIVE),
                     ),
                     Line::styled(
-                        components::compact(
+                        super::super::ui::truncate(
                             if g == Guide::Find
                                 && !matches!(app.analyzer_state, AnalyzerState::Ready)
                             {
-                                "  Rust analysis indexing/unavailable"
+                                if matches!(app.analyzer_state, AnalyzerState::Error(_)) {
+                                    "Rust analysis unavailable"
+                                } else {
+                                    "Rust analysis indexing"
+                                }
+                            } else if area.width < 45 {
+                                match g {
+                                    Guide::Entrypoint => "Binary → static calls",
+                                    Guide::Architecture => "Crates → modules → source",
+                                    Guide::Find => "Rust symbols → exact source",
+                                    Guide::Hotspots => "Evidence → source to study",
+                                }
                             } else {
                                 g.description()
                             },

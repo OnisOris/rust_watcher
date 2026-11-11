@@ -56,9 +56,41 @@ pub(super) fn status(app: &App) -> Vec<Line<'static>> {
 }
 pub(super) fn details(app: &App, f: &FileHotspot) -> Vec<Line<'static>> {
     let r = app.hotspots.as_ref().unwrap();
+    let finding = super::findings::hotspot(r, f, app.maintainability.as_ref());
     let mut lines = vec![
-        heading("Hotspot details"),
-        Line::raw(format!("{:?}", f.path)),
+        heading("Why review this file?"),
+        components::path_label(&finding.path, usize::MAX),
+        Line::raw(if finding.candidate {
+            "Included by Git + structural review heuristic; not a defect."
+        } else {
+            "Most changed / historical file; not a review candidate."
+        }),
+        heading("Evidence · measured, not a verdict"),
+    ];
+    for e in &finding.evidence {
+        lines.push(Line::raw(format!(
+            "{}: {} {}",
+            e.metric.label(),
+            value(e.value),
+            e.unit
+        )));
+    }
+    lines.extend([
+        heading("Suggested investigation"),
+        Line::raw(if finding.next_actions.is_empty() {
+            "No current source action · historical path is absent."
+        } else {
+            "Enter exact file · p choose measured function/source"
+        }),
+        Line::raw("Then Enter RA symbol → Inspector → c Calls. Esc returns."),
+        Line::raw(if finding.partial {
+            "PARTIAL evidence · unknown values are not zero."
+        } else {
+            "Local committed history + current working-tree structure."
+        }),
+        Line::raw("Size, frequency and nesting do not establish importance or bugs."),
+        Line::raw("? explains changes, churn, co-change and candidate thresholds"),
+        heading("Git details"),
         Line::raw(format!(
             "Changes / {}d    {}",
             r.since_days, f.change_commits
@@ -67,33 +99,11 @@ pub(super) fn details(app: &App, f: &FileHotspot) -> Vec<Line<'static>> {
         Line::raw(format!("Deleted lines     {}", value(f.deleted_lines))),
         Line::raw(format!("Churn             {}", value(f.churn_lines))),
         Line::raw(format!("Last changed      {}", f.last_changed_at)),
-        heading("Current structure · working tree"),
-        Line::raw(format!(
-            "Source nonblank LOC  {}",
-            value(f.source_nonblank_lines)
-        )),
-        Line::raw(format!("Functions            {}", value(f.functions))),
-        Line::raw(format!(
-            "Longest function     {}",
-            value(f.longest_function_lines)
-        )),
-        Line::raw(format!(
-            "Max control depth    {}",
-            value(f.max_control_depth)
-        )),
+        Line::raw(format!("Functions         {}", value(f.functions))),
         heading("Reasons · signals, not defects"),
-    ];
+    ]);
     if let Some(notice) = &app.notice {
         lines.insert(1, Line::raw(notice.clone()));
-    }
-    for s in &f.signals {
-        lines.push(Line::raw(
-            serde_json::to_value(s)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned(),
-        ));
     }
     if !f.review_candidate {
         lines.push(Line::raw("Most changed file · not a review candidate"));

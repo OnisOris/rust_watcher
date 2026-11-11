@@ -291,7 +291,7 @@ pub(in crate::tui) fn render(f: &mut Frame<'_>, area: Rect, app: &App) {
                     if s.pending.is_some() {
                         "Expansion: loading"
                     } else {
-                        "RA call hierarchy · no inferred cfg"
+                        "RA static calls · not a runtime trace"
                     },
                     drawing.cycles,
                     drawing.stubs

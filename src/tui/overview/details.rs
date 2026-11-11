@@ -99,7 +99,10 @@ pub(in crate::tui) fn details(app: &App) -> Vec<Line<'static>> {
             } else {
                 "Rust structure · not cyclomatic complexity"
             }),
-            Line::raw("Enter → exact file + function anchor → RA Inspector"),
+            heading("Why investigate"),
+            Line::raw("Included in a bounded length/depth ranking, not an importance or defect ranking."),
+            Line::raw("Physical lines include comments/blanks. Depth counts nested control constructs, not cyclomatic complexity."),
+            Line::raw("? definitions · Enter exact anchor → RA Inspector · c Calls · Esc back"),
         ],
         Target::Entrypoint(p) => vec![
             heading("Cargo entrypoint"),

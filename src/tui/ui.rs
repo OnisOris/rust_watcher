@@ -107,6 +107,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         AnalyzerState::Error(_) => ("RA × Error · see Analysis", theme::ERROR),
     };
     let (git, gcolor) = match &app.hotspots {
+        None if app.hotspots_error.is_some() => ("Git – Unavailable", theme::MUTED),
         None => ("Git ◐ Analyzing", theme::ACCENT),
         Some(r) if !r.available => ("Git – Unavailable", theme::MUTED),
         Some(r) if r.history_partial => ("Git ◐ Partial", theme::WARNING),
@@ -137,6 +138,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(vec![Line::from(tabs), Line::from(statuses)]).block(
             Block::default()
                 .borders(Borders::BOTTOM)
+                .title_bottom(Line::styled(
+                    components::compact(&super::journey::breadcrumb(app), area.width as usize),
+                    Style::default().fg(theme::MUTED),
+                ))
                 .border_style(Style::default().fg(theme::BORDER)),
         ),
         area,
@@ -157,23 +162,24 @@ fn footer_text(app: &App) -> &'static str {
         Overlay::Search => " type search · ↑/↓ results · Enter inspect · Esc close · Ctrl+c quit",
         Overlay::Help => " ? / Esc close help · q quit",
         Overlay::None => match app.view {
-            View::Map => {
-                " j/k select · PgUp/PgDn pages · Enter focus · g/v · p review · o · Esc · q quit"
+            View::Map if app.module_map.active => {
+                " Enter focus · o source · p review · v relationships · Esc back · ? help"
             }
+            View::Map => " j/k select · Enter focus · m modules · o source · Esc back · ? help",
             View::Overview if app.pane == Pane::Details => {
-                " j/k scroll · Ctrl+h exploration · 1–5 views · ? help · q quit"
+                " j/k scroll · Tab exploration · Enter open · Esc back · ? help · q quit"
             }
             View::Overview => {
-                " j/k select · Enter expand/open · Tab pane · 1–5 views · ? help · q quit"
+                " j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit"
             }
             View::Symbols => {
                 " / search · j/k select · Enter inspect · c calls · Tab pane · ? help · q quit"
             }
             View::Calls if app.calls.graph.enabled => {
-                " j/k select · Enter focus · x expand · g List · o source · PgUp/Dn · e · Esc · q quit"
+                " j/k select · x expand · Enter focus · o source · g List · Esc back · ? help"
             }
             View::Calls => {
-                " j/k · Enter follow · g Graph · o source · Tab pane · e scope · Esc · q quit"
+                " j/k select · Enter follow · g Graph · o source · Tab pane · Esc back · ? help"
             }
             View::Explorer
                 if app.explorer.right_mode == ExplorerRightMode::Inspector
@@ -263,7 +269,7 @@ fn centered(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn truncate(value: &str, maximum: usize) -> String {
+pub(super) fn truncate(value: &str, maximum: usize) -> String {
     if value.chars().count() <= maximum {
         return value.to_owned();
     }

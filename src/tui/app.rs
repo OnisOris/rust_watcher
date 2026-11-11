@@ -392,7 +392,7 @@ impl App {
     }
 
     pub(super) fn escape(&mut self) -> Option<(u64, CallTarget, CallScope)> {
-        if self.journey.pending.is_some() {
+        if self.overlay == Overlay::None && self.journey.pending.is_some() {
             super::journey::cancel(self);
             self.notice =
                 Some("Pending semantic navigation cancelled; exact file anchor retained".into());
@@ -473,6 +473,12 @@ impl App {
     pub(super) fn activate_project_item(&mut self) {
         use super::overview::Target;
         let label = match super::overview::selected(self) {
+            Some(Target::Metric(_)) => {
+                self.pane = Pane::Details;
+                self.metrics_scroll = 0;
+                self.notice = None;
+                return;
+            }
             Some(Target::Group(group)) => {
                 if !self.overview.expanded.remove(&group) {
                     self.overview.expanded.insert(group);

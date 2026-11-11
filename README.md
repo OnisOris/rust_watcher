@@ -58,13 +58,27 @@ Enter
 c
 ```
 
-Overview begins with compact source/function/hotspot indicators and collapsible
-exploration groups. Git Hotspots starts expanded; Enter on a group toggles it,
-and Enter on a file/function opens its exact Explorer location. Selection uses
+Overview begins with four tasks: **Explore execution**, **Explore architecture**,
+**Find implementation**, and **Review attention areas**. Execution is selected
+initially: Enter chooses a Cargo binary and resolves its exact `main` into Calls;
+`g` opens Graph, `o` inspects exact source and Esc returns along the route.
+Architecture opens crates/modules; implementation opens Rust symbol search
+(not natural-language search). Review offers Git evidence or structural rankings
+when Git is unavailable. Availability and next actions appear in Details.
+
+The project snapshot and collapsible technical groups remain available. Enter on
+a group toggles it; Enter on a file/function opens its exact Explorer location.
+**Understand the metrics** offers measured values and WHAT/WHY/LIMITATIONS/NEXT
+explanations. `?` opens context help; j/k scrolls it and Esc closes it. Hotspot
+Details shows measured reasons and suggested investigation; `p` chooses an
+available exact ranked function or source file. Unknown aggregates never invent
+a function anchor. Selection uses
 stable item identities, so incoming analysis results do not move it to another
 file. The right panel describes the selected item; Workspace restores the global
 summary and Analysis exposes full limits/errors. `Ctrl+h/l` changes panes and
-`j/k` scrolls details. Historical removed/ignored paths have a separate group.
+`j/k` scrolls details. The header boundary shows the bounded exploration route;
+existing focus, selection and graph pagination remain independent. Historical
+removed/ignored paths have a separate group.
 
 All views share a restrained dark-terminal palette: sky headings (`#7DD3FC`),
 indigo selection (`#A5B4FC`), green ready, amber warning/partial, rose errors,
@@ -750,10 +764,10 @@ missing/ambiguous symbols and absent RA retain file/anchor with an explanation.
 No global name search is involved. Existing function anchors and Inspector/Calls
 navigation remain unchanged.
 
-Overview's **START EXPLORING** offers four real routes: architecture, exact Cargo
-binary/library entrypoint (with a chooser for multiple targets), first current
-hotspot candidate, and longest measured function. Unavailable/loading/empty data
-produces a notice rather than an inert action.
+Overview's **UNDERSTAND THIS REPOSITORY** offers execution through exact Cargo
+binary entrypoints, architecture, Rust symbol search and measured attention areas.
+Unavailable/loading/empty data produces a notice; structural review remains
+available without Git. Library-only projects use architecture/source routes.
 
 ## Headless semantic summary
 

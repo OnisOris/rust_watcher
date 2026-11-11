@@ -122,3 +122,53 @@ async fn context_help_scrolls_without_moving_underlying_selection() {
     assert_eq!(app.overlay, Overlay::None);
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn review_evidence_matches_real_structure_and_never_invents_a_function_anchor() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='review'\nversion='0.1.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("src/main.rs"), "fn main() {\nif true {\nif true {\nif true {\nif true {\nif true {\nif true {}\n}\n}\n}\n}\n}\n}\n").unwrap();
+    let p = crate::project::Project::discover(temp.path()).unwrap();
+    let tree = crate::repository::scan(temp.path()).unwrap();
+    let metrics = crate::metrics::analyze(temp.path(), &tree, &p);
+    let mut ast = crate::maintainability::analyze(temp.path(), &tree, &p);
+    let mut history = crate::git_analysis::History::default();
+    history.since_days = 90;
+    history.files.insert(
+        "src/main.rs".into(),
+        crate::git_analysis::Change {
+            commits: 17,
+            added: Some(10),
+            deleted: Some(2),
+            last: 0,
+        },
+    );
+    let report = crate::git_analysis::correlate(history, &metrics, &ast, &tree);
+    let file = &report.hotspots[0];
+    let f = super::findings::hotspot(&report, file, Some(&ast));
+    assert!(f.candidate);
+    assert_eq!(f.evidence[0].value, Some(17));
+    assert_eq!(f.evidence[3].value, Some(6));
+    let super::journey::Action::Function(anchor) = &f.next_actions[0] else {
+        panic!("expected exact ranked anchor")
+    };
+    assert_eq!(anchor.path, std::path::Path::new("src/main.rs"));
+    assert_eq!(anchor.identifier_line, 1);
+    assert_eq!(anchor.identifier_column, 4);
+    // An aggregate alone is insufficient to identify a callable.
+    ast.longest_functions.clear();
+    ast.deepest_functions.clear();
+    let aggregate_only = super::findings::hotspot(&report, file, Some(&ast));
+    assert!(aggregate_only
+        .next_actions
+        .iter()
+        .all(|a| matches!(a, super::journey::Action::File(..))));
+    let mut partial = report.clone();
+    partial.current_metrics_partial = true;
+    assert!(super::findings::hotspot(&partial, file, None).partial);
+}

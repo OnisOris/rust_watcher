@@ -63,7 +63,7 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         components::section_header(&format!("MODULE · {}", n.qualified_path)),
         Line::raw(format!("Selected: {}", n.qualified_path)),
         Line::raw(format!(
-            "Center: {}",
+            "Focus: {}",
             g.node(&s.focus)
                 .map_or("unknown", |n| n.qualified_path.as_str())
         )),
@@ -80,6 +80,7 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
             ),
             Style::default().fg(theme::MUTED),
         ),
+        Line::raw("o source → Enter callable → c Calls → Esc module"),
         components::section_header("STRUCTURE · physical subtree"),
         metric("Child modules", e.children.len()),
         metric("Physical subtree files", files.len()),
@@ -108,11 +109,10 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         ),
         components::section_header("RELATIONSHIPS · records, not calls"),
         metric("Direct verified imports", own.verified_imports),
-        metric("Subtree verified imports", e.verified),
         metric("Direct imported by modules", e.incoming.len()),
         metric("Direct unclassified", own.unclassified_imports()),
-        metric("Subtree unclassified", e.unclassified),
-        components::section_header("REVIEW PRIORITIES"),
+        Line::raw("v Imports / Used by · ? meaning and limitations"),
+        components::section_header("REVIEW OPPORTUNITIES · p choose"),
     ];
     if s.mode != super::Mode::Hierarchy {
         if let Some(focus) = s.index.nodes.get(&s.focus) {
@@ -233,6 +233,7 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         metric("Coverage (graph)", format!("{:?}", g.coverage_status)),
         metric("Resolution (graph)", format!("{:?}", g.resolution_status)),
         metric("Subtree coverage losses", e.losses),
+        Line::raw("Coverage: discovery completeness; resolution: classification limits."),
         metric("Direct conditional", own.conditional_relations),
         Line::raw("Syntax only; unclassified imports are not defects."),
         components::section_header("FILES · f expand/collapse"),
@@ -255,6 +256,8 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         "ANALYSIS LIMITATIONS · a expand/collapse",
     ));
     if s.show_limits {
+        l.push(metric("Subtree verified imports", e.verified));
+        l.push(metric("Subtree unclassified", e.unclassified));
         for c in &n.conditions {
             l.push(Line::raw(format!("[cfg] {c} · not evaluated")));
         }

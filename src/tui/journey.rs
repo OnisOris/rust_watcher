@@ -123,6 +123,33 @@ pub(super) fn source_returns_to_calls(app: &App) -> bool {
         .last()
         .is_some_and(|p| p.from == View::Calls && p.to == View::Explorer)
 }
+/// Render the live bounded route; manually switching tabs cannot label stale history.
+pub(super) fn breadcrumb(app: &App) -> String {
+    fn label(v: View) -> &'static str {
+        match v {
+            View::Overview => "Overview",
+            View::Symbols => "Symbols",
+            View::Calls => "Calls",
+            View::Explorer => "Source",
+            View::Map => "Architecture",
+        }
+    }
+    let mut route = vec![label(app.view)];
+    let mut current = app.view;
+    for point in app.journey.history.iter().rev() {
+        if point.to != current {
+            break;
+        }
+        route.push(label(point.from));
+        current = point.from;
+    }
+    route.reverse();
+    if route.len() > 4 {
+        route.drain(..route.len() - 3);
+        route.insert(0, "…");
+    }
+    format!("{} · Esc back · ? context help", route.join(" > "))
+}
 pub(super) fn back(app: &mut App) -> bool {
     if !app.journey.history.last().is_some_and(|p| p.to == app.view) {
         return false;

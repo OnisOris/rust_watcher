@@ -4,6 +4,7 @@ mod components;
 mod event;
 mod explanations;
 mod explorer;
+mod findings;
 mod help;
 mod highlight;
 mod hotspots;

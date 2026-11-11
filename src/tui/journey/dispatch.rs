@@ -99,6 +99,24 @@ pub(in crate::tui) async fn handle_key(
         }
         return Some(false);
     }
+    if key.code == K::Char('p') && app.view == View::Overview {
+        if let Some(f) = super::super::hotspots::selected(app) {
+            let finding = super::super::findings::hotspot(
+                app.hotspots.as_ref().unwrap(),
+                f,
+                app.maintainability.as_ref(),
+            );
+            app.journey.picker = Some(Picker {
+                title: format!("INVESTIGATE · {}", finding.path.display()),
+                actions: finding.next_actions,
+                selected: 0,
+                calls: false,
+            });
+        } else {
+            app.notice = Some("Choose a hotspot for measured function/source actions; Enter opens structural function candidates directly".into());
+        }
+        return Some(false);
+    }
     if key.code == K::Char('p') && app.view == View::Map && app.module_map.active {
         let title = app
             .module_map
