@@ -1,0 +1,82 @@
+{
+  "binary": "target/debug/wt",
+  "project": "tests/fixtures/workspace_project",
+  "events": [
+    {
+      "first_output_seconds": 0.02673612895887345
+    },
+    {
+      "seconds": 4.554310792998876,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90
+      }
+    },
+    {
+      "seconds": 5.032601801969577,
+      "step": {
+        "keys": "j\r",
+        "capture": "architecture"
+      }
+    },
+    {
+      "seconds": 5.504236890992615,
+      "step": {
+        "keys": "m",
+        "capture": "06-module-inspector"
+      }
+    },
+    {
+      "seconds": 6.649604596954305,
+      "step": {
+        "keys": "o",
+        "wait": "function",
+        "timeout": 30,
+        "settle": 1,
+        "capture": "module-source"
+      }
+    },
+    {
+      "seconds": 7.202393916959409,
+      "step": {
+        "keys": "\r",
+        "wait": "INSPECTOR",
+        "timeout": 30,
+        "capture": "module-callable"
+      }
+    },
+    {
+      "seconds": 9.305026372952852,
+      "step": {
+        "keys": "c",
+        "wait": "CURRENT",
+        "timeout": 30,
+        "settle": 2
+      }
+    },
+    {
+      "seconds": 9.757955421984661,
+      "step": {
+        "keys": "g",
+        "capture": "module-call-graph"
+      }
+    },
+    {
+      "seconds": 10.328660223982297,
+      "step": {
+        "keys": "\u001b",
+        "wait": "MODULE MAP",
+        "capture": "08-return-original-module"
+      }
+    },
+    {
+      "quit_seconds": 0.14449539897032082,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "initial_size": [
+    120,
+    35
+  ]
+}

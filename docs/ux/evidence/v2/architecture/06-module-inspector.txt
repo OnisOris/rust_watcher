@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ● Ready   Git ● Complete
+Overview > Architecture · Esc back · ? context help─────────────────────────────────────────────────────────────────────
+Workspace > fixture_app > Modules · Focus: crate
+ >Hierarchy   Imports   Used by  · g Diagram
+Coverage: Complete · Resolution: VerifiedOnly · cfg 0
+╭ MODULE MAP · fixture_app · Hierarchy ──────────────────────────╮╭ MODULE INSPECTOR · p priorities ───────────────────╮
+│                     ┌>0 · focus──────────┐                     ││MODULE · crate                                      │
+│                     │crate               │                     ││Selected: crate                                     │
+│                     └────────────────────┘                     ││Focus: crate                                        │
+│                                                                ││app/src/main.rs                                     │
+│  No known child modules. o opens source.                       ││Resolved · app/src/main.rs:1 · o source             │
+│                                                                ││o source → Enter callable → c Calls → Esc module    │
+│                                                                ││STRUCTURE · physical subtree                        │
+│                                                                ││Child modules              0                        │
+│                                                                ││Physical subtree files     1                        │
+│                                                                ││Subtree file LOC           4                        │
+│                                                                ││Subtree file functions     1                        │
+│                                                                ││Max file control depth     0                        │
+│                                                                ││Own module LOC/functions: unknown                   │
+│                                                                ││Physical files deduped; not exclusive inline        │
+│                                                                ││contents.                                           │
+│                                                                ││RELATIONSHIPS · records, not calls                  │
+│                                                                ││Direct verified imports    0                        │
+│                                                                ││Direct imported by modules 0                        │
+│                                                                ││Direct unclassified        0                        │
+│                                                                ││v Imports / Used by · ? meaning and limitations     │
+│                                                                ││REVIEW OPPORTUNITIES · p choose                     │
+│                                                                ││Largest children: no measured file-backed children  │
+│                                                                ││Hotspot files              0                        │
+│                                                                ││No ranked hotspot files in subtree                  │
+│Page 1/1 · Nodes 0–0 of 0 · Diagram                             ││main · 4 lines · app/src/main.rs:1                  │
+│mod: parent → child · PgUp/PgDn pages                           ││Longest in subtree files   4                        │
+╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────╯
+ Enter focus · o source · p review · v relationships · Esc back · ? help

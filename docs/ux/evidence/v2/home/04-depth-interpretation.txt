@@ -1,0 +1,35 @@
+ wt rust_watcher  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA╭ CONTEXT HELP · j/k scroll · Esc close ───────────────────────────────────────────────────────────────────────────╮
+Ov│Explore this view                                                                                                 │──
+╭ │Choose a task · Enter explore · Tab details. Technical groups expand with Enter.                                  │─╮
+│ │1–5 views · Tab / Shift+Tab panes · Ctrl+h/l panes · q quit                                                       │ │
+│ │Interpret measured data · j/k scroll · ? / Esc close                                                              │ │
+│ │Max control depth                                                                                                 │ │
+│ │WHAT                                                                                                              │ │
+│ │Maximum nested if/match/for/while/loop expressions in a function. Else-if chains stay at the same depth.          │ │
+│ │WHY                                                                                                               │ │
+│ │Find nested control structures that may deserve a closer read.                                                    │ │
+│ │LIMITATIONS                                                                                                       │ │
+│ │Not cyclomatic complexity or evidence of a bug. Plain blocks, match arms, nested items and closures add no control│ │
+│ │depth.                                                                                                            │ │
+│ │NEXT ACTION                                                                                                       │ │
+│ │Expand Deepest control flow and Enter opens the exact function anchor.                                            │ │
+│ │                                                                                                                  │ │
+│ │Partial / truncated / unknown                                                                                     │ │
+│>│WHAT                                                                                                              │ │
+│ │Partial: some data unavailable. Truncated: a stated budget/window omitted results. Unknown: no verified           │ │
+│ │measurement.                                                                                                      │ │
+│ │WHY                                                                                                               │ │
+│ │Keep absence of evidence separate from an observed zero.                                                          │ │
+│ │LIMITATIONS                                                                                                       │ │
+│ │Loading, failed and empty are different states. A bounded ranking is not the full set of functions or files.      │ │
+│ │NEXT ACTION                                                                                                       │ │
+│ │Check analysis readiness and retained reasons; retry a specific route when ready.                                 │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+│ │                                                                                                                  │ │
+╰─│                                                                                                                  │─╯
+╭ │                                                                                                                  │─╮
+│2│                                                                                                                  │ │
+╰─╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯─╯
+ ? / Esc close help · q quit

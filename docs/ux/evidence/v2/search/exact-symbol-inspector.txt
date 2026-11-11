@@ -1,0 +1,35 @@
+ wt simple_project   1 Overview  >2 Symbols   3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete
+Overview > Symbols · Esc back · ? context help──────────────────────────────────────────────────────────────────────────
+╭ SYMBOLS · calculate ─────────────────────────╮╭ INSPECTOR ───────────────────────────────────────────────────────────╮
+│> function calculate                          ││SYMBOL                                                                │
+│    src/main.rs:5                             ││calculate                                                             │
+│                                              ││function · src/main.rs:5                                              │
+│                                              ││                                                                      │
+│                                              ││USAGE                                                                 │
+│                                              ││References            2                                               │
+│                                              ││Callers               1                                               │
+│                                              ││Callees               1                                               │
+│                                              ││Problems              6                                               │
+│                                              ││                                                                      │
+│                                              ││DOCUMENTATION · Hover                                                 │
+│                                              ││simple_project                                                        │
+│                                              ││                                                                      │
+│                                              ││fn calculate() -> i32                                                 │
+│                                              ││                                                                      │
+│                                              ││Source                                                                │
+│                                              ││    1 │ fn add(a: i32, b: i32) -> i32 {                               │
+│                                              ││    2 │     a + b                                                     │
+│                                              ││    3 │ }                                                             │
+│                                              ││    4 │                                                               │
+│                                              ││>   5 │ fn calculate() -> i32 {                                       │
+│                                              ││    6 │     add(1, 2)                                                 │
+│                                              ││    7 │ }                                                             │
+│                                              ││    8 │                                                              │
+│                                              ││    9 │ fn привет() -> &'static str {                                 │
+│                                              ││   10 │     "🦀"                                                      │
+│                                              ││   11 │ }                                                             │
+│                                              ││   12 │                                                               │
+│                                              ││   13 │ fn main() {                                                   │
+╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────╯
+ / search · j/k select · Enter inspect · c calls · Tab pane · ? help · q quit

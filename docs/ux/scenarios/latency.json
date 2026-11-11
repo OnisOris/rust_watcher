@@ -1,0 +1,6 @@
+[
+ {"wait":"RA ● Ready","timeout":90},
+ {"wait":"Git ● Complete","timeout":90,"settle":1},
+ {"probe_keys":["j","k","2","1"],"repeats":5},
+ {"capture":"latency-end"}
+]

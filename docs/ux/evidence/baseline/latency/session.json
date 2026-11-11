@@ -1,0 +1,155 @@
+{
+  "binary": "/tmp/wt-ux-v2-baseline",
+  "project": ".",
+  "events": [
+    {
+      "first_output_seconds": 0.06946702703135088
+    },
+    {
+      "seconds": 12.656402177992277,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90
+      }
+    },
+    {
+      "seconds": 13.666162626002915,
+      "step": {
+        "wait": "Git \u25cf Complete",
+        "timeout": 90,
+        "settle": 1
+      }
+    },
+    {
+      "input_to_first_terminal_output": [
+        {
+          "key": "j",
+          "first_output_ms": 62.64747498789802,
+          "observed": true
+        },
+        {
+          "key": "k",
+          "first_output_ms": 37.30468999128789,
+          "observed": true
+        },
+        {
+          "key": "2",
+          "first_output_ms": 47.237025981303304,
+          "observed": true
+        },
+        {
+          "key": "1",
+          "first_output_ms": 82.39635400241241,
+          "observed": true
+        },
+        {
+          "key": "j",
+          "first_output_ms": 55.71544403210282,
+          "observed": true
+        },
+        {
+          "key": "k",
+          "first_output_ms": 70.71506598731503,
+          "observed": true
+        },
+        {
+          "key": "2",
+          "first_output_ms": 34.788303019013256,
+          "observed": true
+        },
+        {
+          "key": "1",
+          "first_output_ms": 49.38352096360177,
+          "observed": true
+        },
+        {
+          "key": "j",
+          "first_output_ms": 58.81561402929947,
+          "observed": true
+        },
+        {
+          "key": "k",
+          "first_output_ms": 46.1111519834958,
+          "observed": true
+        },
+        {
+          "key": "2",
+          "first_output_ms": 38.31345500657335,
+          "observed": true
+        },
+        {
+          "key": "1",
+          "first_output_ms": 71.45625294651836,
+          "observed": true
+        },
+        {
+          "key": "j",
+          "first_output_ms": 43.00271504325792,
+          "observed": true
+        },
+        {
+          "key": "k",
+          "first_output_ms": 41.39012796804309,
+          "observed": true
+        },
+        {
+          "key": "2",
+          "first_output_ms": 58.04752802941948,
+          "observed": true
+        },
+        {
+          "key": "1",
+          "first_output_ms": 48.86126896599308,
+          "observed": true
+        },
+        {
+          "key": "j",
+          "first_output_ms": 39.100005000364035,
+          "observed": true
+        },
+        {
+          "key": "k",
+          "first_output_ms": 112.27857798803598,
+          "observed": true
+        },
+        {
+          "key": "2",
+          "first_output_ms": 43.45998901408166,
+          "observed": true
+        },
+        {
+          "key": "1",
+          "first_output_ms": 47.842169005889446,
+          "observed": true
+        }
+      ]
+    },
+    {
+      "seconds": 17.060298032010905,
+      "step": {
+        "probe_keys": [
+          "j",
+          "k",
+          "2",
+          "1"
+        ],
+        "repeats": 5
+      }
+    },
+    {
+      "seconds": 17.752528742013965,
+      "step": {
+        "capture": "latency-end"
+      }
+    },
+    {
+      "quit_seconds": 0.2998072779737413,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "1a040c594b249ea4511aec25a14b4e28ef0c3977c2ff2fd9a53956289ae80f14",
+  "initial_size": [
+    120,
+    35
+  ]
+}

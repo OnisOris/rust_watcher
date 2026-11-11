@@ -1,0 +1,27 @@
+[
+  {
+    "wait": "Git \u25cf Complete",
+    "timeout": 90
+  },
+  {
+    "keys": "jjj\r",
+    "capture": "05-review-evidence",
+    "wait": "Why review this file?"
+  },
+  {
+    "keys": "p",
+    "capture": "review-next-actions",
+    "wait": "INVESTIGATE"
+  },
+  {
+    "keys": "\r",
+    "wait": "INSPECTOR",
+    "timeout": 30,
+    "settle": 2,
+    "capture": "review-exact-source"
+  },
+  {
+    "keys": "\u001b\u001b",
+    "capture": "review-return"
+  }
+]

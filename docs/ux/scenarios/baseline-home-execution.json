@@ -1,0 +1,8 @@
+[
+ {"wait":"RA ● Ready","timeout":90},
+ {"keys":"jjj\r","wait":"CARGO TARGETS","capture":"baseline-entry-picker"},
+ {"keys":"\r","wait":"function","settle":1,"capture":"baseline-entry-source"},
+ {"keys":"\r","wait":"INSPECTOR","settle":1},
+ {"keys":"c","wait":"CURRENT","settle":1},
+ {"keys":"g","wait":"CALL GRAPH","capture":"baseline-home-call-graph"}
+]

@@ -1,0 +1,35 @@
+ wt simple_project   1 Overview  >2 Symbols   3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete
+Overview > Symbols · Esc back · ? context help──────────────────────────────────────────────────────────────────────────
+╭ START EXPLORING SYMBOLS ─────────────────────╮╭ INSPECTOR ───────────────────────────────────────────────────────────╮
+│Explore known locations                       ││No symbol selected.                                                   │
+│                ╭ Search symbols ────────────────────────────────────────────────────────────────────╮                │
+│> Cargo source r│>                                                                                   │                │
+│    1 location(s╰────────────────────────────────────────────────────────────────────────────────────╯                │
+│  Longest known ╭ Results ───────────────────────────────────────────────────────────────────────────╮                │
+│    10 location(│                                                                                    │                │
+│  Deepest known │                                                                                    │                │
+│    10 location(│                                                                                    │                │
+│  Review hotspot│                                                                                    │                │
+│  No current ran│                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
+│j/k choose · Enter candidates                 ││                                                                      │
+│/ Search by name                              ││                                                                      │
+│                                              ││                                                                      │
+╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────╯
+ type search · ↑/↓ results · Enter inspect · Esc close · Ctrl+c quit

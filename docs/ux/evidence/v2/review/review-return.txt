@@ -1,0 +1,35 @@
+ wt rust_watcher   1 Overview   2 Symbols   3 Calls  >4 Explorer   5 Map
+RA ◐ Indexing   Git ● Complete   Co-change ◐ Partial
+Overview > Source · Esc back · ? context help───────────────────────────────────────────────────────────────────────────
+╭ PROJECT TREE ──────────────────────────────────╮╭ FILE ──────────────────────────────────────────────────────────────╮
+│      ▶ git_analysis                            ││src/tui/event.rs                                                    │
+│      ▶ lsp                                     ││                                                                    │
+│      ▶ maintainability                         ││type      Rust source                                               │
+│      ▶ metrics                                 ││size      35.6 KiB                                                  │
+│      ▶ module_graph                            ││package   rust_watcher                                              │
+│      ▼ tui                                     ││role      source                                                    │
+│        ▶ call_graph                            ││anchor    131:21 · handle_key                                       │
+│        ▶ journey                               ││Exact RA symbol selected; Enter Inspector, c Calls                  │
+│        ▶ map                                   ││                                                                    │
+│        ▶ module_map                            ││                                                                    │
+│        ▶ overview                              │╰────────────────────────────────────────────────────────────────────╯
+│        ▶ ui                                    │╭ SYMBOLS ───────────────────────────────────────────────────────────╮
+│        R app.rs [source]                       ││  constant   SEARCH_DEBOUNCE                                        │
+│        R components.rs [source]                ││  function   run_loop                                               │
+│>       R event.rs [source]                     ││  function   apply_repository                                       │
+│        R explanations.rs [source]              ││> function   handle_key                                             │
+│        R explorer.rs [source]                  ││  function   open_exact_file                                        │
+│        R findings.rs [source]                  ││  function   begin_inspect                                          │
+│        R help.rs [source]                      ││  function   guided                                                 │
+│        R highlight.rs [source]                 ││  function   open_calls                                             │
+│        R hotspots.rs [source]                  ││  function   follow_call                                            │
+│        R journey.rs [source]                   ││  function   reload_calls_scope                                     │
+│        R map.rs [source]                       ││  function   activate_explorer                                      │
+│        R mod.rs [source]                       ││  function   send_command                                           │
+│        R module_map.rs [source]                ││  struct     TerminalSession                                        │
+│        R navigation_tests.rs [source]          ││  field      TerminalSession::terminal                              │
+│        R overview.rs [source]                  ││  object     impl TerminalSession                                   │
+│        R performance_tests.rs [source]         ││  function   impl TerminalSession::enter                            │
+│        R product_tests.rs [source]             ││  method     impl TerminalSession::draw                             │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ j/k select · h/l tree · Enter open/inspect · Tab pane · ? help · q quit

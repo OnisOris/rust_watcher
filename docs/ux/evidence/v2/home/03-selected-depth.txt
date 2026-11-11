@@ -1,0 +1,35 @@
+ wt rust_watcher  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+Overview · Esc back · ? context help────────────────────────────────────────────────────────────────────────────────────
+╭ EXPLORATION ────────────────────────────────────────╮╭ SELECTED ITEM · j/k scroll ───────────────────────────────────╮
+│  ▾ UNDERSTAND THIS REPOSITORY                       ││Max control depth                                              │
+│    Explore execution →                              ││Depth 8 · nested control structures                            │
+│  Binary entrypoint → real static calls              ││Maximum nested if/match/for/while/loop expressions in a        │
+│    Explore architecture →                           ││function. Else-if chains stay at the same depth.               │
+│  Crates → modules → exact source                    ││WHY                                                            │
+│    Find implementation →                            ││Find nested control structures that may deserve a closer read. │
+│  Search Rust symbols → exact source                 ││LIMITATIONS                                                    │
+│    Review attention areas →                         ││Not cyclomatic complexity or evidence of a bug. Plain blocks,  │
+│  Measured evidence → source to study                ││match arms, nested items and closures add no control depth.    │
+│  ▾ UNDERSTAND THE METRICS · ? details               ││NEXT ACTION                                                    │
+│    Source LOC                                       ││Expand Deepest control flow and Enter opens the exact function │
+│    Physical LOC                                     ││anchor.                                                        │
+│    Functions                                        ││? full interpretation · Tab then j/k scroll                    │
+│    Median / P95 function length                     ││Rust structure ready · bounded syntax measurement              │
+│>   Max control depth                                ││                                                               │
+│    Control-flow nodes                               ││                                                               │
+│    Git changes                                      ││                                                               │
+│    Git churn                                        ││                                                               │
+│    Co-change                                        ││                                                               │
+│    Review candidates                                ││                                                               │
+│    Verified Imports                                 ││                                                               │
+│    Unclassified Imports                             ││                                                               │
+│    Module coverage / resolution                     ││                                                               │
+│    Incoming / outgoing calls                        ││                                                               │
+│    Partial / truncated / unknown                    ││                                                               │
+│  ▸ GIT HOTSPOTS                                     ││                                                               │
+╰─────────────────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────╯
+╭ PROJECT SNAPSHOT · PARTIAL · ? explains limits ──────────────────────────────────────────────────────────────────────╮
+│26.7k source LOC   904 functions   25 review candidates                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit

@@ -1,0 +1,30 @@
+ wt rust_watcher  >1 OVR   2 SYM   3 CALL   4 FILE   5 MAP
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+Overview · Esc back · ? context help────────────────────────────────────────────────────────────────
+╭ EXPLORATION ───────────────────────────────╮╭ SELECTED ITEM · j/k scroll ────────────────────────╮
+│  ▾ UNDERSTAND THIS REPOSITORY              ││Explore execution                                   │
+│>   Explore execution →                     ││Binary entrypoint → real static calls               │
+│  Binary entrypoint → real static calls     ││                                                    │
+│    Explore architecture →                  ││Availability                                        │
+│  Crates → modules → exact source           ││1 binary target(s) · Enter chooses an entrypoint    │
+│    Find implementation →                   ││Next action                                         │
+│  Search Rust symbols → exact source        ││Enter starts · Esc returns along the exploration    │
+│    Review attention areas →                ││route                                               │
+│  Measured evidence → source to study       ││? explains this view · Tab focuses scrollable       │
+│  ▸ UNDERSTAND THE METRICS · ? details      ││details                                             │
+│  ▸ GIT HOTSPOTS                            ││What you can trust                                  │
+│  ▸ LARGEST SOURCE FILES                    ││Cargo identifies targets. RA supplies symbols and   │
+│  ▸ LONGEST FUNCTIONS                       ││static calls.                                       │
+│  ▸ DEEPEST CONTROL FLOW                    ││Module relationships are conservative syntax, not   │
+│  ▸ CRATES                                  ││runtime behavior.                                   │
+│  ▸ ENTRYPOINTS                             ││Review areas are measured signals, not defect       │
+│  ▸ LANGUAGES                               ││predictions.                                        │
+│  ▸ HISTORICAL PATHS                        ││                                                    │
+│  ▸ ANALYSIS & LIMITATIONS                  ││                                                    │
+│  Workspace summary                         ││                                                    │
+│                                            ││                                                    │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────╯
+╭ PROJECT SNAPSHOT · PARTIAL · ? explains limits ──────────────────────────────────────────────────╮
+│26.7k source LOC   904 functions   25 review candidates                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit

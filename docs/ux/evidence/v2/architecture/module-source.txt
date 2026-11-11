@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols   3 Calls  >4 Explorer   5 Map
+RA ● Ready   Git ● Complete
+Overview > Architecture > Source · Esc back · ? context help────────────────────────────────────────────────────────────
+╭ PROJECT TREE ──────────────────────────────────╮╭ FILE ──────────────────────────────────────────────────────────────╮
+│  ▼ workspace_project                           ││app/src/main.rs                                                     │
+│    ▼ app                                       ││                                                                    │
+│      ▼ src                                     ││type      Rust source                                               │
+│>       R main.rs [entry]                       ││size      83 B                                                      │
+│      C Cargo.toml [manifest]                   ││package   fixture_app                                               │
+│    ▼ core                                      ││role      entry                                                     │
+│      ▼ src                                     ││                                                                    │
+│        R lib.rs [crate]                        │╰────────────────────────────────────────────────────────────────────╯
+│      C Cargo.toml [manifest]                   │╭ SYMBOLS ───────────────────────────────────────────────────────────╮
+│    C Cargo.toml                                ││> function   main                                                   │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ j/k select · h/l tree · Enter open/inspect · Tab pane · ? help · q quit

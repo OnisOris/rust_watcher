@@ -1,0 +1,35 @@
+ wt rust_watcher   1 Overview   2 Symbols   3 Calls  >4 Explorer   5 Map
+RA ◐ Indexing   Git ● Complete   Co-change ◐ Partial
+Overview > Source · Esc back · ? context help───────────────────────────────────────────────────────────────────────────
+╭ PROJECT TREE ──────────────────────────────────╮╭ INSPECTOR ─────────────────────────────────────────────────────────╮
+│      ▶ git_analysis                            ││Current file: src/tui/event.rs · Esc returns to file symbols        │
+│      ▶ lsp                                     ││SYMBOL                                                              │
+│      ▶ maintainability                         ││handle_key                                                          │
+│      ▶ metrics                                 ││function · src/tui/event.rs:131                                     │
+│      ▶ module_graph                            ││                                                                    │
+│      ▼ tui                                     ││USAGE                                                               │
+│        ▶ call_graph                            ││References            loading...                                    │
+│        ▶ journey                               ││Callers               loading...                                    │
+│        ▶ map                                   ││Callees               loading...                                    │
+│        ▶ module_map                            ││Problems              loading...                                    │
+│        ▶ overview                              ││                                                                    │
+│        ▶ ui                                    ││DOCUMENTATION · Hover                                               │
+│        R app.rs [source]                       ││loading...                                                          │
+│        R components.rs [source]                ││                                                                    │
+│>       R event.rs [source]                     ││Source                                                              │
+│        R explanations.rs [source]              ││  121 │         RepositoryEvent::Error(message) => {                │
+│        R explorer.rs [source]                  ││  122 │             app.module_map.error = Some(message.clone());   │
+│        R findings.rs [source]                  ││  123 │             app.metrics_error = Some(message.clone());      │
+│        R help.rs [source]                      ││  124 │             app.hotspots_error = Some(message.clone());     │
+│        R highlight.rs [source]                 ││  125 │             app.maintainability_error =                     │
+│        R hotspots.rs [source]                  ││Some(message.clone());                                              │
+│        R journey.rs [source]                   ││  126 │             app.explorer.fail(message);                     │
+│        R map.rs [source]                       ││  127 │         }                                                   │
+│        R mod.rs [source]                       ││  128 │     }                                                       │
+│        R module_map.rs [source]                ││  129 │ }                                                           │
+│        R navigation_tests.rs [source]          ││  130 │                                                             │
+│        R overview.rs [source]                  ││> 131 │ pub(super) async fn handle_key(                             │
+│        R performance_tests.rs [source]         ││  132 │     app: &mut App,                                          │
+│        R product_tests.rs [source]             ││  133 │     key: KeyEvent,                                          │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ j/k scroll · c calls · Esc file symbols · Tab pane · ? help · q quit

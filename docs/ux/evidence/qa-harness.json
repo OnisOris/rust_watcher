@@ -1,0 +1,415 @@
+{
+  "implementation": "9f3d27eaf317235512cc36ca43ef986268cd5660",
+  "sessions": {
+    "home": {
+      "binary": "target/debug/wt",
+      "project": ".",
+      "events": [
+        {
+          "first_output_seconds": 0.06756469700485468
+        },
+        {
+          "seconds": 0.7865629059961066,
+          "step": {
+            "wait": "Explore execution",
+            "timeout": 20,
+            "capture": "01-overview-starting"
+          }
+        },
+        {
+          "seconds": 1.4760123020387255,
+          "step": {
+            "wait": "RA \u25d0 Indexing",
+            "timeout": 30,
+            "capture": "09-indexing"
+          }
+        },
+        {
+          "seconds": 12.358576847997028,
+          "step": {
+            "wait": "RA \u25cf Ready",
+            "timeout": 90,
+            "capture": "01-overview-120x35"
+          }
+        },
+        {
+          "seconds": 12.959100090025458,
+          "step": {
+            "size": [
+              80,
+              20
+            ],
+            "capture": "02-overview-80x20"
+          }
+        },
+        {
+          "seconds": 13.628311237029266,
+          "step": {
+            "size": [
+              100,
+              30
+            ],
+            "capture": "overview-100x30"
+          }
+        },
+        {
+          "seconds": 14.44634213700192,
+          "step": {
+            "size": [
+              160,
+              45
+            ],
+            "capture": "overview-160x45"
+          }
+        },
+        {
+          "seconds": 14.946824306040071,
+          "step": {
+            "size": [
+              120,
+              35
+            ]
+          }
+        },
+        {
+          "seconds": 15.64599760103738,
+          "step": {
+            "keys": "jjjj\rjjjjj",
+            "capture": "03-selected-depth",
+            "wait": "Depth "
+          }
+        },
+        {
+          "seconds": 16.149241820035968,
+          "step": {
+            "keys": "?",
+            "capture": "04-depth-interpretation"
+          }
+        },
+        {
+          "seconds": 16.748544945032336,
+          "step": {
+            "keys": "\u001b",
+            "capture": "depth-return"
+          }
+        },
+        {
+          "quit_seconds": 0.2926994899753481,
+          "exit_code": 0
+        }
+      ],
+      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "initial_size": [
+        120,
+        35
+      ]
+    },
+    "execution": {
+      "binary": "target/debug/wt",
+      "project": "tests/fixtures/workspace_project",
+      "events": [
+        {
+          "first_output_seconds": 0.04253674496430904
+        },
+        {
+          "seconds": 6.564077926974278,
+          "step": {
+            "wait": "RA \u25cf Ready",
+            "timeout": 90
+          }
+        },
+        {
+          "seconds": 7.093221686955076,
+          "step": {
+            "keys": "\r",
+            "capture": "binary-picker"
+          }
+        },
+        {
+          "seconds": 9.370529395993799,
+          "step": {
+            "keys": "\r",
+            "wait": "CURRENT",
+            "timeout": 30,
+            "settle": 2,
+            "capture": "main-calls"
+          }
+        },
+        {
+          "seconds": 9.847233813954517,
+          "step": {
+            "keys": "g",
+            "capture": "07-call-graph"
+          }
+        },
+        {
+          "seconds": 11.134319971955847,
+          "step": {
+            "keys": "o",
+            "wait": "INSPECTOR",
+            "timeout": 30,
+            "settle": 1,
+            "capture": "call-source"
+          }
+        },
+        {
+          "seconds": 11.71152324497234,
+          "step": {
+            "keys": "\u001b",
+            "wait": "CALL GRAPH",
+            "capture": "graph-restored"
+          }
+        },
+        {
+          "seconds": 12.299581877945457,
+          "step": {
+            "keys": "\u001b",
+            "wait": "UNDERSTAND THIS",
+            "capture": "execution-return-home"
+          }
+        },
+        {
+          "quit_seconds": 0.20366714498959482,
+          "exit_code": 0
+        }
+      ],
+      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "initial_size": [
+        120,
+        35
+      ]
+    },
+    "architecture": {
+      "binary": "target/debug/wt",
+      "project": "tests/fixtures/workspace_project",
+      "events": [
+        {
+          "first_output_seconds": 0.03931586700491607
+        },
+        {
+          "seconds": 6.574826153984759,
+          "step": {
+            "wait": "RA \u25cf Ready",
+            "timeout": 90
+          }
+        },
+        {
+          "seconds": 7.109655583975837,
+          "step": {
+            "keys": "j\r",
+            "capture": "architecture"
+          }
+        },
+        {
+          "seconds": 7.612066734000109,
+          "step": {
+            "keys": "m",
+            "capture": "06-module-inspector"
+          }
+        },
+        {
+          "seconds": 8.782801230961923,
+          "step": {
+            "keys": "o",
+            "wait": "function",
+            "timeout": 30,
+            "settle": 1,
+            "capture": "module-source"
+          }
+        },
+        {
+          "seconds": 9.424729374994058,
+          "step": {
+            "keys": "\r",
+            "wait": "INSPECTOR",
+            "timeout": 30,
+            "capture": "module-callable"
+          }
+        },
+        {
+          "seconds": 11.528260211984161,
+          "step": {
+            "keys": "c",
+            "wait": "CURRENT",
+            "timeout": 30,
+            "settle": 2
+          }
+        },
+        {
+          "seconds": 12.0452096730005,
+          "step": {
+            "keys": "g",
+            "capture": "module-call-graph"
+          }
+        },
+        {
+          "seconds": 12.709225462982431,
+          "step": {
+            "keys": "\u001b",
+            "wait": "MODULE MAP",
+            "capture": "08-return-original-module"
+          }
+        },
+        {
+          "quit_seconds": 0.30097553704399616,
+          "exit_code": 0
+        }
+      ],
+      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "initial_size": [
+        120,
+        35
+      ]
+    },
+    "search": {
+      "binary": "target/debug/wt",
+      "project": "tests/fixtures/simple_project",
+      "events": [
+        {
+          "first_output_seconds": 0.05524376599350944
+        },
+        {
+          "seconds": 6.6687103130389005,
+          "step": {
+            "wait": "RA \u25cf Ready",
+            "timeout": 90
+          }
+        },
+        {
+          "seconds": 7.19567318103509,
+          "step": {
+            "keys": "jj\r",
+            "capture": "symbol-search"
+          }
+        },
+        {
+          "seconds": 9.406552770000417,
+          "step": {
+            "keys": "calculate",
+            "settle": 2,
+            "capture": "search-results"
+          }
+        },
+        {
+          "seconds": 11.598272939037997,
+          "step": {
+            "keys": "\r",
+            "wait": "INSPECTOR",
+            "timeout": 30,
+            "settle": 2,
+            "capture": "exact-symbol-inspector"
+          }
+        },
+        {
+          "quit_seconds": 0.2297726589604281,
+          "exit_code": 0
+        }
+      ],
+      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "initial_size": [
+        120,
+        35
+      ]
+    },
+    "review": {
+      "binary": "target/debug/wt",
+      "project": ".",
+      "events": [
+        {
+          "first_output_seconds": 0.1388082259800285
+        },
+        {
+          "seconds": 5.761529886978678,
+          "step": {
+            "wait": "Git \u25cf Complete",
+            "timeout": 90
+          }
+        },
+        {
+          "seconds": 6.564759979955852,
+          "step": {
+            "keys": "jjj\r",
+            "capture": "05-review-evidence",
+            "wait": "Why review this file?"
+          }
+        },
+        {
+          "seconds": 7.292157446965575,
+          "step": {
+            "keys": "p",
+            "capture": "review-next-actions",
+            "wait": "INVESTIGATE"
+          }
+        },
+        {
+          "seconds": 9.735985361970961,
+          "step": {
+            "keys": "\r",
+            "wait": "INSPECTOR",
+            "timeout": 30,
+            "settle": 2,
+            "capture": "review-exact-source"
+          }
+        },
+        {
+          "seconds": 10.390187921992037,
+          "step": {
+            "keys": "\u001b\u001b",
+            "capture": "review-return"
+          }
+        },
+        {
+          "quit_seconds": 0.27588016900699586,
+          "exit_code": 0
+        }
+      ],
+      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "initial_size": [
+        120,
+        35
+      ]
+    },
+    "unavailable": {
+      "binary": "target/debug/wt",
+      "project": "tests/fixtures/workspace_project",
+      "events": [
+        {
+          "first_output_seconds": 0.031491155037656426
+        },
+        {
+          "seconds": 0.6309702140279114,
+          "step": {
+            "wait": "RA \u00d7 Error",
+            "timeout": 30,
+            "capture": "10-ra-unavailable"
+          }
+        },
+        {
+          "seconds": 1.1238008830114268,
+          "step": {
+            "keys": "\r\r",
+            "wait": "Source available",
+            "timeout": 30,
+            "capture": "source-without-ra"
+          }
+        },
+        {
+          "seconds": 1.6357576610171236,
+          "step": {
+            "keys": "\u001b\u001b",
+            "capture": "return-without-ra"
+          }
+        },
+        {
+          "quit_seconds": 0.015792705991771072,
+          "exit_code": 0
+        }
+      ],
+      "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+      "initial_size": [
+        120,
+        35
+      ]
+    }
+  }
+}

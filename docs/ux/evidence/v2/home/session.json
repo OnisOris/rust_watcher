@@ -1,0 +1,103 @@
+{
+  "binary": "target/debug/wt",
+  "project": ".",
+  "events": [
+    {
+      "first_output_seconds": 0.4564623979968019
+    },
+    {
+      "seconds": 1.4350897860131226,
+      "step": {
+        "wait": "Explore execution",
+        "timeout": 20,
+        "capture": "01-overview-starting"
+      }
+    },
+    {
+      "seconds": 2.216878160019405,
+      "step": {
+        "wait": "RA \u25d0 Indexing",
+        "timeout": 30,
+        "capture": "09-indexing"
+      }
+    },
+    {
+      "seconds": 26.80719813401811,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90,
+        "capture": "01-overview-120x35"
+      }
+    },
+    {
+      "seconds": 27.532668152009137,
+      "step": {
+        "size": [
+          80,
+          20
+        ],
+        "capture": "02-overview-80x20"
+      }
+    },
+    {
+      "seconds": 28.46793487400282,
+      "step": {
+        "size": [
+          100,
+          30
+        ],
+        "capture": "overview-100x30"
+      }
+    },
+    {
+      "seconds": 29.62340328504797,
+      "step": {
+        "size": [
+          160,
+          45
+        ],
+        "capture": "overview-160x45"
+      }
+    },
+    {
+      "seconds": 30.12700085801771,
+      "step": {
+        "size": [
+          120,
+          35
+        ]
+      }
+    },
+    {
+      "seconds": 31.326801586023066,
+      "step": {
+        "keys": "jjjj\rjjjjj",
+        "capture": "03-selected-depth",
+        "wait": "Depth "
+      }
+    },
+    {
+      "seconds": 31.956425386015326,
+      "step": {
+        "keys": "?",
+        "capture": "04-depth-interpretation"
+      }
+    },
+    {
+      "seconds": 32.83122276799986,
+      "step": {
+        "keys": "\u001b",
+        "capture": "depth-return"
+      }
+    },
+    {
+      "quit_seconds": 0.32307714701164514,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "initial_size": [
+    120,
+    35
+  ]
+}

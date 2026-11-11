@@ -1,0 +1,6 @@
+[
+ {"wait":"RA ● Ready","timeout":90},
+ {"keys":"jj\r","capture":"symbol-search"},
+ {"keys":"calculate","settle":2,"capture":"search-results"},
+ {"keys":"\r","wait":"INSPECTOR","timeout":30,"settle":2,"capture":"exact-symbol-inspector"}
+]

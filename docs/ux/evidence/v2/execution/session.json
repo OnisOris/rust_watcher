@@ -1,0 +1,75 @@
+{
+  "binary": "target/debug/wt",
+  "project": "tests/fixtures/workspace_project",
+  "events": [
+    {
+      "first_output_seconds": 0.21588662604335696
+    },
+    {
+      "seconds": 14.104099030024372,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90
+      }
+    },
+    {
+      "seconds": 15.00960583804408,
+      "step": {
+        "keys": "\r",
+        "capture": "binary-picker"
+      }
+    },
+    {
+      "seconds": 17.812385207042098,
+      "step": {
+        "keys": "\r",
+        "wait": "CURRENT",
+        "timeout": 30,
+        "settle": 2,
+        "capture": "main-calls"
+      }
+    },
+    {
+      "seconds": 18.55348150804639,
+      "step": {
+        "keys": "g",
+        "capture": "07-call-graph"
+      }
+    },
+    {
+      "seconds": 19.916565864055883,
+      "step": {
+        "keys": "o",
+        "wait": "INSPECTOR",
+        "timeout": 30,
+        "settle": 1,
+        "capture": "call-source"
+      }
+    },
+    {
+      "seconds": 20.565533710003365,
+      "step": {
+        "keys": "\u001b",
+        "wait": "CALL GRAPH",
+        "capture": "graph-restored"
+      }
+    },
+    {
+      "seconds": 21.234352501051035,
+      "step": {
+        "keys": "\u001b",
+        "wait": "UNDERSTAND THIS",
+        "capture": "execution-return-home"
+      }
+    },
+    {
+      "quit_seconds": 0.29227648297091946,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "initial_size": [
+    120,
+    35
+  ]
+}

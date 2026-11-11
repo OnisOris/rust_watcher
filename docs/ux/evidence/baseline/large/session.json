@@ -1,0 +1,50 @@
+{
+  "binary": "/tmp/wt-ux-v2-baseline",
+  "project": "/home/poke/code/QymCAD",
+  "events": [
+    {
+      "first_output_seconds": 0.5320724089979194
+    },
+    {
+      "seconds": 2.4432423429680057,
+      "step": {
+        "wait": "Explore architecture",
+        "timeout": 20,
+        "capture": "overview-indexing"
+      }
+    },
+    {
+      "seconds": 84.74031137599377,
+      "step": {
+        "keys": "5m",
+        "wait": "MODULE INSPECTOR",
+        "timeout": 90,
+        "capture": "module-inspector-120x35"
+      }
+    },
+    {
+      "seconds": 85.49773099698359,
+      "step": {
+        "size": [
+          80,
+          20
+        ],
+        "capture": "module-inspector-80x20"
+      }
+    },
+    {
+      "seconds": 87.49559655500343,
+      "step": {
+        "size": [
+          160,
+          45
+        ],
+        "capture": "module-inspector-160x45"
+      }
+    },
+    {
+      "quit_seconds": 0.5468997900024988,
+      "exit_code": 0
+    }
+  ]
+}

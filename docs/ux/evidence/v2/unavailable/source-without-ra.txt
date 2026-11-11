@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols   3 Calls  >4 Explorer   5 Map
+RA × Error · see Analysis   Git ● Complete   Semantic navigation unavailable: rust-analyzer error. Exact file/anchor ret
+Overview > Source · Esc back · ? context help───────────────────────────────────────────────────────────────────────────
+╭ PROJECT TREE ──────────────────────────────────╮╭ FILE ──────────────────────────────────────────────────────────────╮
+│  ▼ workspace_project                           ││app/src/main.rs                                                     │
+│    ▼ app                                       ││                                                                    │
+│      ▼ src                                     ││type      Rust source                                               │
+│>       R main.rs [entry]                       ││size      83 B                                                      │
+│      C Cargo.toml [manifest]                   ││package   fixture_app                                               │
+│    ▼ core                                      ││role      entry                                                     │
+│      ▼ src                                     ││Entry point: fixture_app · fixture_app                              │
+│        R lib.rs [crate]                        ││Source available. Call hierarchy unavailable: rust-analyzer error.  │
+│      C Cargo.toml [manifest]                   ││                                                                    │
+│    C Cargo.toml                                ││                                                                    │
+│                                                │╰────────────────────────────────────────────────────────────────────╯
+│                                                │╭ SYMBOLS ───────────────────────────────────────────────────────────╮
+│                                                ││error: rust-analyzer executable not found: rust-analyzer            │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ j/k select · h/l tree · Enter open/inspect · Tab pane · ? help · q quit

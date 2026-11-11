@@ -1,0 +1,58 @@
+{
+  "binary": "target/debug/wt",
+  "project": ".",
+  "events": [
+    {
+      "first_output_seconds": 0.03009563300292939
+    },
+    {
+      "seconds": 3.5412962699774653,
+      "step": {
+        "wait": "Git \u25cf Complete",
+        "timeout": 90
+      }
+    },
+    {
+      "seconds": 4.569161886989605,
+      "step": {
+        "keys": "jjj\r",
+        "capture": "05-review-evidence",
+        "wait": "Why review this file?"
+      }
+    },
+    {
+      "seconds": 5.367195856990293,
+      "step": {
+        "keys": "p",
+        "capture": "review-next-actions",
+        "wait": "INVESTIGATE"
+      }
+    },
+    {
+      "seconds": 8.072421154996846,
+      "step": {
+        "keys": "\r",
+        "wait": "INSPECTOR",
+        "timeout": 30,
+        "settle": 2,
+        "capture": "review-exact-source"
+      }
+    },
+    {
+      "seconds": 8.981921611004509,
+      "step": {
+        "keys": "\u001b\u001b",
+        "capture": "review-return"
+      }
+    },
+    {
+      "quit_seconds": 0.27251387998694554,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "initial_size": [
+    120,
+    35
+  ]
+}

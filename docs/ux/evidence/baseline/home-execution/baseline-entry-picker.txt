@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ● Ready   Git ● Complete
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ ARCHITECTURE MAP · workspace crates ─────────────────────────────────╮╭ CRATE INSPECTOR · j/k scroll ────────────────╮
+│Showing 2 of 2 workspace crates · workspace                           ││fixture_app                                   │
+│Selected: fixture_app                                                 ││app/Cargo.toml                                │
+│                                                                      ││crate:app/Cargo.toml                          │
+│                                                                      ││Rust modules of this crate                    │
+│                                                                      ││m → Open module map to explore internal       │
+│                                                                      ││architecture                                  │
+│                                                                      ││                                              │
+│                                                                      ││CURRENT STRUCTURE                             │
+│                                                                      ││Source nonblank LOC   4                       │
+│                                                                      ││Rust files            1                       │
+│   ╭ CARGO TARGETS · j/k choose · Enter open · Esc cancel ────────────────────────────────────────────────────────╮   │
+│   │> fixture_app · bin                                                                                           │   │
+│   │  app/src/main.rs                                                                                             │   │
+│   │  fixture_core · lib                                                                                          │   │
+│   │  core/src/lib.rs                                                                                             │   │
+│   │                                                                                                              │   │
+│   │                                                                                                              │   │
+│   ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯   │
+│                                                                      ││External declarations 0                       │
+│                                                                      ││DEPENDS ON · outgoing →                       │
+│                                                                      ││─n→ fixture_core · alias fixture_core         │
+│                                                                      ││USED BY · incoming →                          │
+│                                                                      ││CARGO TARGETS · o to choose                   │
+│                                                                      ││fixture_app · bin                             │
+│                                                                      ││app/src/main.rs                               │
+│                                                                      ││Declared dependencies include                 │
+│                                                                      ││cfg/optional/dev/build; not an activated      │
+│─n→ normal  ┄d→ dev  ═b⇒ build                                        ││feature graph.                                │
+│A → B: A depends on B · declared dependencies                         ││                                              │
+╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ j/k select · PgUp/PgDn pages · Enter focus · g/v · p review · o · Esc · q quit

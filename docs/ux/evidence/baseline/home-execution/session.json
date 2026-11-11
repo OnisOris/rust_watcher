@@ -1,0 +1,66 @@
+{
+  "binary": "/tmp/wt-ux-v2-baseline",
+  "project": "tests/fixtures/workspace_project",
+  "events": [
+    {
+      "first_output_seconds": 0.2016505500068888
+    },
+    {
+      "seconds": 7.263914302980993,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90
+      }
+    },
+    {
+      "seconds": 7.904267220990732,
+      "step": {
+        "keys": "jjj\r",
+        "wait": "CARGO TARGETS",
+        "capture": "baseline-entry-picker"
+      }
+    },
+    {
+      "seconds": 9.17941600998165,
+      "step": {
+        "keys": "\r",
+        "wait": "function",
+        "settle": 1,
+        "capture": "baseline-entry-source"
+      }
+    },
+    {
+      "seconds": 10.281409168965183,
+      "step": {
+        "keys": "\r",
+        "wait": "INSPECTOR",
+        "settle": 1
+      }
+    },
+    {
+      "seconds": 11.38385288597783,
+      "step": {
+        "keys": "c",
+        "wait": "CURRENT",
+        "settle": 1
+      }
+    },
+    {
+      "seconds": 12.00203963497188,
+      "step": {
+        "keys": "g",
+        "wait": "CALL GRAPH",
+        "capture": "baseline-home-call-graph"
+      }
+    },
+    {
+      "quit_seconds": 0.26884120103204623,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "1a040c594b249ea4511aec25a14b4e28ef0c3977c2ff2fd9a53956289ae80f14",
+  "initial_size": [
+    120,
+    35
+  ]
+}

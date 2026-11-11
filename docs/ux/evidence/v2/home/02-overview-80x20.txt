@@ -1,0 +1,20 @@
+ wt rust_watcher  >1 OVR   2 SYM   3 CALL   4 FILE   5 MAP
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+Overview · Esc back · ? context help────────────────────────────────────────────
+╭ EXPLORATION ──────────────────────╮╭ SELECTED ITEM · j/k scroll ─────────────╮
+│  ▾ UNDERSTAND THIS REPOSITORY     ││Explore execution                        │
+│>   Explore execution →            ││Binary entrypoint → real static calls    │
+│  Binary → static calls            ││                                         │
+│    Explore architecture →         ││Availability                             │
+│  Crates → modules → source        ││1 binary target(s) · Enter chooses an    │
+│    Find implementation →          ││entrypoint                               │
+│  Rust symbols → exact source      ││Next action                              │
+│    Review attention areas →       ││Enter starts · Esc returns along the     │
+│  Evidence → source to study       ││exploration route                        │
+│  ▸ UNDERSTAND THE METRICS · ? deta││? explains this view · Tab focuses       │
+│  ▸ GIT HOTSPOTS                   ││scrollable details                       │
+╰───────────────────────────────────╯╰─────────────────────────────────────────╯
+╭ PROJECT SNAPSHOT · PARTIAL · ? explains limits ──────────────────────────────╮
+│26.7k source LOC   904 functions   25 review candidates                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit

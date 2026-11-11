@@ -1,0 +1,10 @@
+[
+ {"wait":"RA ● Ready","timeout":90},
+ {"keys":"j\r","capture":"architecture"},
+ {"keys":"m","capture":"06-module-inspector"},
+ {"keys":"o","wait":"function","timeout":30,"settle":1,"capture":"module-source"},
+ {"keys":"\r","wait":"INSPECTOR","timeout":30,"capture":"module-callable"},
+ {"keys":"c","wait":"CURRENT","timeout":30,"settle":2},
+ {"keys":"g","capture":"module-call-graph"},
+ {"keys":"\u001b","wait":"MODULE MAP","capture":"08-return-original-module"}
+]

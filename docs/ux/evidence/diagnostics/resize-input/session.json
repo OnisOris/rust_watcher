@@ -1,0 +1,68 @@
+{
+  "binary": "target/debug/wt",
+  "project": ".",
+  "events": [
+    {
+      "first_output_seconds": 0.06698757800040767
+    },
+    {
+      "seconds": 0.6471302030258812,
+      "step": {
+        "wait": "Explore execution",
+        "timeout": 20,
+        "capture": "01-overview-starting"
+      }
+    },
+    {
+      "seconds": 1.1117506709997542,
+      "step": {
+        "wait": "RA \u25d0 Indexing",
+        "timeout": 30,
+        "capture": "09-indexing"
+      }
+    },
+    {
+      "seconds": 8.277806988044176,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90,
+        "capture": "01-overview-120x35"
+      }
+    },
+    {
+      "seconds": 8.656230077031069,
+      "step": {
+        "size": [
+          80,
+          20
+        ],
+        "capture": "02-overview-80x20"
+      }
+    },
+    {
+      "seconds": 9.085578702040948,
+      "step": {
+        "size": [
+          100,
+          30
+        ],
+        "capture": "overview-100x30"
+      }
+    },
+    {
+      "seconds": 9.64339615002973,
+      "step": {
+        "size": [
+          160,
+          45
+        ],
+        "capture": "overview-160x45"
+      }
+    }
+  ],
+  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "initial_size": [
+    120,
+    35
+  ]
+}

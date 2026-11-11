@@ -1,0 +1,216 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling rust_watcher v0.1.0 (/home/poke/code/rust_watcher)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.71s
+     Running unittests src/main.rs (target/debug/deps/wt-c8b7ec675c4d7240)
+
+running 188 tests
+test git_analysis::process::tests::bounded_output_is_explicit_and_exact_limit_is_complete ... ok
+test cli::tests::default_mode_selects_tui_and_summary_is_explicit ... ok
+test git_analysis::tests::malformed_output_duplicates_and_partial_last_commit ... ok
+test git_analysis::process::tests::timeout_and_cancellation_reap_active_process ... ok
+test git_analysis::tests::all_file_summaries_survive_top_ten_truncation_without_old_json_changes ... ok
+test architecture::tests::unresolved_never_becomes_a_name_only_edge_and_duplicate_identity_is_rejected ... ok
+test git_analysis::tests::real_project_performance ... ignored, manual independent stage timings on local real workspaces
+test git_analysis::tests::synthetic_history_performance ... ignored, manual performance measurement: creates 300 local commits
+test git_analysis::tests::cochange_limits_do_not_invalidate_churn_and_current_paths_rank_before_deleted ... ok
+test git_analysis::time::tests::utc_is_independent_of_timezone_and_handles_leap_days ... ok
+test lsp::diagnostics_tests::all_documents_are_required_and_retained ... ok
+test lsp::diagnostics_tests::clean_project_can_finish_with_empty_diagnostics ... ok
+test lsp::diagnostics_tests::initial_empty_publication_waits_for_analysis_and_check ... ok
+test lsp::diagnostics_tests::latest_publication_replaces_previous_and_restarts_quiet_window ... ok
+test lsp::diagnostics_tests::malformed_diagnostic_notification_is_an_error ... ok
+test lsp::diagnostics_tests::old_check_end_does_not_confirm_new_check_request ... ok
+test lsp::diagnostics_tests::process_exit_wakes_waiter_and_returns_error ... ok
+test lsp::diagnostics_tests::subsequent_analysis_cycle_blocks_previously_ready_snapshot ... ok
+test lsp::diagnostics_tests::timeout_has_bounded_wait_and_state_context ... ok
+test lsp::tests::classifies_missing_analyzer_executable ... ok
+test lsp::tests::frames_json_rpc_with_byte_length ... ok
+test lsp::tests::passive_tui_does_not_enable_checks_build_scripts_or_proc_macros ... ok
+test lsp::tests::preserves_string_server_request_ids ... ok
+test lsp::tests::reads_consecutive_frames_with_multibyte_bodies ... ok
+test lsp::tests::reports_malformed_frame_errors ... ok
+test architecture::tests::multiple_targets_and_synthetic_fifty_crates_have_stable_relative_identities ... ok
+test lsp::tests::routes_response_to_matching_request ... ok
+test lsp::tests::unrelated_notifications_do_not_advance_diagnostics ... ok
+test maintainability::tests::ast_resource_limits_and_failure_samples_are_bounded ... ok
+test maintainability::tests::function_kinds_positions_and_boundaries_are_syntactic ... ok
+test maintainability::tests::control_depth_excludes_closures_items_plain_blocks_and_match_arms ... ok
+test maintainability::tests::identifier_anchor_uses_one_based_utf16_coordinates ... ok
+test maintainability::tests::macros_do_not_expand_and_inline_test_markers_are_visible ... ok
+test maintainability::tests::performance ... ignored, local scan/metrics/AST timing on real projects and synthetic 10k Rust files
+test metrics::stream::tests::budgets_are_hard_bounds_even_without_a_known_length ... ok
+test architecture::tests::singleton_and_verified_branching_kinds_aliases_external_and_components ... ok
+test metrics::tests::classification_is_explicit_and_unknown_extensions_stay_other ... ok
+test maintainability::tests::reports_failures_nested_packages_percentiles_and_stable_rankings ... ok
+test metrics::tests::counts_lines_categories_ignores_and_stable_ranking ... ok
+test metrics::tests::package_ties_sort_by_name_independently_of_metadata_order ... ok
+test metrics::tests::nested_packages_own_each_file_once ... ok
+test metrics::tests::skipped_files_and_truncated_tree_remain_explicit ... ok
+test metrics::tests::timing ... ignored, local metrics timing on current repository and synthetic 10k-file workspace
+test metrics::tests::total_budget_keeps_unknown_loc_files_visible ... ok
+test model::tests::call_target_workspace_classification_handles_normalized_and_absolute_paths ... ok
+test model::tests::summary_json_uses_a_checkout_independent_root ... ok
+test model::tests::symbol_ids_are_checkout_relative ... ok
+test git_analysis::tests::output_budget_keeps_only_complete_commits_and_mass_changes_skip_pairs ... ok
+test module_graph::tests::coverage_and_resolution_are_independent_typed_and_counted ... ok
+test module_graph::tests::ambiguity_ignored_files_parse_limits_and_cancellation_are_explicit ... ok
+test module_graph::tests::default_path_contexts_path_attributes_and_inline_directories ... ok
+test git_analysis::tests::nested_workspace_literal_pathspec_worktree_rename_and_merge ... ok
+test module_graph::tests::discovery_and_imports_are_contextual_conservative_and_stable ... ok
+test git_analysis::tests::precise_history_windows_paths_binary_and_cochange ... ok
+test metrics::tests::source_only_package_totals_and_large_streaming_files ... ok
+test metrics::stream::tests::streaming_matches_text_lines_across_boundaries ... ok
+test module_graph::tests::performance ... ignored, manual release module discovery and render timings, real workspaces
+test git_analysis::tests::candidates_use_independent_explainable_signals_and_unknown_structure ... ok
+test output::tests::classifies_missing_analyzer_separately_from_missing_projects ... ok
+test output::tests::serialized_locations_are_compact_and_stable ... ok
+test project::tests::classifies_missing_project_path ... ok
+test module_graph::tests::external_depth_budget_stops_without_recursive_stack_growth_in_parser ... ok
+test project::tests::finds_manifest_in_parent ... ok
+test repository::tests::current_repository_scan_smoke ... ignored, local repository scan timing
+test repository::tests::large_repository_smoke ... ignored, local 10k-entry repository performance smoke
+test repository::tests::displays_symlinks_without_following_them ... ok
+test repository::tests::missing_root_is_a_scan_failure ... ok
+test repository::tests::sorts_directories_before_files_and_applies_a_small_limit ... ok
+test rust::tests::authoritative_lookup_retries_partial_or_negative_results ... ok
+test module_graph::tests::full_unresolved_counts_survive_retention_budget_and_line_moves_do_not_change_ids ... ok
+test rust::tests::call_scope_filters_before_deduplication_and_limit ... ok
+test repository::tests::scans_useful_hidden_files_and_honors_ignores ... ok
+test rust::tests::enum_member_has_specific_kind ... ok
+test rust::tests::extracts_signature_from_hover ... ok
+test rust::tests::normalizes_generic_impl_targets ... ok
+test rust::tests::normalizes_kind_names ... ok
+test rust::tests::lookup_strategy_never_scans_workspace_for_symbol_lists ... ok
+test module_graph::tests::nesting_byte_decoding_and_local_scopes_are_bounded_and_unresolved ... ok
+test rust::tests::prepared_call_items_require_exact_or_unique_safe_identity ... ok
+test rust::tests::qualification_is_segment_exact ... ok
+test module_graph::tests::rooted_imports_aliases_reexports_and_ambiguous_names_never_guess ... ok
+test rust::tests::source_preview_is_bounded_and_marks_the_selected_line ... ok
+test rust::tests::symbol_ranking_prioritizes_exact_prefix_boundary_and_early_matches ... ok
+test git_analysis::tests::unavailable_cancel_limits_and_shallow_are_explicit ... ok
+test tui::app::tests::call_scope_toggle_reloads_neighbors_and_rejects_stale_events ... ok
+test tui::app::tests::calls_selection_history_and_stale_events_are_bounded ... ok
+test tui::app::tests::explorer_state_persists_and_file_events_and_inspector_are_exact ... ok
+test tui::app::tests::call_history_drops_oldest_entry_at_limit ... ok
+test tui::app::tests::stale_search_and_inspector_events_are_ignored ... ok
+test tui::app::tests::symbol_selection_and_inspector_scroll_are_bounded ... ok
+test tui::app::tests::symbols_state_survives_view_switches ... ok
+test tui::app::tests::views_and_spatial_navigation_are_explicit ... ok
+test module_graph::tests::ids_survive_checkout_changes_and_duplicate_package_names_are_errors ... ok
+test tui::call_graph::tests::expansion_page_reflow_preserves_the_selected_branch ... ok
+test rust::tests::source_preview_clips_long_lines_and_rejects_locations_beyond_read_budget ... ok
+test tui::call_graph::tests::identities_edges_depth_limits_and_states_are_exact ... ok
+test tui::call_graph::tests::cancelled_and_superseded_requests_cannot_add_edges_or_reopen_view ... ok
+test module_graph::tests::expanded_use_paths_labels_and_model_payloads_have_explicit_budgets ... ok
+test tui::call_graph::tests::performance::real_and_synthetic_graph_performance ... ignored, manual release real-RA and synthetic call graph stage timings; no timing assertions
+test tui::call_graph::tests::shared_targets_have_order_independent_canonical_placement ... ok
+test tui::components::tests::multiline_empty_state_keeps_sentence_boundaries ... ok
+test tui::components::tests::wrapped_errors_remain_reachable_without_blank_overscroll ... ok
+test tui::event::tests::calls_external_toggle_reloads_current_target_with_new_scope ... ok
+test tui::event::tests::closed_analyzer_channel_degrades_without_returning_an_error ... ok
+test tui::event::tests::explorer_opens_files_then_inspects_exact_file_symbols ... ok
+test tui::event::tests::explorer_tree_navigation_does_not_request_semantics ... ok
+test tui::event::tests::largest_file_drill_down_and_missing_file_notice ... ok
+test tui::event::tests::number_keys_switch_views_and_calls_use_the_inspected_symbol ... ok
+test tui::event::tests::search_ctrl_jk_moves_results_without_switching_panes ... ok
+test tui::explorer::tests::cargo_roles_and_deepest_package_membership_come_from_metadata ... ok
+test tui::explorer::tests::expansion_and_file_selection_survive_view_switches_by_design ... ok
+test tui::explorer::tests::expansion_collapse_parent_navigation_and_bounds_are_stable ... ok
+test tui::call_graph::tests::incoming_expansion_session_budget_and_external_source_are_explicit ... ok
+test tui::explorer::tests::large_tree_navigation_smoke ... ignored, local 50k-entry Explorer cache performance smoke
+test tui::findings::tests::missing_structure_stays_unknown_and_historical_files_have_no_source_action ... ok
+test tui::explorer::tests::selection_moves_do_not_rebuild_visible_rows ... ok
+test tui::highlight::tests::preserves_unicode_raw_multiline_strings_and_nested_comments_exactly ... ok
+test tui::journey::entrypoint_tests::binary_requests_reject_stale_cancelled_map_and_ambiguous_results ... ok
+test tui::journey::entrypoint_tests::cargo_binary_identity_and_short_main_do_not_depend_on_rankings ... ok
+test tui::journey::entrypoint_tests::calls_empty_unsupported_and_rpc_error_are_not_conflated ... ok
+test tui::call_graph::tests::handlers_preserve_focus_graph_cache_history_and_reject_stale_expansions ... ok
+test tui::journey::entrypoint_tests::indexing_has_one_ready_retry_and_missing_ra_keeps_binary_source_usable ... ok
+test tui::journey::entrypoint_tests::missing_nested_wrong_kind_truncation_and_long_main_remain_honest ... ok
+test tui::call_graph::tests::layout_pages_geometry_and_selection_are_stable ... ok
+test tui::journey::performance_tests::entrypoint_performance ... ignored, manual real RA entrypoint/documentSymbol/Calls/Esc latency on local workspaces
+test tui::journey::entrypoint_tests::navigation_timeout_is_bounded_does_not_reset_on_rebind_and_cannot_reopen_calls ... ok
+test tui::journey::tests::indexing_retries_rebind_exact_intent_to_new_file_request ... ok
+test tui::journey::tests::delayed_responses_new_intent_escape_errors_and_ambiguity_never_choose_random_symbol ... ok
+test tui::journey::entrypoint_tests::returning_from_source_resumes_calls_superseded_between_worker_phases ... ok
+test tui::journey::tests::priorities_open_exact_inspector_calls_and_restore_module_context ... ok
+test tui::journey::tests::symbol_and_call_start_routes_open_real_candidates_or_explain_unavailability ... ok
+test tui::map::tests::field_calls_emit_no_lsp_and_cleared_search_marks_previous_inspector ... ok
+test tui::map::tests::focus_changes_neighborhood_and_target_choice_opens_exact_cargo_source ... ok
+test tui::map::tests::incomplete_crate_ast_stays_unknown_and_tree_selection_cannot_reuse_old_symbols ... ok
+test tui::map::tests::graph_styles_are_distinct_responsive_and_no_color_removes_color_not_identity ... ok
+test tui::map::tests::partial_history_and_partial_cochange_have_independent_visual_styles ... ok
+test tui::map::tests::stable_ids_survive_background_insertions_and_open_the_same_file ... ok
+test tui::map::tests::singleton_dense_large_cycle_and_unresolved_models_remain_bounded_and_navigable ... ok
+test tui::module_map::diagram_tests::dense_indexed_neighborhood_preserves_records_direction_and_thirteenth_selection ... ok
+test tui::module_map::diagram_tests::geometry_is_bounded_directed_disjoint_stable_and_selection_is_visible ... ok
+test tui::module_map::stability_tests::mode_focus_history_and_background_updates_are_independent ... ok
+test tui::module_map::tests::diagrams_render_only_verified_pairs_self_cycles_and_explicit_list_fallback ... ok
+test tui::module_map::tests::guided_routes_have_observable_outcomes_and_unavailable_notices ... ok
+test tui::module_map::tests::inline_source_anchor_rejects_stale_requests_and_duplicate_names ... ok
+test tui::module_map::tests::large_neighborhoods_scroll_without_dropping_nodes_and_history_is_bounded ... ok
+test tui::module_map::tests::module_loading_import_styles_and_no_color_keep_relationship_identity ... ok
+test tui::module_map::tests::module_map_performance ... ignored, manual release pipeline and populated module-map rendering timings
+test tui::module_map::tests::multi_crate_map_drills_selected_package_and_returns_to_same_crate ... ok
+test tui::module_map::tests::relationship_views_preserve_identity_history_and_observable_context ... ok
+test tui::module_map::tests::single_crate_auto_modules_focus_back_and_exact_source_without_ra ... ok
+test tui::module_map::tests::synthetic_relationship_performance ... ignored, manual synthetic graph/index/view timings, no wall-clock assertions
+test tui::navigation_tests::exact_anchor_handles_duplicate_names_missing_invalid_ambiguous_and_truncation ... ok
+test tui::navigation_tests::hotspot_missing_file_is_a_notice_not_a_panic ... ok
+test tui::navigation_tests::hotspot_reveals_exact_file_then_reuses_symbols_inspector_and_calls ... ok
+test tui::navigation_tests::hotspot_states_and_details_render_without_ra_including_small_terminal ... ok
+test tui::navigation_tests::overview_renders_loading_candidates_errors_and_small_terminal ... ok
+test rust::tests::one_hop_calls_handle_direct_recursion_without_expanding_it ... ok
+test tui::performance_tests::architecture_and_five_views_performance ... ignored, manual release architecture and populated-view rendering timings; no fragile assertions
+test tui::product_tests::context_help_scrolls_without_moving_underlying_selection ... ok
+test tui::product_tests::guided_search_and_architecture_return_home_without_semantic_requests ... ok
+test rust::tests::one_hop_calls_are_direct_and_follow_exact_locations ... ok
+test tui::product_tests::review_evidence_matches_real_structure_and_never_invents_a_function_anchor ... ok
+test tui::product_tests::metric_explanations_use_measured_values_and_keep_missing_data_unknown ... ok
+test tui::shutdown_tests::bounded_pipeline_stack_preserves_existing_maintainability_depth_coverage ... ok
+test tui::journey::entrypoint_tests::real_ra_short_and_async_binary_entrypoints_resolve_without_ranked_main ... ok
+test tui::theme::tests::fallback_and_monochrome_keep_symbols_and_modifiers ... ok
+test tui::ui::tests::calls_render_populated_and_empty_states ... ok
+test tui::ui::tests::calls_scope_hides_external_targets_by_default_and_compacts_them_in_all_mode ... ok
+test tui::shutdown_tests::quit_aborts_inflight_work_even_when_command_queue_is_full ... ok
+test tui::product_tests::task_home_is_visible_at_every_required_size_with_missing_services ... ok
+test tui::ui::tests::exports_symbols_review_frames_when_requested ... ok
+test tui::ui::tests::explorer_tree_remains_available_when_analyzer_failed ... ok
+test tui::ui::tests::metrics_render_timing ... ignored, local Overview rendering timing
+test tui::ui::tests::explorer_renders_tree_file_symbols_non_rust_and_truncation ... ok
+test tui::ui::tests::symbol_results_render_relevant_request_names_before_late_substrings ... ok
+test tui::ui::tests::overview_and_help_render_views_and_navigation ... ok
+test tui::ui::tests::metrics_loading_ready_partial_and_errors_render_independently ... ok
+test tui::worker::tests::graph_expansion_is_bounded_and_never_preempts_initial_calls ... ok
+test tui::worker::tests::scheduler_coalesces_work_and_prioritizes_shutdown ... ok
+test tui::worker::tests::search_is_queued_independently_between_phases ... ok
+test tui::worker::tests::unavailable_worker_keeps_channel_alive_and_reports_failures ... ok
+test tui::ui::tests::symbols_and_inspector_render_targeted_content ... ok
+test tui::ui::tests::symbols_empty_state_and_small_terminal_are_safe ... ok
+test tui::call_graph::tests::integration::real_worker_binary_graph_two_levels_source_restore_and_recursion ... ok
+test tui::journey::tests::real_ra_priority_calls_uses_exact_duplicate_method_position ... ok
+test rust::tests::file_symbols_are_exact_and_scoped_to_one_file ... ok
+test tui::navigation_tests::real_ra_file_symbols_match_exact_method_then_inspector_and_calls ... ok
+test tui::module_map::stability_tests::explicit_pages_and_selection_preserve_geometry_and_cache ... ok
+
+test result: ok. 174 passed; 0 failed; 14 ignored; 0 measured; 0 filtered out; finished in 25.90s
+
+     Running tests/cli.rs (target/debug/deps/cli-b8065f8ed8992216)
+
+running 12 tests
+test missing_project_has_a_typed_json_error ... ok
+test architecture_uses_cargo_identity_without_git_or_analyzer ... ok
+test maintainability_has_exact_counts_positions_and_never_starts_ra ... ok
+test modules_are_exact_structural_reports_without_ra_or_git ... ok
+test hotspots_are_headless_with_or_without_git_and_validate_days ... ok
+test stats_counts_fixture_without_ever_starting_analyzer ... ok
+test recursive_call_trees_are_bounded_and_mark_cycles ... ok
+test enum_variants_keep_real_analyzer_kinds ... ok
+test diagnostics_settle_and_explain_uses_full_range ... ok
+test cargo_workspace_supports_cross_crate_navigation ... ok
+test semantic_navigation_and_unicode_work ... ok
+test ambiguity_is_a_structured_error has been running for over 60 seconds
+test ambiguity_is_a_structured_error ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.56s

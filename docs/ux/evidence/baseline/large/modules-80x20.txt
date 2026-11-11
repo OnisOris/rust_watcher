@@ -1,0 +1,20 @@
+ wt QymCAD   1 OVR   2 SYM   3 CALL   4 FILE  >5 MAP
+RA ◐ Indexing   Git ◐ Analyzing
+────────────────────────────────────────────────────────────────────────────────
+Workspace > qymcad > Modules · Focus: loading
+ >Hierarchy   Imports   Used by  · g Diagram
+Coverage: loading
+╭ MODULE MAP ──────────────────────────────────────────────────────────────────╮
+│MODULE MAP                                                                    │
+│                                                                              │
+│Loading module declarations...                                                │
+│Repository scan / bounded syntax analysis in progress.                        │
+│RA is independent; q remains available.                                       │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ j/k select · PgUp/PgDn pages · Enter focus · g/v · p review · o · Esc · q quit

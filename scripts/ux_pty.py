@@ -8,6 +8,7 @@ Raw terminal output and timings are retained for independent reproduction.
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -68,8 +69,14 @@ def main():
                 raw.extend(data)
                 stream.feed(data)
 
+    def display():
+        # pyte.display indexes empty wide-character continuation cells. Read the
+        # actual cell buffer instead (e.g. a crab emoji in a Rust source preview).
+        return ["".join(screen.buffer[y][x].data for x in range(screen.columns))
+                for y in range(screen.lines)]
+
     def capture(name):
-        text = "\n".join(line.rstrip() for line in screen.display) + "\n"
+        text = "\n".join(line.rstrip() for line in display()) + "\n"
         (output / f"{name}.txt").write_text(text)
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 16)
         cell_w, cell_h = 10, 21
@@ -87,14 +94,27 @@ def main():
 
     try:
         for step in json.loads(Path(args.scenario).read_text()):
+            if "probe_keys" in step:
+                samples = []
+                for key in step["probe_keys"] * step.get("repeats", 5):
+                    pump(0.1)
+                    before = len(raw)
+                    sent = time.monotonic()
+                    os.write(master, key.encode())
+                    while len(raw) == before and time.monotonic()-sent < 2:
+                        pump(0.001)
+                    samples.append({"key": key, "first_output_ms": (time.monotonic()-sent)*1000,
+                                    "observed": len(raw) > before})
+                events.append({"input_to_first_terminal_output": samples})
             if "size" in step:
                 resize(*step["size"])
                 os.killpg(proc.pid, signal.SIGWINCH)
+                pump(0.2)  # Observe the resize before injecting the next user action.
             if "keys" in step:
                 os.write(master, step["keys"].encode())
             if "wait" in step:
                 deadline = time.monotonic()+step.get("timeout", 60)
-                while step["wait"] not in "\n".join(screen.display):
+                while step["wait"] not in "\n".join(display()):
                     pump(0.1)
                     if proc.poll() is not None or time.monotonic() >= deadline:
                         capture("failure")
@@ -110,8 +130,11 @@ def main():
         events.append({"quit_seconds": time.monotonic()-quitting, "exit_code": proc.poll()})
     finally:
         (output / "session.ansi").write_bytes(raw)
+        with open(args.binary, "rb") as binary:
+            digest = hashlib.file_digest(binary, "sha256").hexdigest()
         (output / "session.json").write_text(json.dumps({
             "binary": args.binary, "project": args.project, "events": events,
+            "binary_sha256": digest, "initial_size": [args.width, args.height],
         }, indent=2)+"\n")
         try:
             os.killpg(proc.pid, signal.SIGTERM)

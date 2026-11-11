@@ -1,0 +1,20 @@
+ wt QymCAD   1 OVR   2 SYM   3 CALL   4 FILE  >5 MAP
+RA ● Ready   Git ◐ Analyzing
+Architecture · Esc back · ? context help────────────────────────────────────────
+Workspace > qymcad > Modules · Focus: crate
+ >Hierarchy   Imports   Used by  · g Diagram
+Coverage: Partial · Resolution: Limited · cfg 1358
+╭ MODULE MAP · qymcad · Hierarchy ─────────╮╭ MODULE INSPECTOR · p priorities ─╮
+│          ┌>0 · focus──────────┐          ││MODULE · crate                    │
+│          │crate               │          ││Selected: crate                   │
+│          └──────────┬─────────┘          ││Focus: crate                      │
+│                     │                    ││crates/qymcad/src/lib.rs          │
+│           ┌─────────┴─────────┐          ││Resolved ·                        │
+│           ▼                   ▼          ││crates/qymcad/src/lib.rs:1 · o    │
+│  ┌────────┴───────┐  ┌────────┴───────┐  ││source                            │
+│  │app_identity    │  │build_info      │  ││o source → Enter callable → c     │
+│  └1 · mod [cfg]───┘  └2 · mod─────────┘  ││Calls → Esc module                │
+│Page 1/12 · Nodes 1–2 of 24 · Diagram     ││STRUCTURE · physical subtree      │
+│mod: parent → child · PgUp/PgDn pages     ││Child modules              24     │
+╰──────────────────────────────────────────╯╰──────────────────────────────────╯
+ Enter focus · o source · p review · v relationships · Esc back · ? help

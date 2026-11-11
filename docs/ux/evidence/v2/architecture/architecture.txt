@@ -1,0 +1,35 @@
+ wt workspace_project   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ● Ready   Git ● Complete
+Overview > Architecture · Esc back · ? context help─────────────────────────────────────────────────────────────────────
+╭ ARCHITECTURE MAP · workspace crates ─────────────────────────────────╮╭ CRATE INSPECTOR · j/k scroll ────────────────╮
+│Showing 2 of 2 workspace crates · workspace                           ││fixture_app                                   │
+│Selected: fixture_app                                                 ││app/Cargo.toml                                │
+│                                                                      ││crate:app/Cargo.toml                          │
+│                                                                      ││Rust modules of this crate                    │
+│                                                                      ││m → Open module map to explore internal       │
+│                                                                      ││architecture                                  │
+│                                                                      ││                                              │
+│                                                                      ││CURRENT STRUCTURE                             │
+│                                                                      ││Source nonblank LOC   4                       │
+│                                                                      ││Rust files            1                       │
+│                                                                      ││Functions             1                       │
+│                                                                      ││Median / P95          4 / 4 lines             │
+│                                                                      ││Max control depth     0                       │
+│     ╭───────────────────────╮          ╭───────────────────────╮     ││Hotspot files         0                       │
+│     │>#01 fixture_app       │────────n▶│ #02 fixture_core      │     ││                                              │
+│     ╰───────────────────────╯          ╰───────────────────────╯     ││CARGO RELATIONSHIPS                           │
+│                                                                      ││Dependencies          1                       │
+│                                                                      ││Dependents            0                       │
+│                                                                      ││External declarations 0                       │
+│                                                                      ││DEPENDS ON · outgoing →                       │
+│                                                                      ││─n→ fixture_core · alias fixture_core         │
+│                                                                      ││USED BY · incoming →                          │
+│                                                                      ││CARGO TARGETS · o to choose                   │
+│                                                                      ││fixture_app · bin                             │
+│                                                                      ││app/src/main.rs                               │
+│                                                                      ││Declared dependencies include                 │
+│                                                                      ││cfg/optional/dev/build; not an activated      │
+│─n→ normal  ┄d→ dev  ═b⇒ build                                        ││feature graph.                                │
+│A → B: A depends on B · declared dependencies                         ││                                              │
+╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ j/k select · Enter focus · m modules · o source · Esc back · ? help

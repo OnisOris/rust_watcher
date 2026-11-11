@@ -1,0 +1,9 @@
+[
+ {"wait":"RA ● Ready","timeout":90},
+ {"keys":"\r","capture":"binary-picker"},
+ {"keys":"\r","wait":"CURRENT","timeout":30,"settle":2,"capture":"main-calls"},
+ {"keys":"g","capture":"07-call-graph"},
+ {"keys":"o","wait":"INSPECTOR","timeout":30,"settle":1,"capture":"call-source"},
+ {"keys":"\u001b","wait":"CALL GRAPH","capture":"graph-restored"},
+ {"keys":"\u001b","wait":"UNDERSTAND THIS","capture":"execution-return-home"}
+]

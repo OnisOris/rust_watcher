@@ -1,0 +1,35 @@
+ wt QymCAD  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ◐ Indexing   Git ◐ Analyzing
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ REPOSITORY OVERVIEW ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│… source LOC   … functions   … review files                                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ EXPLORATION ────────────────────────────╮╭ SELECTED ITEM · j/k scroll ───────────────────────────────────────────────╮
+│> Workspace summary                      ││QymCAD                                                                     │
+│  ▾ START EXPLORING                      ││Read-only repository exploration                                           │
+│    Explore architecture →               ││                                                                           │
+│    Open main entrypoint →               ││Repository Metrics: loading...                                             │
+│    Review hotspots →                    ││Maintainability: analyzing...                                              │
+│    Find longest functions →             ││Languages · nonblank lines                                                 │
+│  ▾ GIT HOTSPOTS                         ││Git history                                                                │
+│  ▸ LARGEST SOURCE FILES                 ││Git history: analyzing...                                                  │
+│  ▸ LONGEST FUNCTIONS                    ││5 Map → crate architecture · Enter expands groups                          │
+│  ▸ DEEPEST CONTROL FLOW                 ││                                                                           │
+│  ▸ CRATES                               ││                                                                           │
+│  ▸ ENTRYPOINTS                          ││                                                                           │
+│  ▸ LANGUAGES                            ││                                                                           │
+│  ▸ HISTORICAL PATHS                     ││                                                                           │
+│  ▸ ANALYSIS & LIMITATIONS               ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+╰─────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter expand/open · Tab pane · 1–5 views · ? help · q quit

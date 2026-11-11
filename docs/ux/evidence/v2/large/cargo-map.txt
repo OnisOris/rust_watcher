@@ -1,0 +1,35 @@
+ wt QymCAD   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ◐ Indexing   Git ◐ Analyzing
+Architecture · Esc back · ? context help────────────────────────────────────────────────────────────────────────────────
+╭ ARCHITECTURE MAP · workspace crates ─────────────────────────────────╮╭ CRATE INSPECTOR · j/k scroll ────────────────╮
+│Showing 18 of 19 workspace crates · one hop                           ││qymcad                                        │
+│Selected: qymcad                                                      ││crates/qymcad/Cargo.toml                      │
+│> [ #01 qymcad ]                                                      ││crate:crates/qymcad/Cargo.toml                │
+│    ├─n→ [#03 qymcad-assembly]                                        ││Rust modules of this crate                    │
+│    ├─n→ [#04 qymcad-core]                                            ││m → Open module map to explore internal       │
+│    ├─n→ [#05 qymcad-help]                                            ││architecture                                  │
+│    ├─n→ [#06 qymcad-i18n]                                            ││                                              │
+│    ├─n→ [#07 qymcad-io]                                              ││CURRENT STRUCTURE                             │
+│    ├─n→ [#08 qymcad-kernel]                                          ││Source nonblank LOC   unknown                 │
+│    ├─n→ [#09 qymcad-meshfit]                                         ││Rust files            309                     │
+│    ├─n→ [#10 qymcad-part]                                            ││Functions             unknown                 │
+│    ├─n→ [#11 qymcad-paths]                                           ││Median / P95          unknown                 │
+│    ├─n→ [#12 qymcad-pick]                                            ││Max control depth     unknown                 │
+│    ├─n→ [#13 qymcad-render]                                          ││Hotspot files         unknown                 │
+│    ├─n→ [#14 qymcad-scheme]                                          ││                                              │
+│    ├─n→ [#15 qymcad-shell]                                           ││CARGO RELATIONSHIPS                           │
+│    ├─n→ [#16 qymcad-sketch]                                          ││Dependencies          16                      │
+│    ├─n→ [#18 qymcad-ui-state]                                        ││Dependents            1                       │
+│    └─n→ [#19 qymcad-update]                                          ││External declarations 19                      │
+│  [#02 qymcad-acceptance] ─n→ [focus]                                 ││DEPENDS ON · outgoing →                       │
+│                                                                      ││─n→ qymcad-assembly · alias qymcad-assembly   │
+│                                                                      ││─n→ qymcad-core · alias qymcad-core           │
+│                                                                      ││─n→ qymcad-help · alias qymcad-help           │
+│                                                                      ││─n→ qymcad-i18n · alias qymcad-i18n           │
+│                                                                      ││─n→ qymcad-io · alias qymcad-io               │
+│                                                                      ││─n→ qymcad-kernel · alias qymcad-kernel       │
+│                                                                      ││─n→ qymcad-meshfit · alias qymcad-meshfit     │
+│─n→ normal  ┄d→ dev  ═b⇒ build                                        ││─n→ qymcad-part · alias qymcad-part           │
+│A → B: A depends on B · declared dependencies                         ││─n→ qymcad-paths · alias qymcad-paths         │
+╰──────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ j/k select · Enter focus · m modules · o source · Esc back · ? help

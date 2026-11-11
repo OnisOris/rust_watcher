@@ -1,0 +1,35 @@
+ wt QymCAD   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ◐ Indexing   Git ◐ Analyzing
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Workspace > qymcad > Modules · Focus: loading
+ >Hierarchy   Imports   Used by  · g Diagram
+Coverage: loading
+╭ MODULE MAP ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│MODULE MAP                                                                                                            │
+│                                                                                                                      │
+│Loading module declarations...                                                                                        │
+│Repository scan / bounded syntax analysis in progress.                                                                │
+│RA is independent; q remains available.                                                                               │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k select · PgUp/PgDn pages · Enter focus · g/v · p review · o · Esc · q quit

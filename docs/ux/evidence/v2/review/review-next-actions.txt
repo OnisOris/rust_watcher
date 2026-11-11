@@ -1,0 +1,35 @@
+ wt rust_watcher  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ◐ Indexing   Git ● Complete   Co-change ◐ Partial
+Overview · Esc back · ? context help────────────────────────────────────────────────────────────────────────────────────
+╭ EXPLORATION ────────────────────────────────────────╮╭ HOTSPOT DETAILS ──────────────────────────────────────────────╮
+│  ▾ UNDERSTAND THIS REPOSITORY                       ││Why review this file?                                          │
+│    Explore execution →                              ││src/tui/event.rs                                               │
+│  Binary entrypoint → real static calls              ││Included by Git + structural review heuristic; not a defect.   │
+│    Explore architecture →                           ││Evidence · measured, not a verdict                             │
+│  Crates → modules → exact source                    ││Git changes: 19 commits / 90 days                              │
+│    Find implementation →                            ││Source LOC: 952 nonblank lines (comments included)             │
+│  Rust analysis indexing                             ││Physical LOC: 276 lines in longest measured function           │
+│    Review attention areas →                         ││Max control depth: 5 nested control structures                 │
+│  Measured evidence → source to study                ││Suggested investigation                                        │
+│  ▸ ╭ INVESTIGATE · src/tui/event.rs ────────────────────────────────────────────────────────────────────────────╮    │
+│  ▾ │> handle_key · 276 lines · depth 5                                                                          │    │
+│>   │  src/tui/event.rs:131:21                                                                                   │    │
+│  sr│  Inspect exact current file                                                                                │    │
+│    │  src/tui/event.rs                                                                                          │    │
+│  sr│                                                                                                            │ds  │
+│    │Enter source / Inspector · c exact Calls · Esc back                                                         │    │
+│  sr│Known ranked functions/files only; no name-only lookup.                                                     │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+│  src/tui/app.rs                                     ││Deleted lines     186                                          │
+│    cli.rs                                12 changes ││Churn             1355                                         │
+│  tests/cli.rs                                       ││Last changed      2026-11-11T20:51:04Z                         │
+│    mod.rs                                11 changes ││Functions         24                                           │
+│  src/tui/mod.rs                                     ││Reasons · signals, not defects                                 │
+│    worker.rs                             10 changes ││Co-changed with · not call dependencies                        │
+│  src/tui/worker.rs                                  ││"src/tui/ui.rs"  15 commits                                    │
+│                                                     ││"src/tui/app.rs"  13 commits                                   │
+╰─────────────────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────╯
+╭ PROJECT SNAPSHOT · PARTIAL · ? explains limits ──────────────────────────────────────────────────────────────────────╮
+│26.7k source LOC   904 functions   25 review candidates                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit

@@ -1,0 +1,57 @@
+[
+  {
+    "wait": "Explore execution",
+    "timeout": 20,
+    "capture": "01-overview-starting"
+  },
+  {
+    "wait": "RA \u25d0 Indexing",
+    "timeout": 30,
+    "capture": "09-indexing"
+  },
+  {
+    "wait": "RA \u25cf Ready",
+    "timeout": 90,
+    "capture": "01-overview-120x35"
+  },
+  {
+    "size": [
+      80,
+      20
+    ],
+    "capture": "02-overview-80x20"
+  },
+  {
+    "size": [
+      100,
+      30
+    ],
+    "capture": "overview-100x30"
+  },
+  {
+    "size": [
+      160,
+      45
+    ],
+    "capture": "overview-160x45"
+  },
+  {
+    "size": [
+      120,
+      35
+    ]
+  },
+  {
+    "keys": "jjjj\rjjjjj",
+    "capture": "03-selected-depth",
+    "wait": "Depth "
+  },
+  {
+    "keys": "?",
+    "capture": "04-depth-interpretation"
+  },
+  {
+    "keys": "\u001b",
+    "capture": "depth-return"
+  }
+]

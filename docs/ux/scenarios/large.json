@@ -1,0 +1,32 @@
+[
+  {
+    "wait": "Explore architecture",
+    "timeout": 20,
+    "capture": "overview-indexing"
+  },
+  {
+    "keys": "5",
+    "wait": "CRATE INSPECTOR",
+    "capture": "cargo-map"
+  },
+  {
+    "keys": "m",
+    "wait": "MODULE INSPECTOR",
+    "timeout": 120,
+    "capture": "module-inspector-120x35"
+  },
+  {
+    "size": [
+      80,
+      20
+    ],
+    "capture": "module-inspector-80x20"
+  },
+  {
+    "size": [
+      160,
+      45
+    ],
+    "capture": "module-inspector-160x45"
+  }
+]

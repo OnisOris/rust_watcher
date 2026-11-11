@@ -1,0 +1,35 @@
+ wt rust_watcher  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ REPOSITORY OVERVIEW ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│26.7k source LOC   904 functions   25 review files                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ EXPLORATION ────────────────────────────╮╭ SELECTED ITEM · j/k scroll ───────────────────────────────────────────────╮
+│> Workspace summary                      ││rust_watcher                                                               │
+│  ▾ START EXPLORING                      ││Read-only repository exploration                                           │
+│    Explore architecture →               ││                                                                           │
+│    Open main entrypoint →               ││Metrics ready                                                              │
+│    Review hotspots →                    ││Files                 235                                                  │
+│    Find longest functions →             ││Source nonblank LOC   26662                                                │
+│  ▾ GIT HOTSPOTS                         ││Test files            11                                                   │
+│    event.rs                  19 changes ││MAINTAINABILITY · Rust                                                     │
+│  src/tui/event.rs                       ││Functions             904                                                  │
+│    ui.rs                     16 changes ││Median / P95          14 / 92 lines                                        │
+│  src/tui/ui.rs                          ││Max control depth     8                                                    │
+│    rust.rs                   14 changes ││Languages · nonblank lines                                                 │
+│  src/rust.rs                            ││Rust                  26509                                                │
+│    app.rs                    14 changes ││Other                 3034                                                 │
+│  src/tui/app.rs                         ││Markdown              938                                                  │
+│    cli.rs                    12 changes ││JSON                  776                                                  │
+│  tests/cli.rs                           ││Python                135                                                  │
+│    mod.rs                    11 changes ││TOML                  55                                                   │
+│  src/tui/mod.rs                         ││YAML                  24                                                   │
+│    worker.rs                 10 changes ││Shell                 18                                                   │
+│  src/tui/worker.rs                      ││Largest packages · source lines                                            │
+│    lsp.rs                     8 changes ││rust_watcher          26662                                                │
+│  src/lsp.rs                             ││Git history                                                                │
+│    explorer.rs                8 changes ││Git Hotspots ready · co-change partial                                     │
+│  src/tui/explorer.rs                    ││History              complete                                              │
+│                                         ││Co-change            partial                                               │
+╰─────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter expand/open · Tab pane · 1–5 views · ? help · q quit

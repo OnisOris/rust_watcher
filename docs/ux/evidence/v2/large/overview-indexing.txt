@@ -1,0 +1,35 @@
+ wt QymCAD  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ◐ Indexing   Git ◐ Analyzing
+Overview · Esc back · ? context help────────────────────────────────────────────────────────────────────────────────────
+╭ EXPLORATION ────────────────────────────────────────╮╭ SELECTED ITEM · j/k scroll ───────────────────────────────────╮
+│  ▾ UNDERSTAND THIS REPOSITORY                       ││Explore execution                                              │
+│>   Explore execution →                              ││Binary entrypoint → real static calls                          │
+│  Binary entrypoint → real static calls              ││                                                               │
+│    Explore architecture →                           ││Availability                                                   │
+│  Crates → modules → exact source                    ││1 binary target(s) · Enter chooses an entrypoint               │
+│    Find implementation →                            ││Next action                                                    │
+│  Rust analysis indexing                             ││Enter starts · Esc returns along the exploration route         │
+│    Review attention areas →                         ││? explains this view · Tab focuses scrollable details          │
+│  Measured evidence → source to study                ││What you can trust                                             │
+│  ▸ UNDERSTAND THE METRICS · ? details               ││Cargo identifies targets. RA supplies symbols and static calls.│
+│  ▸ GIT HOTSPOTS                                     ││Module relationships are conservative syntax, not runtime      │
+│  ▸ LARGEST SOURCE FILES                             ││behavior.                                                      │
+│  ▸ LONGEST FUNCTIONS                                ││Review areas are measured signals, not defect predictions.     │
+│  ▸ DEEPEST CONTROL FLOW                             ││                                                               │
+│  ▸ CRATES                                           ││                                                               │
+│  ▸ ENTRYPOINTS                                      ││                                                               │
+│  ▸ LANGUAGES                                        ││                                                               │
+│  ▸ HISTORICAL PATHS                                 ││                                                               │
+│  ▸ ANALYSIS & LIMITATIONS                           ││                                                               │
+│  Workspace summary                                  ││                                                               │
+│                                                     ││                                                               │
+│                                                     ││                                                               │
+│                                                     ││                                                               │
+│                                                     ││                                                               │
+│                                                     ││                                                               │
+│                                                     ││                                                               │
+╰─────────────────────────────────────────────────────╯╰───────────────────────────────────────────────────────────────╯
+╭ PROJECT SNAPSHOT · measured, not a quality score ────────────────────────────────────────────────────────────────────╮
+│… source LOC   … functions   … review candidates                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit

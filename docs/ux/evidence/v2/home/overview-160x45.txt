@@ -1,0 +1,45 @@
+ wt rust_watcher  >1 Overview   2 Symbols   3 Calls   4 Explorer   5 Map
+RA ● Ready   Git ● Complete   Co-change ◐ Partial
+Overview · Esc back · ? context help────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ EXPLORATION ───────────────────────────────────────────────────────────╮╭ SELECTED ITEM · j/k scroll ────────────────────────────────────────────────────────╮
+│  ▾ UNDERSTAND THIS REPOSITORY                                          ││Explore execution                                                                   │
+│>   Explore execution →                                                 ││Binary entrypoint → real static calls                                               │
+│  Binary entrypoint → real static calls                                 ││                                                                                    │
+│    Explore architecture →                                              ││Availability                                                                        │
+│  Crates → modules → exact source                                       ││1 binary target(s) · Enter chooses an entrypoint                                    │
+│    Find implementation →                                               ││Next action                                                                         │
+│  Search Rust symbols → exact source                                    ││Enter starts · Esc returns along the exploration route                              │
+│    Review attention areas →                                            ││? explains this view · Tab focuses scrollable details                               │
+│  Measured evidence → source to study                                   ││What you can trust                                                                  │
+│  ▸ UNDERSTAND THE METRICS · ? details                                  ││Cargo identifies targets. RA supplies symbols and static calls.                     │
+│  ▸ GIT HOTSPOTS                                                        ││Module relationships are conservative syntax, not runtime behavior.                 │
+│  ▸ LARGEST SOURCE FILES                                                ││Review areas are measured signals, not defect predictions.                          │
+│  ▸ LONGEST FUNCTIONS                                                   ││                                                                                    │
+│  ▸ DEEPEST CONTROL FLOW                                                ││                                                                                    │
+│  ▸ CRATES                                                              ││                                                                                    │
+│  ▸ ENTRYPOINTS                                                         ││                                                                                    │
+│  ▸ LANGUAGES                                                           ││                                                                                    │
+│  ▸ HISTORICAL PATHS                                                    ││                                                                                    │
+│  ▸ ANALYSIS & LIMITATIONS                                              ││                                                                                    │
+│  Workspace summary                                                     ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+│                                                                        ││                                                                                    │
+╰────────────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────╯
+╭ PROJECT SNAPSHOT · PARTIAL · ? explains limits ──────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│26.7k source LOC   904 functions   25 review candidates                                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit

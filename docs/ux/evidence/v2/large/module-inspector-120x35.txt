@@ -1,0 +1,35 @@
+ wt QymCAD   1 Overview   2 Symbols   3 Calls   4 Explorer  >5 Map
+RA ● Ready   Git ◐ Analyzing
+Architecture · Esc back · ? context help────────────────────────────────────────────────────────────────────────────────
+Workspace > qymcad > Modules · Focus: crate
+ >Hierarchy   Imports   Used by  · g Diagram
+Coverage: Partial · Resolution: Limited · cfg 1358
+╭ MODULE MAP · qymcad · Hierarchy ───────────────────────────────╮╭ MODULE INSPECTOR · p priorities ───────────────────╮
+│                     ┌>0 · focus──────────┐                     ││MODULE · crate                                      │
+│                     │crate               │                     ││Selected: crate                                     │
+│                     └──────────┬─────────┘                     ││Focus: crate                                        │
+│┌───────────────────────────────┘                               ││crates/qymcad/src/lib.rs                            │
+│├───────────┬───────────────────┬───────────────────┐           ││Resolved · crates/qymcad/src/lib.rs:1 · o source    │
+││           ▼                   ▼                   ▼           ││o source → Enter callable → c Calls → Esc module    │
+││  ┌────────┴───────┐  ┌────────┴───────┐  ┌────────┴───────┐   ││STRUCTURE · physical subtree                        │
+││  │app_identity    │  │build_info      │  │command_catalog │   ││Child modules              24                       │
+││  └1 · mod [cfg]───┘  └2 · mod─────────┘  └3 · mod─────────┘   ││Physical subtree files     307                      │
+││                                                               ││Subtree file LOC           unknown                  │
+│├───────────┬───────────────────┬───────────────────┐           ││Subtree file functions     unknown                  │
+││           ▼                   ▼                   ▼           ││Max file control depth     unknown                  │
+││  ┌────────┴───────┐  ┌────────┴───────┐  ┌────────┴───────┐   ││Own module LOC/functions: unknown                   │
+││  │comment_ratchet │  │crash           │  │…/ndency_ratchet│   ││Physical files deduped; not exclusive inline        │
+││  └4 · mod [cfg]───┘  └5 · mod─────────┘  └6 · mod [cfg]───┘   ││contents.                                           │
+││                                                               ││RELATIONSHIPS · records, not calls                  │
+│└───────────┬───────────────────┬───────────────────┐           ││Direct verified imports    0                        │
+│            ▼                   ▼                   ▼           ││Direct imported by modules 0                        │
+│   ┌────────┴───────┐  ┌────────┴───────┐  ┌────────┴───────┐   ││Direct unclassified        32                       │
+│   │diagnostics     │  │…/object_ratchet│  │gui             │   ││v Imports / Used by · ? meaning and limitations     │
+│   └7 · mod─────────┘  └8 · mod─────────┘  └9 · mod─────────┘   ││REVIEW OPPORTUNITIES · p choose                     │
+│                                                                ││Largest children: no measured file-backed children  │
+│                                                                ││Hotspots: unknown (loading/unavailable)             │
+│                                                                ││Functions: unknown (AST analyzing)                  │
+│Page 1/3 · Nodes 1–9 of 24 · Diagram                            ││ANALYSIS STATUS                                     │
+│mod: parent → child · PgUp/PgDn pages                           ││Coverage (graph)           Partial                  │
+╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────╯
+ Enter focus · o source · p review · v relationships · Esc back · ? help

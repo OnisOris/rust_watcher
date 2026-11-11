@@ -1,0 +1,5 @@
+[
+ {"wait":"RA × Error","timeout":30,"capture":"10-ra-unavailable"},
+ {"keys":"\r\r","wait":"Source available","timeout":30,"capture":"source-without-ra"},
+ {"keys":"\u001b\u001b","capture":"return-without-ra"}
+]

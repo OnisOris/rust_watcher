@@ -1,0 +1,50 @@
+{
+  "binary": "target/debug/wt",
+  "project": "tests/fixtures/simple_project",
+  "events": [
+    {
+      "first_output_seconds": 0.026783709996379912
+    },
+    {
+      "seconds": 4.555563142988831,
+      "step": {
+        "wait": "RA \u25cf Ready",
+        "timeout": 90
+      }
+    },
+    {
+      "seconds": 5.01445556699764,
+      "step": {
+        "keys": "jj\r",
+        "capture": "symbol-search"
+      }
+    },
+    {
+      "seconds": 7.156286685960367,
+      "step": {
+        "keys": "calculate",
+        "settle": 2,
+        "capture": "search-results"
+      }
+    },
+    {
+      "seconds": 9.309608307958115,
+      "step": {
+        "keys": "\r",
+        "wait": "INSPECTOR",
+        "timeout": 30,
+        "settle": 2,
+        "capture": "exact-symbol-inspector"
+      }
+    },
+    {
+      "quit_seconds": 0.17152275098487735,
+      "exit_code": 0
+    }
+  ],
+  "binary_sha256": "5ccae6c480ddcbaecee7256800beabf600c62e9e105bd8451d1f1026e909af95",
+  "initial_size": [
+    120,
+    35
+  ]
+}
