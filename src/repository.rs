@@ -236,6 +236,82 @@ mod tests {
     }
 
     #[test]
+    fn local_qa_ignore_cannot_pollute_metrics_or_function_rankings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(&root.join(".git/config"), "");
+        // Exercise this repository's actual rule, not a global scanner special case.
+        write(&root.join(".gitignore"), include_str!("../.gitignore"));
+        write(
+            &root.join("Cargo.toml"),
+            "[package]\nname='ignore_regression'\nversion='0.1.0'\nedition='2021'\n",
+        );
+        write(&root.join("src/main.rs"), "fn main() {}\n");
+        write(&root.join("tmp/real.rs"), "fn temporary_source() {}\n");
+        write(
+            &root.join("tests/fixtures/real.rs"),
+            "fn fixture_source() {}\n",
+        );
+        write(
+            &root.join("nested/tmp/tui-qa/real.rs"),
+            "fn nested_source() {}\n",
+        );
+        let project = crate::project::Project::discover(root).unwrap();
+        let before = scan(root).unwrap();
+        let metrics = crate::metrics::analyze(root, &before, &project);
+        let functions = crate::maintainability::analyze(root, &before, &project);
+        assert_eq!(functions.functions, 4);
+        assert_eq!(metrics.code_nonblank_lines, 4);
+
+        let noisy = format!(
+            "fn qa_copy() {{\n{}\n}}\n",
+            "if true { if true {} }\n".repeat(200)
+        );
+        write(&root.join("tmp/tui-qa/baseline-src/src/main.rs"), &noisy);
+        let after = scan(root).unwrap();
+        assert_eq!(before, after);
+        let after_metrics = crate::metrics::analyze(root, &after, &project);
+        let after_functions = crate::maintainability::analyze(root, &after, &project);
+        assert_eq!(
+            serde_json::to_value(&metrics).unwrap(),
+            serde_json::to_value(&after_metrics).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&functions).unwrap(),
+            serde_json::to_value(&after_functions).unwrap()
+        );
+        for path in [
+            "src/main.rs",
+            "tmp/real.rs",
+            "tests/fixtures/real.rs",
+            "nested/tmp/tui-qa/real.rs",
+        ] {
+            assert!(
+                after.entry(Path::new(path)).is_some(),
+                "lost real source: {path}"
+            );
+        }
+        let mut history = crate::git_analysis::History::default();
+        history.files.insert(
+            "src/main.rs".into(),
+            crate::git_analysis::Change {
+                commits: 3,
+                added: Some(1),
+                deleted: Some(0),
+                last: 0,
+            },
+        );
+        let hotspots =
+            crate::git_analysis::correlate(history, &after_metrics, &after_functions, &after);
+        assert_eq!(
+            hotspots.most_changed_files[0].path,
+            Path::new("src/main.rs")
+        );
+        assert_eq!(hotspots.most_changed_files[0].functions, Some(1));
+        assert!(!after_functions.partial && !after_metrics.partial);
+    }
+
+    #[test]
     #[ignore = "local 10k-entry repository performance smoke"]
     fn large_repository_smoke() {
         let temp = tempfile::tempdir().unwrap();
