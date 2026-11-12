@@ -5,7 +5,7 @@
 set -euo pipefail
 qa_python="${QA_PYTHON:-python3}"
 qa_binary="${QA_BINARY:-target/debug/wt}"
-qa_output="${QA_OUTPUT:-docs/ux/evidence/v2}"
+qa_output="${QA_OUTPUT:-tmp/tui-qa/product-ux-v2.1/harness}"
 "$qa_python" scripts/ux_pty.py --binary "$qa_binary" --project . --scenario docs/ux/scenarios/home.json --output "$qa_output/home"
 for scenario in execution architecture; do
   "$qa_python" scripts/ux_pty.py --binary "$qa_binary" --project tests/fixtures/workspace_project --scenario "docs/ux/scenarios/$scenario.json" --output "$qa_output/$scenario"

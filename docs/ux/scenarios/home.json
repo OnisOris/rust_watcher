@@ -5,12 +5,12 @@
     "capture": "01-overview-starting"
   },
   {
-    "wait": "RA \u25d0 Indexing",
+    "wait": "RA ◐ Indexing",
     "timeout": 30,
     "capture": "09-indexing"
   },
   {
-    "wait": "RA \u25cf Ready",
+    "wait": "RA ● Ready",
     "timeout": 90,
     "capture": "01-overview-120x35"
   },
@@ -42,7 +42,7 @@
     ]
   },
   {
-    "keys": "jjjj\rjjjjj",
+    "keys": "jjjj\rj\rjjjjj",
     "capture": "03-selected-depth",
     "wait": "Depth "
   },

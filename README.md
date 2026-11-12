@@ -66,7 +66,8 @@ Architecture opens crates/modules; implementation opens Rust symbol search
 (not natural-language search). Review offers Git evidence or structural rankings
 when Git is unavailable. Availability and next actions appear in Details.
 
-The project snapshot and collapsible technical groups remain available. Enter on
+The snapshot shows scanned files, measured Rust functions and review candidates.
+**Additional data** keeps technical groups one disclosure away; Enter on
 a group toggles it; Enter on a file/function opens its exact Explorer location.
 **Understand the metrics** offers measured values and WHAT/WHY/LIMITATIONS/NEXT
 explanations. `?` opens context help; j/k scrolls it and Esc closes it. Hotspot
@@ -741,9 +742,11 @@ Inspector/file and Calls to the originating Map focus, selection and mode using
 a bounded 50-entry identifier-only return history. One session RA worker serves
 all these actions; no synchronous LSP work happens during rendering.
 
-Empty Symbols now offers real Cargo binary targets/library roots, bounded longest/deepest
-function candidates and current hotspots. Empty Calls offers known exact
-Cargo binary targets, ranked function anchors and the previously inspected callable when available.
+Empty Symbols begins with name search, Cargo binary/library source roots, bounded
+longest/deepest function candidates and current hotspots. Empty Calls begins with
+executable entrypoints, ranked function anchors, callable search and the previously
+inspected callable when available. Each route explains its purpose, analysis
+requirements and next action; an unavailable previous callable is a local state.
 `j/k` and Enter open their candidate picker; `/` switches to Symbols search.
 Unavailable or still-loading routes are labeled and do not guess a target.
 
@@ -764,10 +767,21 @@ missing/ambiguous symbols and absent RA retain file/anchor with an explanation.
 No global name search is involved. Existing function anchors and Inspector/Calls
 navigation remain unchanged.
 
-Overview's **UNDERSTAND THIS REPOSITORY** offers execution through exact Cargo
+Overview's **START EXPLORING** offers execution through exact Cargo
 binary entrypoints, architecture, Rust symbol search and measured attention areas.
-Unavailable/loading/empty data produces a notice; structural review remains
+Unavailable/loading/empty data is explained in context; structural review remains
 available without Git. Library-only projects use architecture/source routes.
+
+Module Inspector starts with identity, structure, relationship limits, measured
+review opportunities and next actions. `a` opens the retained detailed analysis
+(including unknown own-module totals, coverage losses and unresolved imports);
+`f` shows known physical files. Neither changes the graph Focus or Selection.
+Explorer directories show cached direct children, Rust/other-file counts and
+navigation actions; these describe physical folders, not Rust module semantics.
+Transient action notices clear when changing views; backend failures remain in
+Analysis status. This repository ignores `/tmp/tui-qa/` so local QA source copies
+do not enter metrics. Real `tmp`, `tests` and `fixtures` directories in analyzed
+projects remain subject to those projects' own ignore rules.
 
 ## Headless semantic summary
 

@@ -5,5 +5,5 @@
  {"keys":"g","capture":"07-call-graph"},
  {"keys":"o","wait":"INSPECTOR","timeout":30,"settle":1,"capture":"call-source"},
  {"keys":"\u001b","wait":"CALL GRAPH","capture":"graph-restored"},
- {"keys":"\u001b","wait":"UNDERSTAND THIS","capture":"execution-return-home"}
+ {"keys":"\u001b","wait":"START EXPLORING","capture":"execution-return-home"}
 ]
