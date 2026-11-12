@@ -237,6 +237,11 @@ impl App {
     }
 
     pub(super) fn switch_view(&mut self, view: View) {
+        if self.view != view {
+            // Action feedback belongs to the old screen. Backend errors have
+            // independent persistent state (RA, metrics, Git, module coverage).
+            self.notice = None;
+        }
         if self.view == View::Calls && view != View::Calls {
             self.calls.graph.cancel();
         }
@@ -494,6 +499,7 @@ impl App {
     }
 
     pub(super) fn open_search(&mut self) {
+        self.notice = None;
         self.overlay = Overlay::Search;
         self.symbols_dirty_at = None;
         self.symbols_loading = false;
@@ -515,6 +521,7 @@ impl App {
 
     pub(super) fn begin_selected_inspect(&mut self) -> Option<(u64, Symbol)> {
         let symbol = self.symbols_results.get(self.symbols_selection)?.clone();
+        self.notice = None;
         self.inspect_request += 1;
         let id = self.inspect_request;
         self.inspector = Some(Inspector::loading(id, symbol.clone()));
@@ -577,6 +584,7 @@ impl App {
             return None;
         }
         let symbol = self.explorer.selected_symbol()?;
+        self.notice = None;
         self.inspect_request += 1;
         let id = self.inspect_request;
         self.inspector = Some(Inspector::loading(id, symbol.clone()));

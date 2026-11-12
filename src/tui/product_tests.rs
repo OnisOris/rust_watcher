@@ -123,6 +123,50 @@ async fn context_help_scrolls_without_moving_underlying_selection() {
     assert!(rx.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn unavailable_calls_notice_is_cleared_by_new_screen_but_ra_error_survives() {
+    for destination in [K::Char('4'), K::Char('1')] {
+        let mut app = app();
+        let tree = crate::repository::scan(&app.project.workspace_root).unwrap();
+        app.explorer.apply_tree(tree);
+        app.analyzer_state = AnalyzerState::Ready;
+        let (tx, mut rx) = mpsc::channel(16);
+        key(&mut app, K::Char('3'), &tx).await;
+        key(&mut app, K::Char('j'), &tx).await;
+        key(&mut app, K::Char('j'), &tx).await;
+        key(&mut app, K::Enter, &tx).await;
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|s| s.contains("previously inspected")));
+        app.analyzer_state = AnalyzerState::Error("persistent RA failure".into());
+        key(&mut app, destination, &tx).await;
+        assert!(app.notice.is_none());
+        assert_eq!(
+            app.analyzer_state,
+            AnalyzerState::Error("persistent RA failure".into())
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(text(&app, 120, 35).contains("RA × Error"));
+    }
+}
+
+#[tokio::test]
+async fn successful_search_clears_action_feedback_without_erasing_analysis_errors() {
+    let mut app = app();
+    app.notice = Some("previous action unavailable".into());
+    app.metrics_error = Some("persistent metrics failure".into());
+    let (tx, mut rx) = mpsc::channel(16);
+    key(&mut app, K::Char('/'), &tx).await;
+    assert!(app.notice.is_none());
+    assert_eq!(app.overlay, Overlay::Search);
+    assert_eq!(
+        app.metrics_error.as_deref(),
+        Some("persistent metrics failure")
+    );
+    assert!(rx.try_recv().is_err());
+}
+
 #[test]
 fn review_evidence_matches_real_structure_and_never_invents_a_function_anchor() {
     let temp = tempfile::tempdir().unwrap();
