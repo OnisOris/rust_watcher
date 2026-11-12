@@ -163,7 +163,7 @@ fn footer_text(app: &App) -> &'static str {
         Overlay::Help => " ? / Esc close help · q quit",
         Overlay::None => match app.view {
             View::Map if app.module_map.active => {
-                " Enter focus · o source · p review · v relationships · Esc back · ? help"
+                " Enter focus · o source · p review · v links · a details · Tab pane · Esc back"
             }
             View::Map => " j/k select · Enter focus · m modules · o source · Esc back · ? help",
             View::Overview if app.pane == Pane::Details => {

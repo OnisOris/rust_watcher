@@ -346,7 +346,7 @@ fn directory_context_uses_direct_children_and_preserves_selection_on_resize() {
         let rendered = text(&app, w, h);
         assert!(rendered.contains("DIRECTORY CONTEXT"));
         assert!(rendered.contains("Direct children only"));
-        assert!(rendered.contains("Enter toggle"));
+        assert!(rendered.contains("l first child"));
         assert_eq!(app.explorer.selected_entry().unwrap().path, selected);
     }
 }

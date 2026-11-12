@@ -412,7 +412,11 @@ fn render_directory(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     lines.extend([
         heading("NEXT"),
-        Line::raw("Enter toggle · l expand / first child"),
+        Line::raw(if entry.path.as_os_str().is_empty() {
+            "l first child · j/k select"
+        } else {
+            "Enter toggle · l expand / first child"
+        }),
         Line::raw("j/k select · h parent · Esc back"),
     ]);
     frame.render_widget(

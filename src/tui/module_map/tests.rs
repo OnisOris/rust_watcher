@@ -108,6 +108,7 @@ async fn relationship_views_preserve_identity_history_and_observable_context() {
         assert!(text.contains("×2"));
         assert!(text.contains("[cfg]1"));
         assert!(text.contains("MODULE · crate::tui"));
+        assert!(text.contains("a details"));
     }
     press(&mut app, K::Char('v'), &tx).await;
     assert_eq!(app.module_map.mode, Mode::UsedBy);
