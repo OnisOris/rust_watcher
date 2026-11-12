@@ -172,6 +172,12 @@ fn footer_text(app: &App) -> &'static str {
             View::Overview => {
                 " j/k select · Enter explore/open · Tab details · p investigate · ? help · q quit"
             }
+            View::Symbols if app.symbols_query.is_empty() && app.symbols_results.is_empty() => {
+                " j/k choose · Enter start · / search · Esc back · ? help · q quit"
+            }
+            View::Calls if app.calls.center.is_none() => {
+                " j/k choose · Enter start · / search · Esc back · ? help · q quit"
+            }
             View::Symbols => {
                 " / search · j/k select · Enter inspect · c calls · Tab pane · ? help · q quit"
             }
@@ -197,6 +203,26 @@ fn footer_text(app: &App) -> &'static str {
     }
 }
 
+fn empty_search_message(app: &App) -> &'static str {
+    if search_error(app).is_some() {
+        return "Search unavailable · see Analysis status";
+    }
+    match app.analyzer_state {
+        AnalyzerState::Error(_) => "Search unavailable: rust-analyzer failed",
+        AnalyzerState::Starting | AnalyzerState::Indexing => {
+            "Indexing: absence of results is provisional"
+        }
+        AnalyzerState::Ready => "No symbols found",
+    }
+}
+
+fn search_error(app: &App) -> Option<&str> {
+    app.symbols_error.as_deref().or(match &app.analyzer_state {
+        AnalyzerState::Error(e) => Some(e.as_str()),
+        _ => None,
+    })
+}
+
 fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let active = app.overlay == Overlay::Search;
     let popup = centered(area, 72, 70);
@@ -220,7 +246,11 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .iter()
         .map(|s| symbol_row(s, popup.width.saturating_sub(6) as usize))
         .collect();
-    let title = if app.symbols_truncated {
+    let title = if search_error(app).is_some() {
+        " Search unavailable · RA error "
+    } else if !matches!(app.analyzer_state, AnalyzerState::Ready) {
+        " Results provisional · RA indexing "
+    } else if app.symbols_truncated {
         " Results (first 50) "
     } else if app.symbols_results.is_empty()
         && !app.symbols_query.is_empty()
@@ -230,6 +260,15 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         " Results "
     };
+    if let Some(error) = search_error(app) {
+        frame.render_widget(
+            Paragraph::new(error)
+                .wrap(Wrap { trim: false })
+                .block(pane_block(title, active)),
+            rows[1],
+        );
+        return;
+    }
     let mut state = ListState::default()
         .with_selected((!app.symbols_results.is_empty()).then_some(app.symbols_selection));
     frame.render_stateful_widget(
@@ -670,7 +709,7 @@ mod tests {
     fn symbols_empty_state_and_small_terminal_are_safe() {
         let mut app = app();
         app.switch_view(View::Symbols);
-        assert!(render_text(&app).contains("START EXPLORING SYMBOLS"));
+        assert!(render_text(&app).contains("SYMBOL EXPLORATION"));
         let backend = TestBackend::new(70, 15);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
@@ -703,7 +742,7 @@ mod tests {
         }
         let mut empty = app();
         empty.switch_view(View::Calls);
-        assert!(render_text(&empty).contains("No callable symbol selected"));
+        assert!(render_text(&empty).contains("Start from an executable"));
 
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();

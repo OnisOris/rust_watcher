@@ -133,6 +133,10 @@ pub(super) fn analysis_details(app: &App) -> Vec<Line<'static>> {
             .map(|p| Line::raw(p.display().to_string())),
     );
     lines.push(heading("Analyzer"));
+    if let Some(error) = &app.symbols_error {
+        lines.push(heading("Last symbol search · failed"));
+        lines.push(Line::raw(error.clone()));
+    }
     lines.push(Line::raw(match &app.analyzer_state {
         AnalyzerState::Starting => "starting...".into(),
         AnalyzerState::Indexing => "indexing...".into(),

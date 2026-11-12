@@ -975,9 +975,10 @@ mod tests {
             super::super::app::AnalyzerState::Error(_)
         ));
         assert!(!app.symbols_loading);
+        assert!(app.notice.is_none());
         assert!(app
-            .notice
+            .symbols_error
             .as_deref()
-            .is_some_and(|message| message.contains("unavailable")));
+            .is_some_and(|e| e.contains("unavailable")));
     }
 }

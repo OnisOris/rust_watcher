@@ -131,6 +131,7 @@ async fn symbol_and_call_start_routes_open_real_candidates_or_explain_unavailabi
     let (tx, mut rx) = mpsc::channel(16);
     app.switch_view(View::Symbols);
     key(&mut app, K::Char('j'), &tx).await;
+    key(&mut app, K::Char('j'), &tx).await;
     key(&mut app, K::Enter, &tx).await;
     assert!(matches!(
         app.journey.picker.as_ref().unwrap().actions[0],
@@ -155,7 +156,7 @@ async fn symbol_and_call_start_routes_open_real_candidates_or_explain_unavailabi
     key(&mut app, K::Esc, &tx).await;
     key(&mut app, K::Esc, &tx).await;
     assert_eq!(app.view, View::Symbols);
-    app.journey.start_selection = 3;
+    app.journey.symbols_start_selection = 4;
     let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
     t.draw(|f| super::super::ui::render(f, &app)).unwrap();
     let text = t
@@ -171,11 +172,11 @@ async fn symbol_and_call_start_routes_open_real_candidates_or_explain_unavailabi
     app.journey.start_selection = 0;
     key(&mut app, K::Enter, &tx).await;
     assert!(app.journey.picker.is_none()); // library, not a guessed main()
-    assert!(app
-        .notice
-        .as_ref()
-        .unwrap()
-        .contains("No binary targets found"));
+    assert!(app.notice.is_none());
+    assert!(
+        actions::unavailable_reason(&app, actions::Start::Entry, true)
+            .contains("No binary targets found")
+    );
     app.analyzer_state = AnalyzerState::Error("missing RA".into());
     app.journey.start_selection = 1;
     key(&mut app, K::Enter, &tx).await;

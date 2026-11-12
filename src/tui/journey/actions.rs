@@ -118,8 +118,9 @@ pub(super) fn priorities(app: &App) -> Vec<Action> {
     a.truncate(32);
     a
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::tui) enum Start {
+    Search,
     Entry,
     Longest,
     Deepest,
@@ -128,9 +129,10 @@ pub(in crate::tui) enum Start {
 }
 pub(super) fn routes(calls: bool) -> Vec<Start> {
     if calls {
-        vec![Start::Entry, Start::Longest, Start::Previous]
+        vec![Start::Entry, Start::Longest, Start::Search, Start::Previous]
     } else {
         vec![
+            Start::Search,
             Start::Entry,
             Start::Longest,
             Start::Deepest,
@@ -141,6 +143,7 @@ pub(super) fn routes(calls: bool) -> Vec<Start> {
 pub(super) fn available(app: &App, route: Start, calls: bool) -> (String, Vec<Action>) {
     let mut a = vec![];
     let label = match route {
+        Start::Search => "Search by symbol name",
         Start::Entry => {
             for n in &app.project.architecture.nodes {
                 for t in &n.targets {
@@ -232,16 +235,43 @@ pub(super) fn available(app: &App, route: Start, calls: bool) -> (String, Vec<Ac
     (label.into(), a)
 }
 pub(super) fn unavailable_reason(app: &App, route: Start, calls: bool) -> String {
-    if app.explorer.tree.is_none() {
+    if route == Start::Previous
+        && !app
+            .inspector
+            .as_ref()
+            .is_some_and(|i| crate::model::is_callable_kind(&i.symbol.kind))
+    {
+        return "No previously inspected callable symbol; inspect a function first".into();
+    }
+    if route == Start::Hotspots {
+        if let Some(report) = app.hotspots.as_ref().filter(|r| !r.available) {
+            return format!(
+                "Git history unavailable: {}",
+                report
+                    .reason
+                    .as_ref()
+                    .map_or("no history", |r| r.message.as_str())
+            );
+        }
+    }
+    if app.explorer.tree.is_none() && route != Start::Search {
         return "Repository tree: scanning; source navigation will be available when ready".into();
     }
     if calls
         && !matches!(route, Start::Entry)
+        && route != Start::Search
         && matches!(app.analyzer_state, AnalyzerState::Error(_))
     {
         return "Call hierarchy unavailable: rust-analyzer not available. Binary source files remain accessible.".into();
     }
     match route {
+        Start::Search => match &app.analyzer_state {
+            AnalyzerState::Error(e) => format!("Rust symbol search unavailable: {e}"),
+            AnalyzerState::Starting | AnalyzerState::Indexing => {
+                "Rust analysis indexing; search results may be provisional".into()
+            }
+            AnalyzerState::Ready => "Rust analysis ready; enter a symbol name".into(),
+        },
         Start::Entry => {
             if calls {
                 "No binary targets found. Library/test/example targets are not main entrypoints."

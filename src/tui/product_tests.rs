@@ -134,11 +134,10 @@ async fn unavailable_calls_notice_is_cleared_by_new_screen_but_ra_error_survives
         key(&mut app, K::Char('3'), &tx).await;
         key(&mut app, K::Char('j'), &tx).await;
         key(&mut app, K::Char('j'), &tx).await;
+        key(&mut app, K::Char('j'), &tx).await;
         key(&mut app, K::Enter, &tx).await;
-        assert!(app
-            .notice
-            .as_deref()
-            .is_some_and(|s| s.contains("previously inspected")));
+        assert!(app.notice.is_none());
+        assert!(text(&app, 120, 35).contains("No previously inspected callable"));
         app.analyzer_state = AnalyzerState::Error("persistent RA failure".into());
         key(&mut app, destination, &tx).await;
         assert!(app.notice.is_none());
@@ -164,6 +163,105 @@ async fn successful_search_clears_action_feedback_without_erasing_analysis_error
         app.metrics_error.as_deref(),
         Some("persistent metrics failure")
     );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn empty_symbols_search_is_available_before_tree_without_decorative_lsp() {
+    let mut app = app();
+    let (tx, mut rx) = mpsc::channel(16);
+    key(&mut app, K::Char('2'), &tx).await;
+    assert!(text(&app, 120, 35).contains("Search by name"));
+    key(&mut app, K::Enter, &tx).await;
+    assert_eq!(app.overlay, Overlay::Search);
+    assert!(rx.try_recv().is_err());
+    app.analyzer_state = AnalyzerState::Error("missing RA".into());
+    app.symbols_query = "known_symbol".into();
+    let rendered = text(&app, 120, 35);
+    assert!(rendered.contains("Search unavailable"));
+    assert!(!rendered.contains("No symbols found"));
+}
+
+#[test]
+fn empty_routes_explain_next_action_at_all_sizes_including_unavailable_previous() {
+    let mut app = app();
+    for view in [View::Symbols, View::Calls] {
+        app.switch_view(view);
+        let count = if view == View::Calls { 4 } else { 5 };
+        for index in 0..count {
+            if view == View::Calls {
+                app.journey.start_selection = index;
+            } else {
+                app.journey.symbols_start_selection = index;
+            }
+            for (w, h) in [(80, 20), (100, 30), (120, 35), (160, 45)] {
+                let rendered = text(&app, w, h);
+                assert!(
+                    rendered.contains("Next:"),
+                    "missing next action at {w}x{h}: {rendered}"
+                );
+                assert!(rendered.contains("EXPLORATION"));
+                assert!(!rendered.contains("No symbol selected."));
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_workspace_and_library_only_routes_do_not_invent_entrypoints() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[]\nresolver='2'\n",
+    )
+    .unwrap();
+    let project = crate::project::Project::discover(temp.path()).unwrap();
+    let mut app = App::new(project);
+    app.explorer
+        .apply_tree(crate::repository::scan(temp.path()).unwrap());
+    app.switch_view(View::Calls);
+    let rendered = text(&app, 120, 35);
+    assert!(rendered.contains("No binary targets found"));
+    assert!(rendered.contains("Unavailable"));
+    assert!(app.notice.is_none());
+}
+
+#[test]
+fn late_search_failure_retains_diagnostics_without_reopening_old_notice() {
+    let mut app = app();
+    app.switch_view(View::Symbols);
+    app.search_request = 42;
+    app.symbols_loading = true;
+    app.switch_view(View::Explorer);
+    app.apply_event(super::worker::AnalyzerEvent::SearchFailed {
+        id: 42,
+        message: "request failed after leaving Symbols".into(),
+    });
+    assert!(app.notice.is_none());
+    assert!(app
+        .symbols_error
+        .as_deref()
+        .unwrap()
+        .contains("after leaving"));
+    app.switch_view(View::Overview);
+    app.overview.selected = Target::Group(overview::Group::Analysis).id();
+    assert!(overview::details(&app)
+        .iter()
+        .any(|l| l.to_string().contains("request failed after leaving")));
+    app.switch_view(View::Symbols);
+    app.open_search();
+    assert!(text(&app, 120, 35).contains("Search unavailable"));
+}
+
+#[tokio::test]
+async fn empty_symbols_route_selection_still_works_after_tab() {
+    let mut app = app();
+    let (tx, mut rx) = mpsc::channel(16);
+    key(&mut app, K::Char('2'), &tx).await;
+    key(&mut app, K::Tab, &tx).await;
+    key(&mut app, K::Char('j'), &tx).await;
+    assert_eq!(app.journey.symbols_start_selection, 1);
+    assert!(text(&app, 120, 35).contains("Browse known source roots"));
     assert!(rx.try_recv().is_err());
 }
 

@@ -135,35 +135,46 @@ pub(in crate::tui) async fn handle_key(
     }
     let start = (app.view == View::Symbols
         && app.symbols_query.is_empty()
-        && app.symbols_results.is_empty()
-        && app.pane == Pane::Symbols)
+        && app.symbols_results.is_empty())
         || (app.view == View::Calls && app.calls.center.is_none());
     if start {
         let calls = app.view == View::Calls;
         let routes = actions::routes(calls);
+        let index = super::start::index(app, calls);
         match key.code {
             K::Down | K::Char('j') => {
-                app.journey.start_selection =
-                    (app.journey.start_selection + 1).min(routes.len() - 1);
+                app.notice = None;
+                let next = (index + 1).min(routes.len() - 1);
+                if calls {
+                    app.journey.start_selection = next;
+                } else {
+                    app.journey.symbols_start_selection = next;
+                }
                 return Some(false);
             }
             K::Up | K::Char('k') => {
-                app.journey.start_selection = app.journey.start_selection.saturating_sub(1);
+                app.notice = None;
+                if calls {
+                    app.journey.start_selection = index.saturating_sub(1);
+                } else {
+                    app.journey.symbols_start_selection = index.saturating_sub(1);
+                }
                 return Some(false);
             }
             code if code == K::Enter || (calls && code == K::Char('c')) => {
-                let (label, items) = actions::available(
-                    app,
-                    routes[app.journey.start_selection.min(routes.len() - 1)],
-                    calls,
-                );
-                if items.is_empty() {
-                    app.notice = Some(actions::unavailable_reason(
-                        app,
-                        routes[app.journey.start_selection.min(routes.len() - 1)],
-                        calls,
-                    ));
-                } else {
+                app.notice = None;
+                let route = routes[index];
+                if route == actions::Start::Search {
+                    if super::start::enabled(app, route, calls) {
+                        let origin = point(app, View::Symbols);
+                        app.switch_view(View::Symbols);
+                        remember(app, origin);
+                        app.open_search();
+                    }
+                    return Some(false);
+                }
+                let (label, items) = actions::available(app, route, calls);
+                if !items.is_empty() {
                     app.journey.picker = Some(Picker {
                         title: label,
                         actions: items,

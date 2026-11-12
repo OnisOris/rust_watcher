@@ -29,6 +29,10 @@ pub(super) fn symbol_row(symbol: &crate::model::Symbol, width: usize) -> ListIte
     ])
 }
 pub(super) fn render_symbols_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if app.symbols_query.is_empty() && app.symbols_results.is_empty() {
+        super::super::journey::render_start(frame, area, app, false);
+        return;
+    }
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -48,7 +52,7 @@ pub(super) fn render_symbols(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let message = if app.symbols_loading {
             "Searching..."
         } else {
-            "No symbols found"
+            empty_search_message(app)
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -98,6 +102,40 @@ pub(super) fn render_inspector_block(frame: &mut Frame<'_>, area: Rect, app: &Ap
     let empty_search =
         app.view == View::Symbols && app.symbols_query.is_empty() && app.symbols_results.is_empty();
     if empty_search || app.inspector.is_none() {
+        if let Some(symbol) = app
+            .symbols_results
+            .get(app.symbols_selection)
+            .filter(|_| app.view == View::Symbols)
+        {
+            let mut lines = vec![
+                heading("SELECTED SEARCH RESULT"),
+                Line::raw(qualified_symbol(symbol)),
+                components::path_label(&symbol.file, area.width.saturating_sub(4) as usize),
+                Line::raw(format!(
+                    "{} · line {}",
+                    symbol.kind,
+                    symbol.selection_range.start.line + 1
+                )),
+                Line::raw("Rust symbol reported by RA; Enter loads its Inspector."),
+                heading(if crate::model::is_callable_kind(&symbol.kind) {
+                    "Next: Enter inspect · c static Calls"
+                } else {
+                    "Next: Enter inspect"
+                }),
+            ];
+            if app.symbols_loading || app.symbols_dirty_at.is_some() {
+                lines.push(Line::raw(
+                    "Search updating · retained results may be from the previous query.",
+                ));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(pane_block(" RESULT DETAILS ", active)),
+                area,
+            );
+            return;
+        }
         let mut text = vec![
             heading("No symbol selected."),
             Line::raw(""),

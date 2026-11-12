@@ -182,6 +182,7 @@ pub(super) struct App {
     pub search_request: u64,
     pub symbols_truncated: bool,
     pub symbols_loading: bool,
+    pub symbols_error: Option<String>,
     pub inspector: Option<Inspector>,
     pub inspect_request: u64,
     pub calls: CallsState,
@@ -222,6 +223,7 @@ impl App {
             search_request: 0,
             symbols_truncated: false,
             symbols_loading: false,
+            symbols_error: None,
             inspector: None,
             inspect_request: 0,
             calls: CallsState::default(),
@@ -506,6 +508,7 @@ impl App {
     }
 
     pub(super) fn edit_search(&mut self) {
+        self.symbols_error = None;
         self.search_request += 1; // Invalidate responses for the previous query immediately.
         if self.symbols_query.is_empty() {
             self.symbols_results.clear();
@@ -698,6 +701,7 @@ impl App {
                 self.analyzer_state = AnalyzerState::Error(message);
             }
             AnalyzerEvent::SearchResults { id, result } if id == self.search_request => {
+                self.symbols_error = None;
                 self.symbols_results = result.items;
                 self.symbols_truncated = result.truncated;
                 self.symbols_selection = 0;
@@ -706,7 +710,10 @@ impl App {
             AnalyzerEvent::SearchFailed { id, message } if id == self.search_request => {
                 self.symbols_results.clear();
                 self.symbols_loading = false;
-                self.notice = Some(message);
+                self.symbols_error = Some(message.clone());
+                if self.view == View::Symbols {
+                    self.notice = Some(message);
+                }
             }
             AnalyzerEvent::Source { id, value } => self.with_inspector(id, |item| {
                 item.source = Some(value);

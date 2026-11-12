@@ -7,6 +7,7 @@ mod entrypoint_tests;
 #[cfg(test)]
 mod performance_tests;
 mod render;
+mod start;
 #[cfg(test)]
 mod tests;
 use super::{
@@ -19,7 +20,8 @@ pub(super) use actions::{Action, BinaryEntrypoint, Picker};
 pub(super) use anchors::prepare as prepare_file_symbols;
 use anchors::Selector;
 pub(super) use dispatch::{flush, handle_key};
-pub(super) use render::{render_picker, render_start};
+pub(super) use render::render_picker;
+pub(super) use start::render_start;
 use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Destination {
@@ -72,6 +74,7 @@ pub(super) struct State {
     pub pending: Option<Pending>,
     pub dispatch: Option<AnalyzerCommand>,
     pub start_selection: usize,
+    pub symbols_start_selection: usize,
     pub binary_context: Option<(BinaryEntrypoint, crate::model::Symbol)>,
     history: Vec<ReturnPoint>,
 }

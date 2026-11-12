@@ -292,7 +292,7 @@ async fn field_calls_emit_no_lsp_and_cleared_search_marks_previous_inspector() {
     app.edit_search();
     assert!(app.symbols_results.is_empty());
     let s = text(&render(&app, 120, 35));
-    assert!(s.contains("No symbol selected."));
+    assert!(s.contains("SYMBOL EXPLORATION"));
     assert!(s.contains("LAST INSPECTED"));
     app.overlay = Overlay::None;
     assert!(!s.contains("Callers                 loading"));
