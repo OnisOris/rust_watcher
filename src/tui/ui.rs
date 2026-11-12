@@ -614,7 +614,9 @@ mod tests {
         assert!(overview.contains("1 Overview"));
         assert!(overview.contains("2 Symbols"));
         assert!(overview.contains("Workspace"));
-        assert!(overview.contains("ENTRYPOINTS"));
+        assert!(overview.contains("Explore execution"));
+        assert!(overview.contains("ADDITIONAL DATA"));
+        assert!(!overview.contains("ENTRYPOINTS"));
         assert!(!overview.contains("LspClient::request"));
         app.overlay = Overlay::Help;
         let help = render_text(&app);
@@ -635,9 +637,9 @@ mod tests {
     fn metrics_loading_ready_partial_and_errors_render_independently() {
         let mut app = app();
         app.overview.selected = super::super::overview::Target::Workspace.id();
-        assert!(render_text(&app).contains("Repository Metrics: loading..."));
+        assert!(render_text(&app).contains("File counts unknown"));
         app.metrics_error = Some("cannot read repository".into());
-        assert!(render_text(&app).contains("Metrics error: cannot read repository"));
+        assert!(render_text(&app).contains("cannot read repository"));
         app.metrics_error = None;
         app.metrics = Some(crate::metrics::RepositoryMetrics {
             total_files: 42,
@@ -647,9 +649,9 @@ mod tests {
         });
         app.analyzer_state = AnalyzerState::Error("analyzer unavailable".into());
         let text = render_text(&app);
-        assert!(text.contains("Metrics ready · PARTIAL"));
-        assert!(text.contains("Files") && text.contains("42"));
-        assert!(text.contains("Source nonblank LOC") && text.contains("100"));
+        assert!(text.contains("PARTIAL scan"));
+        assert!(text.contains("Scanned files") && text.contains("42"));
+        assert!(!text.contains("Source nonblank LOC"));
         assert!(text.contains("analyzer unavailable"));
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal.draw(|f| render(f, &app)).unwrap();
@@ -660,7 +662,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(text.contains("Files") && text.contains("42"));
+        assert!(text.contains("Scanned files") && text.contains("42"));
         assert!(text.contains("RA"));
     }
 

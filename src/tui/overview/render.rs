@@ -15,12 +15,12 @@ pub(in crate::tui) fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &Ap
     let mut spans = vec![];
     for (value, label) in [
         (
-            number(app.metrics.as_ref().map(|m| m.code_nonblank_lines as usize)),
-            " source LOC",
+            number(app.metrics.as_ref().map(|m| m.total_files)),
+            " scanned files",
         ),
         (
             number(app.maintainability.as_ref().map(|m| m.functions)),
-            " functions",
+            " Rust functions",
         ),
         (
             number(app.hotspots.as_ref().and_then(|h| h.candidate_files)),
@@ -37,7 +37,10 @@ pub(in crate::tui) fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &Ap
         Paragraph::new(Line::from(spans)).block(pane_block(
             if app.metrics.as_ref().is_some_and(|r| r.partial)
                 || app.maintainability.as_ref().is_some_and(|r| r.partial)
-                || app.hotspots.as_ref().is_some_and(|r| r.partial)
+                || app
+                    .hotspots
+                    .as_ref()
+                    .is_some_and(|r| r.history_partial || r.current_metrics_partial)
             {
                 " PROJECT SNAPSHOT · PARTIAL · ? explains limits "
             } else {

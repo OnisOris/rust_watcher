@@ -5,6 +5,15 @@ pub(super) fn render_explorer_view(frame: &mut Frame<'_>, area: Rect, app: &App)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(area);
     render_explorer_tree(frame, panes[0], app);
+    if app
+        .explorer
+        .selected_entry()
+        .is_some_and(|e| e.kind == RepoEntryKind::Directory)
+    {
+        render_directory(frame, panes[1], app);
+        return;
+    }
+
     if app.explorer.file.as_ref().is_some_and(|file| {
         app.explorer
             .selected_entry()
@@ -336,4 +345,83 @@ pub(super) fn format_size(size: Option<u64>) -> String {
         Some(size) => format!("{size} B"),
         None => "—".into(),
     }
+}
+
+fn render_directory(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(entry) = app.explorer.selected_entry() else {
+        return;
+    };
+    let mut lines = vec![
+        heading("DIRECTORY"),
+        components::path_label(
+            if entry.path.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                &entry.path
+            },
+            usize::MAX,
+        ),
+    ];
+    if let Some(v) = app.explorer.directory_summary(&entry.path) {
+        lines.extend([
+            Line::raw(format!(
+                "{} directories · {} Rust files",
+                v.directories, v.rust_files
+            )),
+            Line::raw(format!(
+                "{} other files · {} symlinks",
+                v.other_files, v.symlinks
+            )),
+            Line::raw("Direct children only · physical folder"),
+            heading("KNOWN CHILDREN"),
+        ]);
+        let limit = usize::from(area.height.saturating_sub(12)).min(8);
+        for child in app.explorer.direct_children(&entry.path).take(limit) {
+            lines.push(Line::raw(format!(
+                "{}{}",
+                child.path.file_name().unwrap_or_default().to_string_lossy(),
+                if child.kind == RepoEntryKind::Directory {
+                    "/"
+                } else {
+                    ""
+                }
+            )));
+        }
+        let total = v.directories + v.rust_files + v.other_files + v.symlinks;
+        if total > limit {
+            lines.push(Line::raw(format!("… {} more in tree", total - limit)));
+        }
+        if total == 0 {
+            lines.push(Line::raw("No known children in the scanned tree"));
+        }
+    } else {
+        lines.push(Line::raw(
+            app.explorer
+                .error
+                .clone()
+                .unwrap_or_else(|| "Repository scanning… counts unknown".into()),
+        ));
+    }
+    if app
+        .explorer
+        .tree
+        .as_ref()
+        .is_some_and(|t| t.truncated || t.skipped_errors > 0)
+    {
+        lines.push(Line::raw("PARTIAL tree · see Analysis status"));
+    }
+    lines.extend([
+        heading("NEXT"),
+        Line::raw("Enter toggle · l expand / first child"),
+        Line::raw("j/k select · h parent · Esc back"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(pane_block(
+                " DIRECTORY CONTEXT ",
+                app.pane == Pane::ExplorerFile,
+            )),
+        area,
+    );
 }

@@ -127,82 +127,43 @@ pub(in crate::tui) fn details(app: &App) -> Vec<Line<'static>> {
 fn summary(app: &App) -> Vec<Line<'static>> {
     let mut l = vec![
         heading(project_name(&app.project)),
-        Line::raw("Read-only repository exploration"),
-        Line::raw(""),
+        heading("PROJECT SNAPSHOT"),
     ];
     if let Some(m) = &app.metrics {
-        l.push(Line::styled(
-            if m.partial {
-                "Metrics ready · PARTIAL"
-            } else {
-                "Metrics ready"
-            },
-            Style::default().fg(if m.partial {
-                theme::WARNING
-            } else {
-                theme::SUCCESS
-            }),
-        ));
-        l.extend([
-            components::metric_value("Files", m.total_files),
-            components::metric_value("Source nonblank LOC", m.code_nonblank_lines),
-            components::metric_value("Test files", m.test_files),
-        ]);
+        l.push(components::metric_value("Scanned files", m.total_files));
+        if m.partial {
+            l.push(Line::raw("PARTIAL scan · counts cover measured files"));
+        }
     } else {
-        l.push(Line::raw(app.metrics_error.as_ref().map_or_else(
-            || "Repository Metrics: loading...".into(),
-            |e| format!("Metrics error: {e}"),
-        )));
+        l.push(Line::raw(app.metrics_error.clone().unwrap_or_else(|| {
+            "File counts unknown · scanning / unavailable".into()
+        })));
     }
     if let Some(r) = &app.maintainability {
-        l.push(heading("MAINTAINABILITY · Rust"));
-        l.extend([
-            components::metric_value("Functions", r.functions),
-            components::metric_value(
-                "Median / P95",
-                format!(
-                    "{} / {} lines",
-                    r.median_function_lines, r.p95_function_lines
-                ),
-            ),
-            components::metric_value("Max control depth", r.max_control_depth),
-        ]);
+        l.push(components::metric_value("Rust functions", r.functions));
+        if r.partial {
+            l.push(Line::raw("PARTIAL Rust structure · measured bodies only"));
+        }
     } else {
-        l.push(Line::raw(app.maintainability_error.as_ref().map_or_else(
-            || "Maintainability: analyzing...".into(),
-            |e| format!("Maintainability unavailable: {e}"),
+        l.push(Line::raw(app.maintainability_error.clone().unwrap_or_else(
+            || "Rust functions unknown · analyzing / unavailable".into(),
         )));
     }
-    l.push(heading("Languages · nonblank lines"));
-    if let Some(m) = &app.metrics {
-        let mut languages: Vec<_> = m.languages.iter().collect();
-        languages.sort_by(|a, b| {
-            b.nonblank_lines
-                .cmp(&a.nonblank_lines)
-                .then(a.language.cmp(&b.language))
-        });
-        l.extend(
-            languages
-                .iter()
-                .map(|p| components::metric_value(&p.language, p.nonblank_lines)),
-        );
-        l.push(heading("Largest packages · source lines"));
-        let mut packages: Vec<_> = m.packages.iter().collect();
-        packages.sort_by(|a, b| {
-            b.source_nonblank_lines
-                .cmp(&a.source_nonblank_lines)
-                .then(a.name.cmp(&b.name))
-        });
-        l.extend(
-            packages
-                .iter()
-                .take(5)
-                .map(|p| components::metric_value(&p.name, p.source_nonblank_lines)),
-        );
+    if let Some(n) = app.hotspots.as_ref().and_then(|h| h.candidate_files) {
+        l.push(components::metric_value("Review candidates", n));
+    } else {
+        l.push(Line::raw("Review candidates unknown"));
     }
+    l.extend([
+        heading("WHAT CAN I DO?"),
+        Line::raw("Choose execution, architecture, symbols or review."),
+        Line::raw("Additional data → Enter expands technical lists."),
+        heading("ANALYSIS STATUS"),
+        Line::raw(format!("RA: {:?}", app.analyzer_state)),
+    ]);
     l.extend(super::super::hotspots::status(app));
     l.push(Line::raw(
-        "5 Map → crate architecture · Enter expands groups",
+        "Additional data → Analysis: full metrics and limitations",
     ));
     l
 }
@@ -276,7 +237,11 @@ fn metric_value(app: &App, metric: super::super::explanations::Metric) -> String
             r.candidate_files.map(|n| {
                 format!(
                     "{n} Git + structural candidates{}",
-                    if r.partial { " · PARTIAL" } else { "" }
+                    if r.history_partial || r.current_metrics_partial {
+                        " · PARTIAL"
+                    } else {
+                        ""
+                    }
                 )
             })
         }),

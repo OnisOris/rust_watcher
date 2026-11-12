@@ -21,11 +21,14 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         None
     };
     let topics = match selected {
+        Some(Target::Metric(Metric::Status)) => vec![Metric::Status],
         Some(Target::Metric(m)) => vec![m, Metric::Status],
         Some(Target::Longest(_) | Target::Deepest(_)) => {
             vec![Metric::PhysicalLoc, Metric::Depth, Metric::FlowNodes]
         }
-        Some(Target::Hotspot(_) | Target::Historical(_)) => vec![
+        Some(
+            Target::Hotspot(_) | Target::Historical(_) | Target::Group(overview::Group::Hotspots),
+        ) => vec![
             Metric::Changes,
             Metric::Churn,
             Metric::Candidates,

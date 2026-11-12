@@ -100,7 +100,9 @@ async fn stable_ids_survive_background_insertions_and_open_the_same_file() {
     let metrics = crate::metrics::analyze(temp.path(), &tree, &app.project);
     apply_repository(&mut app, RepositoryEvent::Metrics(metrics.clone()));
     app.switch_view(View::Overview);
-    app.overview.expanded.insert(overview::Group::Largest);
+    app.overview
+        .expanded
+        .extend([overview::Group::Additional, overview::Group::Largest]);
     let selected = overview::targets(&app)
         .into_iter()
         .find(|t| matches!(t, Target::File(..)))

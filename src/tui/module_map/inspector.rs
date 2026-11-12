@@ -29,7 +29,7 @@ fn loc(app: &App, files: &BTreeSet<Arc<PathBuf>>) -> Option<u64> {
             })
         })
 }
-pub(super) fn details(app: &App) -> Vec<Line<'static>> {
+fn detailed(app: &App) -> Vec<Line<'static>> {
     let s = &app.module_map;
     let Some(g) = &s.graph else { return vec![] };
     let Some(n) = g.node(&s.selected) else {
@@ -296,4 +296,110 @@ pub(super) fn details(app: &App) -> Vec<Line<'static>> {
         l.push(Line::raw("a: classification details / coverage limits"));
     }
     l
+}
+
+pub(super) fn details(app: &App) -> Vec<Line<'static>> {
+    let s = &app.module_map;
+    if s.show_limits {
+        let mut lines = detailed(app);
+        lines.insert(
+            0,
+            components::section_header("DETAILED ANALYSIS · a summary"),
+        );
+        return lines;
+    }
+    let Some(g) = &s.graph else {
+        return vec![];
+    };
+    let Some(n) = g.node(&s.selected) else {
+        return vec![Line::raw("No module selected")];
+    };
+    let Some(e) = s.index.nodes.get(&n.id) else {
+        return vec![];
+    };
+    let mut lines = vec![
+        components::section_header(&format!("MODULE · {}", n.qualified_path)),
+        Line::raw(format!("Selected: {}", n.qualified_path)),
+        Line::raw(format!(
+            "Focus: {}",
+            g.node(&s.focus)
+                .map_or("unknown", |n| n.qualified_path.as_str())
+        )),
+        components::path_label(
+            n.source_file.as_deref().unwrap_or(&n.declaration_file),
+            usize::MAX,
+        ),
+        Line::raw(format!(
+            "Declaration: {}:{}",
+            n.declaration_file.display(),
+            n.declaration_line
+        )),
+        components::section_header("STRUCTURE"),
+        Line::raw(format!(
+            "{} direct child modules · {} known subtree files",
+            e.children.len(),
+            e.files.len()
+        )),
+        Line::raw("Physical files include descendants; not exclusive inline contents."),
+        components::section_header("RELATIONSHIPS"),
+    ];
+    if let Some(own) = g.resolution_by_module.get(&n.id) {
+        lines.push(Line::raw(format!(
+            "{} verified import records · {} modules import this",
+            own.verified_imports,
+            e.incoming.len()
+        )));
+    } else {
+        lines.push(Line::raw("Import classification unknown"));
+    }
+    lines.extend([
+        Line::raw("Ownership: child modules. Imports: syntax, not runtime calls."),
+        Line::raw("v cycles Children / Imports / Used by"),
+        components::section_header("REVIEW OPPORTUNITIES · p choose"),
+    ]);
+    let mut evidence = 0;
+    if let Some(r) = &app.maintainability {
+        for f in r
+            .longest_functions
+            .iter()
+            .filter(|f| e.files.contains(&f.path))
+            .take(2)
+        {
+            lines.push(Line::raw(format!(
+                "{} · {} lines · depth {}",
+                f.qualified_name, f.physical_lines, f.max_control_depth
+            )));
+            lines.push(Line::raw(format!(
+                "{}:{} · p choose exact function",
+                f.path.display(),
+                f.identifier_line
+            )));
+            evidence += 1;
+        }
+    }
+    if evidence == 0 {
+        lines.push(Line::raw(
+            "No ranked functions here · p checks measured files",
+        ));
+    } else {
+        lines.push(Line::raw(
+            "Bounded measured ranking · no defect or importance verdict",
+        ));
+    }
+    lines.extend([
+        components::section_header("NEXT ACTIONS"),
+        Line::raw("o exact source · Enter focus · v relationships · p review"),
+        Line::raw("a detailed analysis · f physical files · Esc back"),
+        Line::raw(format!(
+            "Discovery {:?} · classification {:?} · a explains limits",
+            g.coverage_status, g.resolution_status
+        )),
+    ]);
+    if s.show_files {
+        lines.push(components::section_header("KNOWN PHYSICAL FILES"));
+        for p in &e.files {
+            lines.push(components::path_label(p, usize::MAX));
+        }
+    }
+    lines
 }

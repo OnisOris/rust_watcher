@@ -258,6 +258,7 @@ pub(super) async fn handle_key(
             }
             KeyCode::Char('a') if app.view == View::Map && app.module_map.active => {
                 app.module_map.show_limits = !app.module_map.show_limits;
+                app.map.inspector_scroll = 0;
             }
             KeyCode::Char('m') if app.view == View::Map => {
                 app.module_map.enter(&app.map.selected);
@@ -462,18 +463,32 @@ async fn guided(
         }
         Guide::Entrypoint => super::journey::entry_picker(app),
         Guide::Hotspots => {
-            app.overview.expanded.extend([
-                Group::Hotspots,
-                Group::Longest,
-                Group::Deepest,
-                Group::Largest,
-            ]);
+            let group = if app
+                .hotspots
+                .as_ref()
+                .is_some_and(|h| h.rows().iter().any(|f| f.present_in_tree))
+            {
+                Group::Hotspots
+            } else if app
+                .maintainability
+                .as_ref()
+                .is_some_and(|r| !r.longest_functions.is_empty())
+            {
+                Group::Longest
+            } else {
+                Group::Largest
+            };
+            app.overview.expanded.extend([Group::Additional, group]);
             let items = super::overview::targets(app);
-            let target = items
-                .iter()
-                .find(|t| matches!(t, Target::Hotspot(_)))
-                .or_else(|| items.iter().find(|t| matches!(t, Target::Longest(_))))
-                .or_else(|| items.iter().find(|t| matches!(t, Target::File(..))));
+            let target = items.iter().find(|t| match t {
+                Target::Hotspot(p) => app
+                    .hotspots
+                    .as_ref()
+                    .is_some_and(|h| h.rows().iter().any(|f| &f.path == p && f.present_in_tree)),
+                Target::Longest(_) => group == Group::Longest,
+                Target::File(..) => group == Group::Largest,
+                _ => false,
+            });
             if let Some(target) = target {
                 app.overview.selected = target.id();
                 app.metrics_scroll = 0;
@@ -671,9 +686,10 @@ mod tests {
         let tree = crate::repository::scan(temp.path()).unwrap();
         app.metrics = Some(crate::metrics::analyze(temp.path(), &tree, &app.project));
         app.explorer.apply_tree(tree);
-        app.overview
-            .expanded
-            .insert(super::super::overview::Group::Largest);
+        app.overview.expanded.extend([
+            super::super::overview::Group::Additional,
+            super::super::overview::Group::Largest,
+        ]);
         let target = super::super::overview::targets(&app)
             .into_iter()
             .find(|t| matches!(t, super::super::overview::Target::File(..)))

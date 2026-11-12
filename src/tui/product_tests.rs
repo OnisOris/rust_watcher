@@ -83,7 +83,9 @@ async fn guided_search_and_architecture_return_home_without_semantic_requests() 
 #[test]
 fn metric_explanations_use_measured_values_and_keep_missing_data_unknown() {
     let mut app = app();
-    app.overview.expanded.insert(overview::Group::Metrics);
+    app.overview
+        .expanded
+        .extend([overview::Group::Additional, overview::Group::Metrics]);
     app.overview.selected = Target::Metric(Metric::Depth).id();
     let missing = text(&app, 120, 35);
     assert!(missing.contains("Unknown"));
@@ -106,7 +108,9 @@ fn metric_explanations_use_measured_values_and_keep_missing_data_unknown() {
 #[tokio::test]
 async fn context_help_scrolls_without_moving_underlying_selection() {
     let mut app = app();
-    app.overview.expanded.insert(overview::Group::Metrics);
+    app.overview
+        .expanded
+        .extend([overview::Group::Additional, overview::Group::Metrics]);
     app.overview.selected = Target::Metric(Metric::Depth).id();
     let id = app.overview.selected.clone();
     let (tx, mut rx) = mpsc::channel(16);
@@ -244,6 +248,7 @@ fn late_search_failure_retains_diagnostics_without_reopening_old_notice() {
         .unwrap()
         .contains("after leaving"));
     app.switch_view(View::Overview);
+    app.overview.expanded.insert(overview::Group::Additional);
     app.overview.selected = Target::Group(overview::Group::Analysis).id();
     assert!(overview::details(&app)
         .iter()
@@ -313,4 +318,35 @@ fn review_evidence_matches_real_structure_and_never_invents_a_function_anchor() 
     let mut partial = report.clone();
     partial.current_metrics_partial = true;
     assert!(super::findings::hotspot(&partial, file, None).partial);
+}
+
+#[test]
+fn directory_context_uses_direct_children_and_preserves_selection_on_resize() {
+    let mut app = app();
+    let root = app.project.workspace_root.clone();
+    let tree = crate::repository::scan(&root).unwrap();
+    app.explorer.apply_tree(tree);
+    app.switch_view(View::Explorer);
+    let summary = app
+        .explorer
+        .directory_summary(std::path::Path::new(""))
+        .unwrap();
+    let children = app
+        .explorer
+        .direct_children(std::path::Path::new(""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        children.len(),
+        summary.directories + summary.rust_files + summary.other_files + summary.symlinks
+    );
+    assert_eq!(summary.rust_files, 0); // src/main.rs is a descendant, not a direct child.
+    assert!(summary.directories > 0);
+    let selected = app.explorer.selected_entry().unwrap().path;
+    for (w, h) in [(80, 20), (100, 30), (120, 35), (160, 45)] {
+        let rendered = text(&app, w, h);
+        assert!(rendered.contains("DIRECTORY CONTEXT"));
+        assert!(rendered.contains("Direct children only"));
+        assert!(rendered.contains("Enter toggle"));
+        assert_eq!(app.explorer.selected_entry().unwrap().path, selected);
+    }
 }

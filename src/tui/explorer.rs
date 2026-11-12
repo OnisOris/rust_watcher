@@ -42,6 +42,13 @@ pub(super) struct VisibleEntry {
     pub depth: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct DirectorySummary {
+    pub directories: usize,
+    pub rust_files: usize,
+    pub other_files: usize,
+    pub symlinks: usize,
+}
 #[derive(Debug, Clone)]
 pub(super) struct ExplorerState {
     pub tree: Option<RepositoryTree>,
@@ -50,6 +57,7 @@ pub(super) struct ExplorerState {
     pub selected: usize,
     expanded: HashSet<PathBuf>,
     children_by_parent: HashMap<PathBuf, Vec<usize>>,
+    directory_summaries: HashMap<PathBuf, DirectorySummary>,
     visible: Vec<VisibleEntry>,
     pub file: Option<FileState>,
     pub right_mode: ExplorerRightMode,
@@ -67,6 +75,7 @@ impl ExplorerState {
             selected: 0,
             expanded: initial_expansion(project),
             children_by_parent: HashMap::new(),
+            directory_summaries: HashMap::new(),
             visible: vec![root_entry()],
             file: None,
             right_mode: ExplorerRightMode::File,
@@ -374,21 +383,30 @@ impl ExplorerState {
         }
     }
 
-    pub fn direct_child_counts(&self, path: &Path) -> (usize, usize) {
-        let Some(tree) = &self.tree else {
-            return (0, 0);
-        };
+    pub fn directory_summary(&self, path: &Path) -> Option<DirectorySummary> {
+        self.tree.as_ref()?;
+        Some(
+            self.directory_summaries
+                .get(path)
+                .copied()
+                .unwrap_or_default(),
+        )
+    }
+
+    pub fn direct_children(
+        &self,
+        path: &Path,
+    ) -> impl Iterator<Item = &crate::repository::RepoEntry> {
         self.children_by_parent
             .get(path)
             .into_iter()
             .flatten()
-            .fold((0, 0), |(directories, files), index| {
-                if tree.entries[*index].kind == RepoEntryKind::Directory {
-                    (directories + 1, files)
-                } else {
-                    (directories, files + 1)
-                }
-            })
+            .filter_map(|i| self.tree.as_ref()?.entries.get(*i))
+    }
+
+    pub fn direct_child_counts(&self, path: &Path) -> (usize, usize) {
+        let v = self.directory_summary(path).unwrap_or_default();
+        (v.directories, v.rust_files + v.other_files + v.symlinks)
     }
 
     fn select_path(&mut self, path: &Path) {
@@ -414,6 +432,7 @@ impl ExplorerState {
 
     fn rebuild_index(&mut self) {
         self.children_by_parent.clear();
+        self.directory_summaries.clear();
         let Some(tree) = &self.tree else {
             return;
         };
@@ -422,6 +441,20 @@ impl ExplorerState {
                 .entry(entry.path.parent().unwrap_or(Path::new("")).to_path_buf())
                 .or_default()
                 .push(index);
+        }
+        for entry in &tree.entries {
+            let summary = self
+                .directory_summaries
+                .entry(entry.path.parent().unwrap_or(Path::new("")).to_path_buf())
+                .or_default();
+            match entry.kind {
+                RepoEntryKind::Directory => summary.directories += 1,
+                RepoEntryKind::Symlink => summary.symlinks += 1,
+                RepoEntryKind::File if entry.path.extension().is_some_and(|e| e == "rs") => {
+                    summary.rust_files += 1
+                }
+                RepoEntryKind::File => summary.other_files += 1,
+            }
         }
         for children in self.children_by_parent.values_mut() {
             children.sort_by(|a, b| {

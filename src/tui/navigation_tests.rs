@@ -392,14 +392,17 @@ fn overview_renders_loading_candidates_errors_and_small_terminal() {
     app.overview = overview::State::default();
     app.overview.selected = overview::Target::Workspace.id();
     let text = render(&app, 120, 34);
-    assert!(text.contains("MAINTAINABILITY · Rust"));
-    assert!(text.contains("LONGEST FUNCTIONS"));
-    assert!(text.contains("DEEPEST CONTROL FLOW"));
-    assert!(text.contains("Functions") && text.contains("2"));
+    assert!(text.contains("PROJECT SNAPSHOT"));
+    assert!(text.contains("ADDITIONAL DATA"));
+    assert!(!text.contains("LONGEST FUNCTIONS"));
+    assert!(!text.contains("DEEPEST CONTROL FLOW"));
+    assert!(text.contains("Rust functions") && text.contains("2"));
+    app.overview.expanded.insert(overview::Group::Additional);
+    assert!(render(&app, 120, 34).contains("LONGEST FUNCTIONS"));
     app.analyzer_state = AnalyzerState::Error("RA unavailable".into());
-    assert!(render(&app, 80, 20).contains("Functions"));
+    assert!(render(&app, 80, 20).contains("Rust functions"));
     app.maintainability = None;
-    assert!(render(&app, 120, 34).contains("Maintainability: analyzing..."));
+    assert!(render(&app, 120, 34).contains("Rust functions unknown"));
     app.maintainability_error = Some("worker failed".into());
-    assert!(render(&app, 120, 34).contains("Maintainability unavailable"));
+    assert!(render(&app, 120, 34).contains("worker failed"));
 }

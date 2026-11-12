@@ -73,6 +73,7 @@ impl Guide {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::tui) enum Group {
     Start,
+    Additional,
     Hotspots,
     Largest,
     Longest,
@@ -85,8 +86,9 @@ pub(in crate::tui) enum Group {
     Metrics,
 }
 impl Group {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Start,
+        Self::Additional,
         Self::Metrics,
         Self::Hotspots,
         Self::Largest,
@@ -100,7 +102,8 @@ impl Group {
     ];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Start => "UNDERSTAND THIS REPOSITORY",
+            Self::Start => "START EXPLORING",
+            Self::Additional => "ADDITIONAL DATA",
             Self::Hotspots => "GIT HOTSPOTS",
             Self::Largest => "LARGEST SOURCE FILES",
             Self::Longest => "LONGEST FUNCTIONS",
@@ -182,6 +185,11 @@ impl Target {
 pub(in crate::tui) fn targets(app: &App) -> Vec<Target> {
     let mut items = vec![];
     for group in Group::ALL {
+        if !matches!(group, Group::Start | Group::Additional)
+            && !app.overview.expanded.contains(&Group::Additional)
+        {
+            continue;
+        }
         items.push(Target::Group(group));
         if !app.overview.expanded.contains(&group) {
             continue;

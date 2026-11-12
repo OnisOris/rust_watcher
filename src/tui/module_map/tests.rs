@@ -919,3 +919,40 @@ async fn single_crate_auto_modules_focus_back_and_exact_source_without_ra() {
         matches!(rx.recv().await,Some(super::super::worker::AnalyzerCommand::InspectFile{file,..}) if file==std::path::Path::new("src/tui/map/graph.rs"))
     );
 }
+
+#[test]
+fn module_summary_keeps_diagnostics_explicit_and_unknown_values_unknown() {
+    let mut app = App::new(
+        crate::project::Project::discover(std::path::Path::new("tests/fixtures/simple_project"))
+            .unwrap(),
+    );
+    let root = app.project.workspace_root.clone();
+    let tree = crate::repository::scan(&root).unwrap();
+    let g = crate::module_graph::analyze(&root, &tree, &app.project.architecture, || false);
+    app.module_map.apply(g);
+    app.module_map.active = true;
+    app.switch_view(super::super::app::View::Map);
+    let summary = super::inspector::details(&app)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(summary.contains("NEXT ACTIONS"));
+    assert!(summary.contains("not runtime calls"));
+    assert!(!summary.contains("Subtree coverage losses"));
+    assert!(!summary.contains("Own module LOC/functions"));
+    let focus = app.module_map.focus.clone();
+    let selected = app.module_map.selected.clone();
+    app.module_map.show_limits = true;
+    let detail = super::inspector::details(&app)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(detail.contains("DETAILED ANALYSIS"));
+    assert!(detail.contains("Subtree coverage losses"));
+    assert!(detail.contains("Own module LOC/functions: unknown"));
+    assert!(detail.contains("Subtree file LOC           unknown"));
+    assert_eq!(focus, app.module_map.focus);
+    assert_eq!(selected, app.module_map.selected);
+}
