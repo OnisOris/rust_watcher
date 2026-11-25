@@ -51,22 +51,7 @@ pub fn scan(root: &Path) -> Result<RepositoryTree> {
 fn scan_with_limit(root: &Path, limit: usize) -> Result<RepositoryTree> {
     std::fs::read_dir(root)
         .with_context(|| format!("failed to read repository root {}", root.display()))?;
-    let mut builder = WalkBuilder::new(root);
-    builder
-        .hidden(false)
-        .follow_links(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .ignore(true)
-        .parents(true)
-        .sort_by_file_path(|a, b| a.cmp(b))
-        .filter_entry(|entry| {
-            entry.depth() == 0
-                || !entry
-                    .file_type()
-                    .is_some_and(|kind| kind.is_dir() && always_excluded(entry.file_name()))
-        });
+    let builder = walker(root);
 
     let mut tree = RepositoryTree::default();
     for result in builder.build() {
@@ -117,6 +102,27 @@ fn scan_with_limit(root: &Path, limit: usize) -> Result<RepositoryTree> {
     }
     tree.entries.sort_by(entry_order);
     Ok(tree)
+}
+
+pub(crate) fn walker(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .follow_links(false)
+        .require_git(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .ignore(true)
+        .parents(true)
+        .sort_by_file_path(|a, b| a.cmp(b))
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !entry
+                    .file_type()
+                    .is_some_and(|kind| kind.is_dir() && always_excluded(entry.file_name()))
+        });
+    builder
 }
 
 fn always_excluded(name: &std::ffi::OsStr) -> bool {

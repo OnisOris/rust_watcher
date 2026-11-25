@@ -23,6 +23,7 @@ tokio = { version = "1.40", features = ["io-util", "macros", "process", "rt-mult
 url = "2.5"
 syn = { version = "2.0.118", features = ["full", "visit"] }
 proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
+notify = "8"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }
