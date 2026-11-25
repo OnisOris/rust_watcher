@@ -84,7 +84,14 @@ if a.suite == 'all':
         dict(wait='352 Δ',capture='24-max'),
         external("from pathlib import Path;p=Path('src/lsp/client.rs');p.write_text(p.read_text())"),dict(capture='25-identical-no-churn'),
         external("import os;os.utime('src/lsp/client.rs',None)"),dict(capture='26-mtime-no-churn'),
-        dict(measure='idle',seconds=5),dict(probe_keys=['j','k'],repeats=5),
+        external("from pathlib import Path;Path('src/lsp/staged.rs').write_text('// staged replacement\\n')"),
+    dict(wait='staged.rs',capture='26a-staging-already-observed'),
+    external("from pathlib import Path;Path('src/lsp/staged.rs').replace('src/lsp/client.rs')"),
+    dict(wait='706 Δ',capture='26b-atomic-destination-delta'),
+    external("from pathlib import Path;Path('src/lsp/client.rs').write_text('// unchanged\\n')"),
+    dict(wait='Net +0 / -0',capture='26c-atomic-baseline-retained'),
+    dict(keys='c',capture='26d-detailed-density'),
+    dict(measure='idle',seconds=5),dict(probe_keys=['j','k'],repeats=5),
     ],no_color=False)
     root=fixture()
     run('raw-pty/no-color',root,[dict(keys='6',wait='Watching ●'),external(changes),dict(wait='180 Δ',capture='27-no-color'),dict(size=[80,20],capture='28-no-color-80')],no_color=True)

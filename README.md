@@ -783,95 +783,93 @@ Analysis status. This repository ignores `/tmp/tui-qa/` so local QA source copie
 do not enter metrics. Real `tmp`, `tests` and `fixtures` directories in analyzed
 projects remain subject to those projects' own ignore rules.
 
-## Activity v2 · visual Agent Focus
+## Live Heat Explorer · Activity
 
-Press **6 Activity** while another terminal changes the workspace. Activity starts
-its local watcher after the first frame, independently of Git, RA and metrics.
-Initial disk state is baseline. Without telemetry it shows **observed hotspots**,
-never claims that an agent is currently editing a file, and cannot observe reads.
+Press **6 Activity** while another terminal changes the workspace. The Explorer
+is the visualization: active physical branches expand automatically, measured
+line churn lights files red, and a compact Change Inspector shows measurements.
+The tree uses 70% of wide terminals; at 80×20 it uses the full content width,
+with compact totals below and **s** for the complete Inspector/Summary.
+Initial disk contents are baseline, including existing uncommitted changes.
+Filesystem observation works without Git, rust-analyzer or an agent adapter.
 
-**Tree** (default) is a three-panel attention map: a physical Project Tree Heatmap,
-a larger central Focus, and a compact Signal Summary. Active paths auto-expand;
-directories come first, with activity ranked above cold baseline entries. Focus
-shows the hottest file, its breadcrumb, sibling changes and recent path flow.
-Manual tree selection is independent of this automatic focus; **Space** pins a
-selected file, **z** pauses/resumes following, **r** selects/follows the hottest
-file. When a pin disappears from the filtered set, Focus falls back to a matching
-file; an empty set has an explicit waiting state. **o** opens the selected exact
-file through the existing Explorer; Esc returns. Deleted/out-of-scope files cannot
-open. **m** visits the existing Module Map without moving its Focus/Selection.
+**Δ means added + deleted physical lines between observed revisions.** Replacing
+one line counts as two changed lines. Identical saves, mtime changes, LF/CRLF
+conversion and pure renames add no churn. New/deleted text contributes its line
+count. Final newline alone does not change this physical-line measure. The UI
+never estimates changes from notification frequency or agent claims.
 
-**v** cycles Tree → Timeline → Map preview. **t** opens/closes Timeline: a real
-5-second bucket histogram above a selectable chronology and selected-moment
-provenance. j/k or PgUp/PgDn selects a moment; Enter/o opens that event's file.
-Map preview groups real files into physical directory cards, with j/k and paging
-for clusters. It is a bounded containment preview, not a semantic constellation.
-**s** toggles an expanded filtered Summary; j/k scrolls it.
+**x** switches **LIVE** (last 120s, exponential 45s half-life) and **SESSION**
+(sum of measured observed revisions, no decay). Returning to initial content
+leaves positive session churn but zero net diff; net is shown when available.
+The existing **w** retained/60s/15s filter remains an intersection: LIVE additionally
+limits to 120s, SESSION+retained uses durable file/kind sums even after Timeline
+retention. Timeline remains a bounded history; incomplete history is labeled.
+No missing intermediate edit is reconstructed.
 
-Controls within Activity:
+Red uses absolute weighted-volume thresholds, never repository-relative ranking:
+0 neutral; >0 muted; 8 dark; 32 warm; 96 bright; 256 saturated. Bars remain readable
+without color. Directory sums deduplicate descendants; ancestor totals overlap
+and must not be added together. Markers **+ ~ × →** show create/modify/delete/rename;
+**A** marks agent reports, which do not create measured heat. Unknown deltas show
+**?**, partial sums **+?**. Neither unknown nor a reported read is a zero measurement.
+
+**Smart Follow** reveals and centers the observed hot branch. It holds a file
+within its cluster; another cluster must be at least 1.5× hotter for 1s to take
+over. **j/k**, arrows and paging suspend camera movement for 15s while observation
+continues. **z** resumes immediately or toggles follow; **Space** pins indefinitely;
+**r** resets to hottest. Manual selection, observed focus and ordinary Explorer
+selection stay independent. Rename transfers selection/pin; deleted files remain
+inspectable but cannot open. **o** reuses exact Explorer source, Esc returns;
+**m** visits the existing Module Map without moving its Focus/Selection.
 
 | Key | Action |
 | --- | --- |
-| j/k, arrows, PgUp/PgDn | Select row, moment or cluster |
-| Enter, Right/l; Left | Expand/collapse directory; collapse/go to parent |
-| v / t / s | View cycle / Timeline / Summary |
-| z / Space / r | Follow toggle / pin selected file / follow hottest |
-| e | Manual / expand active branches / auto-focus tree |
-| h | Heat coloring on/off |
-| c | Comfortable / detailed / compact density |
-| n | Heat / name / recent sorting; always directories first |
+| x | LIVE / SESSION |
+| j/k, arrows, PgUp/PgDn | Select row/moment/cluster; manual camera pause |
+| Enter, Right/l; Left | Expand/collapse; collapse/go to parent |
+| v / t / s | Tree–Timeline–Map preview / Timeline / Summary |
+| z / Space / r | Resume/toggle follow / pin file / follow hottest |
+| e / n / c | Manual–expand–follow / heat–name–recent sort / density |
+| h | Heat color on/off; numeric measurements remain |
 | a | Merged / filesystem / agent reports |
 | f | All / modified / created-deleted / renamed / agent / hot (15s) |
-| w | Retained session events / last 60s / last 15s |
-| p | Workspace / src / tests / docs / config paths |
-| b / d | All-Touched-Recent-Modified files / directories-only |
-| o / m | Existing exact Explorer / existing Module Map |
+| w | Retained / last 60s / last 15s |
+| p | Workspace / src / tests / docs / config |
+| b / d | All–Touched–Recent–Modified files / directories-only |
+| o / m / ? | Exact Explorer / existing Module Map / contextual help |
 
-All filters intersect and apply to tree, Focus, statistics, histogram and timeline.
-Config scope means config/ or .toml/.yaml/.yml/.json/.gitignore/.ignore paths,
-not semantic classification. **Statistics cover retained matching events**, and
-change mix counts events, while directory badges count unique files. Overlapping
-ancestor/subtree counts must not be summed. All files also shows dim baseline
-context. An earlier session fact outside the retained event window keeps a dim
-`M*`/`N*`/`D*`/`R*`/`A*` marker; the asterisk does not enter filtered-window counts.
+Filters intersect across tree, heat, Inspector, rankings and Timeline. Config
+scope means config/ or .toml/.yaml/.yml/.json/.gitignore/.ignore physical paths.
+All files includes calm baseline context; prior facts outside a selected window
+retain dim starred markers. Timeline uses observed UTC, with adapter-reported time
+separate in Details. **v** retains the physical directory Map preview, not semantic
+edges. Agent reports and filesystem facts never establish causal attribution.
 
-Event colors: **M** modified cyan, **N** new green, **D** deleted rose, **R** renamed
-violet, **A** agent reports amber (including reported reads). Intensity has four
-levels: dim, normal, bold, bold+underline. Recency weights are 8/5/2/1/0 for ages
-<5s / <15s / <60s / <120s / older; a capped frequency multiplier prevents an old
-write storm from overwhelming a fresh signal. Directory heat sums unique-file
-heat. A hot Focus border changes emphasis once per second for at most 15s.
-Cold observations remain facts; no animation runs at frame rate. NO_COLOR retains
-markers, selection and text. Heat means observed recency/frequency, not importance,
-quality, productivity or proof of agent intent.
+One existing background `notify` worker coalesces hints over 150ms, checks affected
+paths and scans newly created subtrees using RepositoryTree ignores. Explicit OS
+gaps and ignore changes may rescan; newly admitted existing files become baseline.
+Snapshots retain initial/latest UTF-8 text with shared storage, capped at **32 MiB
+payload**, **512 KiB/file**, **65,536 lines/file**. Binary, unreadable, out-of-budget
+or missing baselines stay unknown. Diff runs outside rendering with a linear
+frontier, **250,000 work steps / approximately 10ms per comparison**. Metadata,
+transient read/diff buffers and the bounded physical-tree index add overhead.
+Sources are never persisted, logged or transmitted. No new dependency is added.
 
-Focus pattern describes the distribution of the latest 20 matching file events
-within 60s: fewer than 3 is insufficient evidence; >=75% in one immediate parent
-is concentrated, otherwise distributed. Provenance reports filesystem/agent event
-counts separately. Both sources on one file do not establish causation. Timeline
-uses observation time in UTC; adapter-reported time stays separate in Details.
-Below 110 columns the tree and Focus stay visible with a compact summary under
-Focus; at 80×20 extended flow/rankings are available through Summary. The minimum
-supported terminal size remains 80×20.
+Initial snapshot coverage and measurement loss are visible as **Change measurement:
+Partial**; missing delivery/history as **Activity history incomplete**. Existing
+budgets remain 1,024 raw notifications, 256 messages, 1,000 retained events, 5,000
+touched files and 50,000 repository entries. Projection refresh is at most once a
+second in idle, immediately on delivered changes; rendering/selection never reads
+or diffs sources. No analyzer, Cargo metadata or Git pass restarts on saves. Exit
+joins the watcher. Filesystem reads may be delayed by the OS, and short-lived
+intermediate revisions can coalesce away.
 
-Ingestion is unchanged: one `notify` watcher uses RepositoryTree ignores, never
-follows symlinks, coalesces notifications over 150 ms, checks affected paths and
-scans new directory subtrees. Initial discovery, ignore-policy changes and explicit
-OS gaps may rescan; newly admitted existing files establish scope baseline rather
-than fabricated creation events. No file contents are retained for activity.
-There is no server, daemon, network stream or additional semantic pipeline.
-
-Budgets remain 1,024 raw notifications, 256 delivered messages, 1,000 retained
-events, 5,000 touched files, a 50,000-entry repository bound and at most 50 timeline
-items per display window. The 50 ms existing input tick drains bounded batches;
-heat/projections refresh once per second, while the physical tree cache rebuilds
-on structural/filter changes rather than selection/paint. Overflow, invalid data
-and retention limits visibly mark **Activity incomplete**. Exit joins the watcher.
-
-The final limitations, actual PTY captures and local measurements are documented
-in [Activity v2 report](docs/ux/agent-focus-v2-report.md). The v1 report and its QA
-script describe the historical v1 key scheme; current reproduction uses
-`python3 scripts/activity_v2_qa.py --binary target/release/wt` with pyte/Pillow.
+See [architecture](docs/architecture/live-heat-explorer-v1.md) and
+[acceptance report](docs/ux/live-heat-explorer-v1-report.md). Historical v1/v2 reports
+retain their original event-frequency heat definitions and binary identities.
+Reproduce current local QA with the existing pyte/Pillow environment:
+`python3 scripts/live_heat_qa.py --binary target/release/wt`.
 
 ### Optional local agent adapter
 
@@ -911,13 +909,13 @@ python3 scripts/activity_producer.py /tmp/agent.jsonl read src/lib.rs
 python3 scripts/activity_producer.py /tmp/agent.jsonl test
 ```
 
-Watcher limitations: very short-lived changes can coalesce away; equal-size
-content changes with restored modification timestamps can be missed. Startup
+Watcher limitations: very short-lived changes can coalesce away; events never
+delivered by the OS cannot be recovered. Hinted paths are compared even when
+size/mtime are unchanged. Startup
 snapshot acquisition is a baseline boundary, not an audit of edits made while
 it is being acquired. OS delivery is best effort; explicit gaps are marked but
-undetectable OS omissions cannot be proven absent. Activity holds no file content,
-Git diff, ownership inference, function activity, productivity score or permanent
-session history. Existing analysis remains a startup snapshot. For development
+undetectable OS omissions cannot be proven absent. Activity retains only bounded in-memory content snapshots; it has no Git diff,
+ownership inference, function activity, productivity score or permanent session history. Existing analysis remains a startup snapshot. For development
 verification and v2 proposals see [Agent Focus acceptance report](docs/ux/agent-focus-v1-report.md).
 
 ## Headless semantic summary
