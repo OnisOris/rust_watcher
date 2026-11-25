@@ -333,3 +333,59 @@ fn correlated_rename_moves_file_identity_without_double_counting() {
         Some(Path::new("src/old.rs"))
     );
 }
+
+#[test]
+fn previously_observed_staging_file_replaces_destination_without_losing_its_baseline() {
+    let t = tempfile::tempdir().unwrap();
+    write(t.path(), "src/destination.rs", "old\nkeep\n");
+    let o = Observation::start(t.path().to_path_buf(), None).unwrap();
+    let mut s = State::default();
+    receive(&o, &mut s, |s| s.watching);
+    write(t.path(), "src/staged.rs", "new\nkeep\n");
+    receive(&o, &mut s, |s| {
+        s.touched.contains_key(Path::new("src/staged.rs"))
+    });
+    fs::rename(
+        t.path().join("src/staged.rs"),
+        t.path().join("src/destination.rs"),
+    )
+    .unwrap();
+    receive(&o, &mut s, |s| {
+        s.touched.contains_key(Path::new("src/destination.rs"))
+            && s.files.get(Path::new("src/staged.rs")) == Some(&false)
+    });
+    let e = s
+        .events
+        .iter()
+        .find(|e| e.path.as_deref() == Some(Path::new("src/destination.rs")))
+        .unwrap();
+    assert_eq!(e.kind, Kind::Modified);
+    let m = e.measurement.unwrap();
+    assert_eq!(
+        m.delta.unwrap(),
+        content::LineDelta {
+            added: 1,
+            deleted: 1
+        }
+    );
+    assert_eq!(m.net.unwrap().churn(), 2);
+    write(t.path(), "src/destination.rs", "old\nkeep\n");
+    receive(&o, &mut s, |s| {
+        s.events
+            .iter()
+            .filter(|e| e.path.as_deref() == Some(Path::new("src/destination.rs")))
+            .count()
+            == 2
+    });
+    assert_eq!(
+        s.events
+            .back()
+            .unwrap()
+            .measurement
+            .unwrap()
+            .net
+            .unwrap()
+            .churn(),
+        0
+    );
+}

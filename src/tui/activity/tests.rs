@@ -297,3 +297,39 @@ fn no_color_keeps_absolute_heat_bars_and_unknown_is_not_zero() {
     assert!(text.contains("▒░··"));
     assert!(text.contains("? Δ"));
 }
+
+#[test]
+fn agent_only_content_is_unmeasured_and_density_has_visible_detail() {
+    let (_t, mut app) = app();
+    app.switch_view(View::Activity);
+    let mut e = Event::filesystem(Kind::Read, "src/lib.rs".into());
+    e.source = Source::Agent;
+    app.activity.data.apply(e);
+    app.activity.refresh();
+    let text = frame(&app, 120, 35);
+    assert!(text.contains("not measured"));
+    assert!(text.contains("Added ?"));
+    assert!(!text.contains("Added +0"));
+    assert!(!text.contains("Churn 0"));
+    measured(&mut app.activity, "src/lib.rs", 180, Instant::now());
+    app.activity.refresh();
+    app.activity.density = 2;
+    assert!(frame(&app, 120, 35).contains("+180/-0"));
+    app.activity.density = 0;
+    assert!(!frame(&app, 120, 35).contains("+180/-0"));
+}
+#[test]
+fn wide_unicode_filenames_keep_delta_inside_the_tree() {
+    let (_t, mut app) = app();
+    app.switch_view(View::Activity);
+    measured(
+        &mut app.activity,
+        &format!("src/{}.rs", "深".repeat(80)),
+        180,
+        Instant::now(),
+    );
+    app.activity.refresh();
+    let text = frame(&app, 80, 20);
+    assert!(text.contains("180 Δ"));
+    assert!(text.contains('…'));
+}

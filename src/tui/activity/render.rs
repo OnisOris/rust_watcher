@@ -73,8 +73,12 @@ fn label(p: &Path) -> String {
     }
 }
 fn measured(t: crate::activity::heat::Totals) -> String {
-    if t.measured == 0 && t.unknown > 0 {
-        "?".into()
+    if t.measured == 0 {
+        if t.unknown > 0 {
+            "?".into()
+        } else {
+            "not measured".into()
+        }
     } else {
         format!("{}{}", t.churn(), if t.unknown > 0 { "+?" } else { "" })
     }
@@ -256,7 +260,9 @@ fn tree(frame: &mut Frame<'_>, area: Rect, s: &State) {
                     crate::activity::heat::bar(score),
                     measured(totals),
                     "",
-                    if r.dir {
+                    if s.density == 2 && totals.measured > 0 {
+                        format!(" +{}/-{}", totals.added, totals.deleted)
+                    } else if r.dir && s.density != 0 {
                         format!(" · {count}f")
                     } else {
                         String::new()
@@ -276,11 +282,17 @@ fn tree(frame: &mut Frame<'_>, area: Rect, s: &State) {
             );
             let room = width.saturating_sub(suffix.chars().count());
             let mut title: String = prefix.chars().take(room).collect();
-            if prefix.chars().count() > room && room > 0 {
+            let clipped = Span::raw(&prefix).width() > room;
+            while Span::raw(&title).width() > room {
                 title.pop();
+            }
+            if clipped && room > 0 {
+                while Span::raw(&title).width() >= room {
+                    title.pop();
+                }
                 title.push('…');
             }
-            let padding = room.saturating_sub(title.chars().count());
+            let padding = room.saturating_sub(Span::raw(&title).width());
             ListItem::new(format!("{title}{}{suffix}", " ".repeat(padding)))
                 .style(heat_style(s, 0, score))
         })

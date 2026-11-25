@@ -8,9 +8,17 @@ fn measurements(s: &State) -> Vec<Line<'static>> {
             "{} files changed · {} observed",
             snap.changed_files, snap.filesystem
         )),
-        Line::raw(format!("{} measured changed lines", measured(snap.totals))),
+        Line::raw(if snap.totals.measured == 0 && snap.totals.unknown == 0 {
+            "Line changes: not measured".into()
+        } else {
+            format!("{} measured changed lines", measured(snap.totals))
+        }),
         Line::styled("Δ = added + deleted", Style::default().fg(theme::MUTED)),
-        Line::raw(format!("+{} / -{}", snap.totals.added, snap.totals.deleted)),
+        Line::raw(if snap.totals.measured == 0 {
+            "Added ? / Deleted ? · not measured".into()
+        } else {
+            format!("+{} / -{}", snap.totals.added, snap.totals.deleted)
+        }),
     ];
     if snap.totals.unknown > 0 {
         lines.push(Line::styled(
@@ -23,13 +31,11 @@ fn measurements(s: &State) -> Vec<Line<'static>> {
     if let Some(row) = s.rows.get(s.selected) {
         lines.push(Line::raw(label(&row.path)));
         if let Some(f) = snap.files.get(&row.path) {
-            lines.push(Line::raw(
-                if f.totals.measured == 0 && f.totals.unknown > 0 {
-                    "Added ?  Deleted ?".into()
-                } else {
-                    format!("Added +{}  Deleted -{}", f.totals.added, f.totals.deleted)
-                },
-            ));
+            lines.push(Line::raw(if f.totals.measured == 0 {
+                "Added ?  Deleted ?".into()
+            } else {
+                format!("Added +{}  Deleted -{}", f.totals.added, f.totals.deleted)
+            }));
             lines.push(Line::raw(format!(
                 "Churn {} · {}",
                 measured(f.totals),
@@ -56,10 +62,8 @@ fn measurements(s: &State) -> Vec<Line<'static>> {
                 d.changed_files
             )));
             lines.push(Line::raw(format!(
-                "+{} / -{} · {} Δ",
-                d.totals.added,
-                d.totals.deleted,
-                d.totals.churn()
+                "Measured churn: {} Δ",
+                measured(d.totals)
             )));
             lines.push(Line::raw(format!(
                 "{} unknown delta files",
@@ -74,18 +78,22 @@ fn measurements(s: &State) -> Vec<Line<'static>> {
     lines.push(Line::raw(""));
     lines.push(heading("HOTTEST BRANCHES"));
     for path in snap.clusters.iter().take(3) {
-        let (churn, volume) = snap
+        let (totals, volume) = snap
             .files
             .iter()
             .filter(|(p, _)| p.parent().unwrap_or(Path::new("")) == path)
-            .fold((0u64, 0.), |(n, v), (_, f)| {
-                (n.saturating_add(f.totals.churn()), v + f.volume)
-            });
+            .fold(
+                (crate::activity::heat::Totals::default(), 0.),
+                |(mut n, v), (_, f)| {
+                    n.merge(f.totals);
+                    (n, v + f.volume)
+                },
+            );
         lines.push(Line::styled(
             format!(
                 "{} {} Δ",
                 crate::activity::heat::bar(crate::activity::heat::level(volume)),
-                churn
+                measured(totals)
             ),
             heat_style(s, 0, crate::activity::heat::level(volume)),
         ));

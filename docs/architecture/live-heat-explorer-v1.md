@@ -25,8 +25,9 @@ entries. Initial/unchanged snapshots share storage. Each read is capped at 512 K
 memory. No source text is logged, persisted or transmitted. Coverage is reported
 as measured initial files / eligible baseline files and partial if any are missing.
 Ignore-policy admission establishes baseline; deletion retains initial content;
-rename transfers both snapshots and identity. An overwritten destination is
-compared to the moved source revision. A same-content save/mtime change does not
+rename transfers both snapshots and identity. An overwritten destination keeps its own initial/latest baseline and is compared
+to that previous destination revision; disappearance of an already observed
+staging file remains a separate in-scope filesystem fact. A same-content save/mtime change does not
 add churn. Reconciliation compares hints even when size/mtime are unchanged.
 Intermediate revisions coalesced within 150 ms cannot be reconstructed.
 

@@ -370,6 +370,15 @@ fn run(
                     && disk.scope.admitted(root, new)
                 {
                     if let Some(stamp) = stamp(&root.join(new)) {
+                        if disk.known.contains_key(new) {
+                            // A watched temporary/source file replaced an existing destination.
+                            // Compare against the destination revision, retaining its initial baseline.
+                            disk.reconcile(root, new.clone(), tx, lost);
+                            disk.reconcile(root, old.clone(), tx, lost);
+                            renamed.insert(old.clone());
+                            renamed.insert(new.clone());
+                            continue;
+                        }
                         disk.known.remove(old);
                         disk.known.insert(new.clone(), stamp);
                         let mut event = Event::filesystem(Kind::Renamed, new.clone());
