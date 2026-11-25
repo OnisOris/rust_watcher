@@ -19,6 +19,7 @@ pub(super) enum View {
     Calls,
     Explorer,
     Map,
+    Activity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +154,7 @@ impl From<CallTarget> for CallVisit {
 }
 
 pub(super) struct App {
+    pub activity: super::activity::State,
     pub graph_request: u64,
     pub graph_expansions: usize,
     pub journey: super::journey::State,
@@ -194,6 +196,7 @@ impl App {
     pub(super) fn new(project: Project) -> Self {
         let explorer = ExplorerState::new(&project);
         Self {
+            activity: Default::default(),
             journey: Default::default(),
             graph_request: 0,
             graph_expansions: 0,
@@ -255,6 +258,7 @@ impl App {
             View::Symbols => Pane::Symbols,
             View::Calls => Pane::CallCurrent,
             View::Explorer => Pane::ExplorerTree,
+            View::Activity => Pane::Project,
             View::Map => Pane::MapGraph,
         };
     }
@@ -533,6 +537,7 @@ impl App {
             View::Overview => Pane::Details,
             View::Symbols => Pane::Inspector,
             View::Calls => Pane::CallCurrent,
+            View::Activity => Pane::Details,
             View::Map => Pane::MapInspector,
             View::Explorer => {
                 self.explorer.right_mode = ExplorerRightMode::Inspector;

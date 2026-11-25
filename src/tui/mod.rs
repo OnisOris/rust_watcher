@@ -1,3 +1,4 @@
+mod activity;
 mod app;
 mod call_graph;
 mod components;
@@ -40,13 +41,25 @@ pub(super) enum RepositoryEvent {
     Error(String),
 }
 
-pub async fn run(project: Project) -> Result<()> {
+pub async fn run(project: Project, activity_stream: Option<std::path::PathBuf>) -> Result<()> {
     event::install_panic_hook();
     let mut terminal = event::TerminalSession::enter()?;
     let mut app = App::new(project.clone());
 
     // The first frame intentionally precedes rust-analyzer startup.
     terminal.draw(&app)?;
+
+    let observation = crate::activity::watcher::Observation::start(
+        app.project.workspace_root.clone(),
+        activity_stream,
+    );
+    let observation = match observation {
+        Ok(w) => Some(w),
+        Err(e) => {
+            app.activity.data.status = format!("Watch failed: {e}");
+            None
+        }
+    };
 
     let (command_tx, command_rx) = mpsc::channel(16);
     let (event_tx, mut event_rx) = mpsc::channel::<AnalyzerEvent>(64);
@@ -128,8 +141,10 @@ pub async fn run(project: Project) -> Result<()> {
         &command_tx,
         &mut event_rx,
         &mut repository_rx,
+        observation.as_ref(),
     )
     .await;
+    drop(observation);
     drop(repository_rx);
     git_runner.cancel();
     stop_analyzer(analyzer_task, &command_tx).await;

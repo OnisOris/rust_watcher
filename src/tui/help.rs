@@ -43,6 +43,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Metric::Candidates,
                 Metric::Status,
             ],
+            View::Activity => vec![],
             View::Map => vec![
                 Metric::Coverage,
                 Metric::Verified,
@@ -61,11 +62,12 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let mut lines = vec![heading("Explore this view"), Line::raw(match app.view {
         View::Overview => "Choose a task · Enter explore · Tab details. Technical groups expand with Enter.",
+        View::Activity => "h/l branch · j/k select · o source · f filter · d directories · t timeline · s summary",
         View::Map => "Crate: m modules. Module: Enter focus · o source · p review · v relationships · Esc back.",
         View::Calls => "j/k selection · Enter focus · g Graph/List · x expand direct neighbor · o source · Esc back.",
         View::Symbols => "/ search Rust symbol names · Enter inspect exact symbol · c calls · Esc back.",
         View::Explorer => "h/l tree · Enter file or selected RA symbol · c calls in Inspector · Esc file / origin.",
-    }), Line::raw("1–5 views · Tab / Shift+Tab panes · Ctrl+h/l panes · q quit"),
+    }), Line::raw("1–6 views · Tab / Shift+Tab panes · Ctrl+h/l panes · q quit"),
         heading("Interpret measured data · j/k scroll · ? / Esc close")];
     for topic in topics {
         lines.extend(explanations::lines(topic));

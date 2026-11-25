@@ -7,6 +7,10 @@ pub struct Cli {
     #[arg(long, global = true, help = "Emit stable machine-readable JSON")]
     pub json: bool,
 
+    /// Explicit local Agent Focus JSONL adapter stream (v1).
+    #[arg(long, value_name = "FILE")]
+    pub activity_stream: Option<PathBuf>,
+
     #[arg(
         value_name = "PATH",
         default_value = ".",

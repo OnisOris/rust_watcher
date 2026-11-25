@@ -1,3 +1,4 @@
+mod activity;
 mod architecture;
 mod cli;
 mod git_analysis;
@@ -105,7 +106,7 @@ async fn execute(cli: &Cli) -> Result<()> {
         return Ok(());
     }
     if cli.command.is_none() && !cli.json {
-        return tui::run(project).await;
+        return tui::run(project, cli.activity_stream.clone()).await;
     }
     let mut analyzer = RustAnalyzer::start(project, Path::new("rust-analyzer")).await?;
     let result = run(cli, &mut analyzer).await;

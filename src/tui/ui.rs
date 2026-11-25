@@ -52,6 +52,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
         View::Symbols => render_symbols_view(frame, rows[1], app),
         View::Calls => render_calls_view(frame, rows[1], app),
         View::Explorer => render_explorer_view(frame, rows[1], app),
+        View::Activity => super::activity::render(frame, rows[1], app),
         View::Map => super::map::render(frame, rows[1], app),
     }
     frame.render_widget(
@@ -76,6 +77,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         (View::Calls, "3 Calls", "3 CALL"),
         (View::Explorer, "4 Explorer", "4 FILE"),
         (View::Map, "5 Map", "5 MAP"),
+        (View::Activity, "6 Activity", "6 ACT"),
     ];
     let short = area.width < 110;
     let mut tabs = vec![components::status_label(" wt ", theme::ACCENT)];
@@ -162,6 +164,7 @@ fn footer_text(app: &App) -> &'static str {
         Overlay::Search => " type search · ↑/↓ results · Enter inspect · Esc close · Ctrl+c quit",
         Overlay::Help => " ? / Esc close help · q quit",
         Overlay::None => match app.view {
+            View::Activity => " j/k select · h/l branch · Enter drill · o source · f filter · d dirs · t timeline · s summary",
             View::Map if app.module_map.active => {
                 " Enter focus · o source · p review · v links · a details · Tab pane · Esc back"
             }

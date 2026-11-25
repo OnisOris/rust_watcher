@@ -135,6 +135,7 @@ pub(super) fn breadcrumb(app: &App) -> String {
             View::Calls => "Calls",
             View::Explorer => "Source",
             View::Map => "Architecture",
+            View::Activity => "Activity",
         }
     }
     let mut route = vec![label(app.view)];

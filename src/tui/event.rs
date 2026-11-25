@@ -23,6 +23,7 @@ pub(super) async fn run_loop(
     commands: &mpsc::Sender<AnalyzerCommand>,
     events: &mut mpsc::Receiver<AnalyzerEvent>,
     repository: &mut mpsc::Receiver<super::RepositoryEvent>,
+    observation: Option<&crate::activity::watcher::Observation>,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     let mut repository_open = true;
@@ -73,6 +74,7 @@ pub(super) async fn run_loop(
                 terminal.draw(app)?;
             }
             _ = tick.tick() => {
+                if super::activity::poll(app, observation) {terminal.draw(app)?;}
                 if app.journey.pending.is_some() {
                     super::journey::flush(app,commands).await;
                     if app.journey.pending.is_none() {terminal.draw(app)?;}
@@ -145,7 +147,7 @@ pub(super) async fn handle_key(
     if app.journey.pending.is_some()
         && matches!(
             key.code,
-            KeyCode::Char('j' | 'k' | '/' | '1'..='5')
+            KeyCode::Char('j' | 'k' | '/' | '1'..='6')
                 | KeyCode::Up
                 | KeyCode::Down
                 | KeyCode::Enter
@@ -176,6 +178,12 @@ pub(super) async fn handle_key(
             }
             return Ok(false);
         }
+    }
+    if app.view == View::Activity
+        && app.overlay == Overlay::None
+        && super::activity::handle_key(app, key, commands).await
+    {
+        return Ok(false);
     }
     if key.code == KeyCode::Esc {
         if let Some((id, target, scope)) = app.escape() {
@@ -235,6 +243,7 @@ pub(super) async fn handle_key(
             KeyCode::Char('2') => app.switch_view(View::Symbols),
             KeyCode::Char('3') => open_calls(app, commands).await?,
             KeyCode::Char('4') => app.switch_view(View::Explorer),
+            KeyCode::Char('6') => app.switch_view(View::Activity),
             KeyCode::Char('5') => app.switch_view(View::Map),
             KeyCode::Char('g') if app.view == View::Map && app.module_map.active => {
                 app.module_map.diagram = !app.module_map.diagram
