@@ -49,7 +49,7 @@ Open another checkout:
 wt /path/to/project
 ```
 
-The first frame appears before repository scanning or rust-analyzer starts. The five persistent views are `1 Overview`, `2 Symbols`, `3 Calls`, `4 Explorer`, and `5 Map`. The header reports independent RA/Git readiness and partial states. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact selected symbol:
+The first frame appears before repository scanning or rust-analyzer starts. The six persistent views are `1 Overview`, `2 Symbols`, `3 Calls`, `4 Explorer`, `5 Map`, and `6 Activity`. The header reports independent RA/Git readiness and partial states. In Symbols, press `/`, search for a name such as `request`, select with `j`/`k` or the arrow keys, and press Enter for a progressively populated, scrollable Inspector. Press `c` there to open Calls around that exact selected symbol:
 
 ```text
 2
@@ -148,7 +148,7 @@ Zero calls, loading, unsupported hierarchy, RPC errors and truncation are distin
 ### Interactive Call Graph
 
 Within **3 Calls**, **g** switches the existing List and a local **Graph**.
-No sixth tab or extra analyzer is started. The default is still List; without a
+No extra graph tab or analyzer is started. The default is still List; without a
 target, Binary entrypoints and the existing exploration routes remain available.
 Graph initially reuses only the two one-hop RA results already requested for
 Calls. **x** on a direct caller requests its incoming side; on a direct callee it
@@ -782,6 +782,107 @@ Transient action notices clear when changing views; backend failures remain in
 Analysis status. This repository ignores `/tmp/tui-qa/` so local QA source copies
 do not enter metrics. Real `tmp`, `tests` and `fixtures` directories in analyzed
 projects remain subject to those projects' own ignore rules.
+
+## Agent Focus · live repository activity
+
+Press **6 Activity** while another terminal changes the workspace. Activity starts
+an independent local watcher after the first frame. It works without Git or
+rust-analyzer; switching tabs does not restart discovery, semantics or metrics.
+Initial disk state, including existing uncommitted edits, is baseline. Only
+subsequent observed changes enter session counters. Filesystem evidence never
+identifies the editor or claims an AI agent is currently editing a file.
+
+At widths **110+**, navigate Repository → directory → subdirectory → file in
+horizontal columns; **h/l** moves through the branch, **j/k** selects, Enter drills
+into directories. Below 110 columns a collapsible compact tree uses the same keys.
+**o / Enter** opens a file through the existing Explorer; Esc returns to Activity.
+Deleted/unavailable files retain an explanation and cannot open source. **m**
+visits the existing Map without changing its Focus or Selection.
+
+**f** cycles **Touched files** (default), **Recent activity** (60 seconds),
+**Modified only** (filesystem observations), **All files** (baseline plus observed
+locations). An empty filter offers All files. **d** switches directories/files;
+**t / Tab** selects the timeline, **j/k / PgUp/PgDn** traverses retained events,
+and **o / Enter** opens their source. **s** shows the live session summary;
+**s / Esc** closes it. Summary counts are unique observed files, with created and
+deleted facts reported separately; directory subtrees overlap and must not be
+summed. A correlated file rename transfers its touched identity to the new path;
+older timeline entries retain the locations observed at the time.
+
+Markers supplement colors: **M** modified/renamed, **N** created, **D** deleted,
+**R** reported agent read, **A** other explicit agent activity, **?** unknown or
+incomplete status. Recent files use amber for 60 seconds, then ordinary text;
+changed directory branches retain sky emphasis and unique-file counts. Persistent
+filesystem markers remain after recent emphasis expires. NO_COLOR preserves text
+and selection. Timeline times are **observation time in UTC**, newest first;
+agent-provided time appears separately in event Details.
+
+The watcher shares RepositoryTree's ignore policy, including `.gitignore` even
+without Git, `.ignore`, global excludes and the fixed excluded directories. It
+never follows symlinks. Notifications coalesce over 150 ms; metadata checks touch
+affected paths, with bounded admission caching for adjacent files. Initial scan,
+ignore-policy changes and explicit OS gaps may rescan. Newly admitted files
+after a policy change establish a scope baseline, not fabricated creation events. Directory creation scans
+only that subtree. No file contents are retained for activity. Atomic saves are
+compared against the known file; supported paired file renames are correlated,
+otherwise the OS observations can appear as deletion/creation. Activity does not
+refresh semantic analyses or ranked metrics.
+
+Budgets: **1,024 raw notifications**, **256 delivered messages**, **1,000 retained
+events**, **5,000 touched files**, **50 timeline entries per display window** and
+the scanner's **50,000-entry** bound. The existing event loop drains bounded
+batches at its 50 ms tick; filesystem batches arrive about every 150 ms and idle
+Activity refreshes once a second. Overflow, backend gaps, invalid records or
+retention limits visibly mark **Activity incomplete**. Counts then describe
+retained observations, not a complete audit. Exiting stops and joins the watcher;
+there is no daemon, extra process per file, server, network stream or persistence.
+
+### Optional local agent adapter
+
+Enable a journal explicitly:
+
+```bash
+wt /path/to/project --activity-stream /tmp/agent.jsonl
+```
+
+The file is a **proposed adapter contract**, not a native Codex/OpenClaw log.
+A compatible external adapter must append one UTF-8 JSON object per line:
+
+```json
+{"version":1,"session":"adapter-01","source":"test-agent","event":"read","path":"src/lib.rs","timestamp":"2026-11-25T10:30:00Z"}
+```
+
+Supported events: `read`, `write`, `search`, `command`, `test`. Read/write require
+a path. Paths must be admitted workspace files; traversal, external paths and
+symlinks are rejected. Version, event, timestamp and source/session fields are
+validated; v1 timestamps use whole-second UTC `YYYY-MM-DDTHH:MM:SSZ`, source/session
+are nonempty strings up to 128 bytes, unknown fields are rejected. Records are
+capped at **16 KiB**, reads at **64 KiB per poll**. Partial lines wait for newline;
+oversized lines are discarded through their newline. A bounded 1,000-record
+normalized deduplication window suppresses replays. On connection the explicit
+file is read from its beginning; use a fresh stream for a fresh agent session.
+Truncation and Unix inode rotation reset the read offset with an incomplete
+notice. Non-Unix replacement detection covers truncation, not every same-size
+file replacement. Missing/invalid streams retain an explicit status. Journal
+commands are displayed as reported events and are never executed.
+
+Agent writes remain **agent reports**, separate from filesystem confirmation;
+read/search/command reports do not increase filesystem-modified counts. A test
+producer is supplied, with no native agent integration implied:
+
+```bash
+python3 scripts/activity_producer.py /tmp/agent.jsonl read src/lib.rs
+python3 scripts/activity_producer.py /tmp/agent.jsonl test
+```
+
+Watcher limitations: very short-lived changes can coalesce away; equal-size
+content changes with restored modification timestamps can be missed. Startup
+snapshot acquisition is a baseline boundary, not an audit of edits made while
+it is being acquired. OS delivery is best effort; explicit gaps are marked but
+undetectable OS omissions cannot be proven absent. Activity holds no file content,
+Git diff, ownership inference, function activity, productivity score or permanent
+session history. Existing analysis remains a startup snapshot. For development
+verification and v2 proposals see [Agent Focus acceptance report](docs/ux/agent-focus-v1-report.md).
 
 ## Headless semantic summary
 
