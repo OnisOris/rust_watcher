@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--width", type=int, default=120)
     parser.add_argument("--height", type=int, default=35)
+    parser.add_argument("--activity-stream")
     args = parser.parse_args()
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -46,13 +47,15 @@ def main():
     resize(args.width, args.height)
     start = time.monotonic()
     proc = subprocess.Popen(
-        [os.path.abspath(args.binary), os.path.abspath(args.project)],
+        [os.path.abspath(args.binary), os.path.abspath(args.project)]
+        + (["--activity-stream", os.path.abspath(args.activity_stream)] if args.activity_stream else []),
         stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
         env={**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor"},
     )
     os.close(slave)
     raw = bytearray()
     events = []
+    last_producer_at = None
 
     def pump(seconds):
         deadline = time.monotonic() + seconds
@@ -94,6 +97,28 @@ def main():
 
     try:
         for step in json.loads(Path(args.scenario).read_text()):
+            if "exec" in step:
+                began = time.monotonic()
+                result = subprocess.run(step["exec"], cwd=args.project, capture_output=True, text=True, timeout=30)
+                events.append({"external_process_seconds": time.monotonic()-start,
+                               "duration": time.monotonic()-began, "argv": step["exec"],
+                               "exit_code": result.returncode, "stderr": result.stderr[:2000]})
+                result.check_returncode()
+                last_producer_at = time.monotonic()
+            if "measure" in step:
+                def usage():
+                    stat = Path(f"/proc/{proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                    status = Path(f"/proc/{proc.pid}/status").read_text().splitlines()
+                    return {"cpu_ticks": int(stat[11])+int(stat[12]),
+                            "rss_kib": next(line for line in status if line.startswith("VmRSS:")),
+                            "threads": next(line for line in status if line.startswith("Threads:"))}
+                before = usage()
+                began = time.monotonic()
+                pump(step.get("seconds", 3))
+                after = usage()
+                events.append({"measurement": step["measure"], "before": before, "after": after,
+                               "seconds": time.monotonic()-began,
+                               "cpu_percent": (after["cpu_ticks"]-before["cpu_ticks"])/os.sysconf("SC_CLK_TCK")/(time.monotonic()-began)*100})
             if "probe_keys" in step:
                 samples = []
                 for key in step["probe_keys"] * step.get("repeats", 5):
@@ -119,6 +144,12 @@ def main():
                     if proc.poll() is not None or time.monotonic() >= deadline:
                         capture("failure")
                         raise RuntimeError(f"Did not observe {step['wait']!r}")
+            if "wait" in step:
+                events.append({"observed_text": step["wait"], "at_seconds": time.monotonic()-start})
+            if "wait" in step and last_producer_at is not None:
+                events.append({"observed_text": step["wait"],
+                               "after_external_ms": (time.monotonic()-last_producer_at)*1000})
+                last_producer_at = None
             pump(step.get("settle", 0.3))
             if "capture" in step:
                 capture(step["capture"])
@@ -135,6 +166,7 @@ def main():
         (output / "session.json").write_text(json.dumps({
             "binary": args.binary, "project": args.project, "events": events,
             "binary_sha256": digest, "initial_size": [args.width, args.height],
+            "activity_stream": args.activity_stream,
         }, indent=2)+"\n")
         try:
             os.killpg(proc.pid, signal.SIGTERM)
