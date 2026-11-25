@@ -62,7 +62,7 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let mut lines = vec![heading("Explore this view"), Line::raw(match app.view {
         View::Overview => "Choose a task · Enter explore · Tab details. Technical groups expand with Enter.",
-        View::Activity => "h/l branch · j/k select · o source · f filter · d directories · t timeline · s summary",
+        View::Activity => "v Tree/Timeline/Map · j/k select · arrows/Enter tree · o source · z follow · Space pin · r hottest · h heat · a source · f types · b files · w time · p path · e auto · n sort · c density · s summary",
         View::Map => "Crate: m modules. Module: Enter focus · o source · p review · v relationships · Esc back.",
         View::Calls => "j/k selection · Enter focus · g Graph/List · x expand direct neighbor · o source · Esc back.",
         View::Symbols => "/ search Rust symbol names · Enter inspect exact symbol · c calls · Esc back.",

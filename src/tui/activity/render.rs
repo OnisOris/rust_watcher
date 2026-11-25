@@ -1,351 +1,258 @@
+mod focus;
+mod timeline;
 use super::*;
-use crate::activity::{clock, Kind, Source};
+use crate::activity::focus::{action, marker};
 use crate::tui::{components, theme};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::Style,
-    text::Line,
-    widgets::{List, ListItem, ListState, Paragraph, Wrap},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-fn panel(title: impl Into<String>, active: bool) -> ratatui::widgets::Block<'static> {
-    components::styled_panel("", active).title(title.into())
+fn panel(title: impl Into<String>, active: bool) -> Block<'static> {
+    components::styled_panel("", active).title(Line::styled(
+        title.into(),
+        Style::default()
+            .fg(if active { theme::ACCENT } else { theme::MUTED })
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+fn color(e: &activity::Event) -> Color {
+    if e.source == activity::Source::Agent {
+        theme::WARNING
+    } else {
+        match e.kind {
+            activity::Kind::Created => theme::SUCCESS,
+            activity::Kind::Deleted => theme::ERROR,
+            activity::Kind::Renamed => theme::NUMBER,
+            _ => theme::ACCENT,
+        }
+    }
+}
+fn heat_style(s: &State, index: usize, score: u32) -> Style {
+    let base = Style::default().fg(if s.heat {
+        color(&s.data.events[index])
+    } else {
+        theme::TEXT
+    });
+    if !s.heat {
+        return base;
+    }
+    match score {
+        0 => base.add_modifier(Modifier::DIM),
+        1..=4 => base,
+        5..=15 => base.add_modifier(Modifier::BOLD),
+        _ => base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    }
+}
+fn age(at: Instant) -> String {
+    let secs = at.elapsed().as_secs();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+fn name(p: &Path) -> String {
+    p.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+fn label(p: &Path) -> String {
+    if p.as_os_str().is_empty() {
+        "(root)".into()
+    } else {
+        p.display().to_string()
+    }
+}
+fn heading(s: impl Into<String>) -> Line<'static> {
+    Line::styled(s.into(), Style::default().fg(theme::ACCENT).bold())
 }
 pub(in crate::tui) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let s = &app.activity;
     let d = &s.data;
-    s.compact.set(area.width < 110);
-    let rows = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(3),
-        Constraint::Length(if area.height < 24 { 5 } else { 8 }),
-    ])
-    .split(area);
+    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
     let secs = d.started.elapsed().as_secs();
     frame.render_widget(
         Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(" AGENT FOCUS  ", Style::default().fg(theme::ACCENT).bold()),
+                Span::raw(format!(
+                    "{}  ·  {}  ·  {:02}:{:02}  ",
+                    s.mode.label(),
+                    if d.watching {
+                        "Watching ●"
+                    } else {
+                        "Watch unavailable ?"
+                    },
+                    secs / 60,
+                    secs % 60
+                )),
+                Span::styled(
+                    if d.incomplete {
+                        "Activity incomplete"
+                    } else {
+                        ""
+                    },
+                    Style::default().fg(theme::WARNING),
+                ),
+            ]),
             Line::raw(format!(
-                "AGENT FOCUS · LIVE · {} · Session {:02}:{:02}:{:02}{}",
-                if d.watching {
-                    "Watching ●"
-                } else {
-                    "Not watching ?"
-                },
-                secs / 3600,
-                secs / 60 % 60,
-                secs % 60,
-                if d.incomplete {
-                    " · Activity incomplete"
-                } else {
-                    ""
-                }
+                " {} · {} · {} · {}",
+                s.query.sources.label(),
+                s.query.types.label(),
+                s.query.scope.label(),
+                s.query.window.label()
             )),
-            Line::raw(format!(
-                "{} · {} · {} files · {} events",
-                s.filter.label(),
-                if s.directories_only {
-                    "Directories"
-                } else {
-                    "Directories + files"
-                },
-                d.touched
-                    .values()
-                    .filter(|t| t.filesystem.is_some())
-                    .count(),
-                d.total_events
-            )),
-            Line::raw(format!("{} · Agent: {}", d.status, d.agent_status)),
-        ])
-        .style(Style::default().fg(if d.incomplete {
-            theme::WARNING
-        } else {
-            theme::ACCENT
-        })),
+            Line::styled(
+                format!(
+                    " {} · {} · {} · {}",
+                    s.query.files.label(),
+                    s.auto.label(),
+                    if s.follow {
+                        "Following hotspot"
+                    } else {
+                        "Focus pinned"
+                    },
+                    d.agent_status
+                ),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]),
         rows[0],
     );
-    if s.summary {
-        summary(frame, rows[1], s);
-    } else {
-        let body = Layout::horizontal([
-            Constraint::Percentage(if area.width < 110 { 57 } else { 73 }),
-            Constraint::Min(18),
+    if s.mode == Mode::Map && !s.summary {
+        timeline::map(frame, rows[1], s);
+        return;
+    }
+    if s.mode == Mode::Timeline && !s.summary {
+        timeline::timeline(frame, rows[1], s);
+        return;
+    }
+    if area.width >= 110 {
+        let cols = Layout::horizontal([
+            Constraint::Percentage(29),
+            Constraint::Percentage(44),
+            Constraint::Percentage(27),
         ])
         .split(rows[1]);
-        if s.children.is_empty() {
-            frame.render_widget(Paragraph::new("No activity in this filter.\nFilesystem changes will appear here.\nf cycles filters; select All files to explore.\nInitial disk state is baseline, not a session change.").wrap(Wrap{trim:false}).block(panel(" PROJECT ",!s.timeline)),body[0]);
-        } else if s.compact.get() {
-            render_list(
-                frame,
-                body[0],
-                s,
-                &s.rows,
-                s.compact_selection,
-                " PROJECT · compact tree ",
-                !s.timeline,
-            );
-        } else {
-            let first = s.column.saturating_sub(2);
-            let last = (first + 3).min(s.columns.len());
-            let cols = Layout::horizontal(vec![
-                Constraint::Ratio(1, (last - first) as u32);
-                last - first
-            ])
-            .split(body[0]);
-            for (i, area) in (first..last).zip(cols.iter()) {
-                let col = &s.columns[i];
-                let entries = s
-                    .children
-                    .get(&col.parent)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let title = if col.parent.as_os_str().is_empty() {
-                    " PROJECT ".into()
-                } else {
-                    format!(" {} / ", col.parent.display())
-                };
-                render_list(
-                    frame,
-                    *area,
-                    s,
-                    entries,
-                    col.selected,
-                    &title,
-                    i == s.column && !s.timeline,
-                );
-            }
-        }
-        details(frame, body[1], s);
+        tree(frame, cols[0], s);
+        focus::focus(frame, cols[1], s);
+        focus::stats(frame, cols[2], s);
+    } else {
+        let cols = Layout::horizontal([Constraint::Percentage(34), Constraint::Percentage(66)])
+            .split(rows[1]);
+        let right = Layout::vertical([
+            Constraint::Min(5),
+            Constraint::Length(if rows[1].height >= 22 { 9 } else { 5 }),
+        ])
+        .split(cols[1]);
+        tree(frame, cols[0], s);
+        focus::focus(frame, right[0], s);
+        focus::compact_stats(frame, right[1], s);
     }
-    timeline(frame, rows[2], s);
 }
-fn render_list(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    s: &State,
-    rows: &[Row],
-    selected: usize,
-    title: &str,
-    active: bool,
-) {
-    let start = selected.saturating_sub(area.height.saturating_sub(3) as usize);
-    let end = (start + area.height as usize).min(rows.len());
-    let items: Vec<_> = rows[start..end]
+fn tree(frame: &mut Frame<'_>, area: Rect, s: &State) {
+    if s.rows.is_empty() {
+        frame.render_widget(Paragraph::new("No matching files.\nf types · a source\nb files · w time · p path\nFilters apply to all panels.").wrap(Wrap{trim:false}).block(panel(" PROJECT HEATMAP ",false)),area);
+        return;
+    }
+    let start = s
+        .selected
+        .saturating_sub(area.height.saturating_sub(3) as usize);
+    let end = (start + area.height.saturating_sub(2) as usize).min(s.rows.len());
+    let items: Vec<_> = s.rows[start..end]
         .iter()
         .map(|r| {
-            let name = r.path.file_name().unwrap_or_default().to_string_lossy();
-            let t = s.data.touched.get(&r.path);
-            let badge = if r.dir {
-                format!(" [{}]", s.counts.get(&r.path).copied().unwrap_or(0))
+            let (score, index, count) = if r.dir {
+                s.snapshot
+                    .directories
+                    .get(&r.path)
+                    .map(|d| (d.score, d.latest, d.files))
+                    .unwrap_or((0, 0, 0))
             } else {
-                t.map(|t| {
-                    format!(
-                        " [{}{}]",
-                        t.filesystem.map_or("", Kind::marker),
-                        t.agent.map_or("", Kind::marker)
-                    )
-                })
-                .unwrap_or_default()
+                s.snapshot
+                    .files
+                    .get(&r.path)
+                    .map(|f| (f.score, f.latest, f.events))
+                    .unwrap_or((0, 0, 0))
             };
-            let fold = if r.dir {
-                if s.compact.get() && s.expanded.contains(&r.path) {
-                    "v "
+            let active = s.focus.as_ref() == Some(&r.path);
+            let recent = index < s.data.events.len()
+                && s.data.events[index].observed.elapsed().as_secs() < 15
+                && count > 0;
+            let dot = if active && recent {
+                "●"
+            } else if score >= 24 {
+                "◉"
+            } else if count > 0 {
+                "·"
+            } else {
+                " "
+            };
+            let branch = if r.dir {
+                if s.expanded.contains(&r.path) {
+                    "▾"
                 } else {
-                    "> "
+                    "▸"
                 }
             } else {
-                "  "
+                " "
             };
-            let line = format!(
-                "{}{}{}{}{}",
-                "  ".repeat(r.depth.min(10)),
-                fold,
-                name,
-                if r.dir { "/" } else { "" },
-                badge
-            );
-            let recent = t.is_some_and(|t| t.last.elapsed() < activity::RECENT);
-            ListItem::new(line).style(Style::default().fg(if recent {
-                theme::WARNING
-            } else if r.dir && s.counts.get(&r.path).is_some_and(|n| *n > 0) {
-                theme::ACCENT
+            let badge = if r.dir {
+                if count > 0 {
+                    format!(" [{count}]")
+                } else if s.prior_dirs.contains(&r.path) {
+                    " *".into()
+                } else {
+                    String::new()
+                }
+            } else if let Some(f) = s.snapshot.files.get(&r.path) {
+                format!(" {}", marker(&s.data.events[f.latest]))
+            } else if let Some(touched) = s.data.touched.get(&r.path) {
+                let mark = match touched.filesystem {
+                    Some(activity::Kind::Created) => "N",
+                    Some(activity::Kind::Deleted) => "D",
+                    Some(activity::Kind::Renamed) => "R",
+                    Some(_) => "M",
+                    None => "A",
+                };
+                format!(" {mark}*")
             } else {
-                theme::TEXT
-            }))
+                String::new()
+            };
+            let indent = "  ".repeat(r.depth.min(8));
+            ListItem::new(format!(
+                "{indent}{branch} {dot} {}{}{badge}",
+                name(&r.path),
+                if r.dir { "/" } else { "" }
+            ))
+            .style(if count > 0 {
+                heat_style(s, index, score)
+            } else {
+                Style::default().fg(theme::MUTED)
+            })
         })
         .collect();
-    let mut state =
-        ListState::default().with_selected((!rows.is_empty()).then_some(selected - start));
+    let mut state = ListState::default().with_selected(Some(s.selected - start));
     frame.render_stateful_widget(
         List::new(items)
             .highlight_symbol("> ")
             .highlight_style(components::selectable_row())
-            .block(panel(title, active)),
+            .block(
+                panel(format!(" PROJECT HEATMAP · {} ", s.sort.label()), false).title_bottom(
+                    if !s.prior_dirs.is_empty() && s.query == Query::default() {
+                        " * prior session event "
+                    } else {
+                        ""
+                    },
+                ),
+            ),
         area,
         &mut state,
-    );
-}
-fn details(frame: &mut Frame<'_>, area: Rect, s: &State) {
-    let path = if s.timeline {
-        s.selected_path()
-    } else {
-        s.selected().map(|r| r.path.clone())
-    };
-    let mut lines = vec![];
-    if s.timeline {
-        if let Some(e) = s.data.events.iter().rev().nth(s.timeline_selection) {
-            lines.push(Line::raw(format!(
-                "{} · {} · {:?}",
-                clock(e.at),
-                e.kind.marker(),
-                e.source
-            )));
-            if let Some(details) = &e.details {
-                lines.push(Line::raw(details.clone()));
-            }
-        }
-    }
-    if let Some(path) = path {
-        lines.push(Line::raw(path.display().to_string()));
-        if let Some(t) = s.data.touched.get(&path) {
-            lines.push(Line::raw(format!("{} observed events", t.events)));
-            lines.push(Line::raw(format!("Last: {} UTC", clock(t.at))));
-            if let Some(k) = t.filesystem {
-                lines.push(Line::raw(format!(
-                    "{} · Filesystem",
-                    match k {
-                        Kind::Deleted => "Deleted",
-                        Kind::Created => "Created",
-                        Kind::Renamed => "Renamed",
-                        _ => "Recently modified",
-                    }
-                )));
-            }
-            if let Some(k) = t.agent {
-                lines.push(Line::raw(format!("{} · Agent report", k.marker())));
-            }
-        } else {
-            lines.push(Line::raw("Baseline / no session event"));
-        }
-        if let Some(n) = s.counts.get(&path) {
-            lines.push(Line::raw(format!("{n} unique touched files")));
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("o / Enter · source"));
-        lines.push(Line::raw("m · existing Map"));
-    } else {
-        lines.push(Line::raw("Select a file or event."));
-    }
-    lines.extend([
-        Line::raw(""),
-        Line::raw("M modified · N new · D deleted"),
-        Line::raw("A agent · R reported read"),
-        Line::raw("? incomplete / unknown"),
-        Line::raw("Filesystem ≠ agent action"),
-    ]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(panel(" DETAILS ", false)),
-        area,
-    );
-}
-fn timeline(frame: &mut Frame<'_>, area: Rect, s: &State) {
-    let offset = if s.timeline {
-        s.timeline_selection.saturating_sub(24)
-    } else {
-        0
-    };
-    let events: Vec<_> = s
-        .data
-        .events
-        .iter()
-        .rev()
-        .skip(offset)
-        .take(50)
-        .map(|e| {
-            ListItem::new(format!(
-                "{} {} {}{}{}",
-                clock(e.at),
-                e.kind.marker(),
-                e.path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(no file)".into()),
-                if e.source == Source::Agent {
-                    " · Agent event · "
-                } else {
-                    " · Filesystem · "
-                },
-                e.details.as_deref().unwrap_or("")
-            ))
-        })
-        .collect();
-    let title = format!(
-        " RECENT EVENTS · UTC · {} retained · t select ",
-        s.data.events.len()
-    );
-    let mut state = ListState::default()
-        .with_selected((s.timeline && !events.is_empty()).then_some(s.timeline_selection - offset));
-    frame.render_stateful_widget(
-        List::new(events)
-            .highlight_symbol("> ")
-            .highlight_style(components::selectable_row())
-            .block(panel(title, s.timeline)),
-        area,
-        &mut state,
-    );
-}
-fn summary(frame: &mut Frame<'_>, area: Rect, s: &State) {
-    let d = &s.data;
-    let secs = d.started.elapsed().as_secs();
-    let mut lines = vec![
-        Line::raw(format!("Duration: {}m {}s", secs / 60, secs % 60)),
-        Line::raw(format!(
-            "Observed modified files: {}",
-            d.touched
-                .values()
-                .filter(|t| t.filesystem.is_some())
-                .count()
-        )),
-        Line::raw(format!(
-            "Created files: {}",
-            d.touched.values().filter(|t| t.created).count()
-        )),
-        Line::raw(format!(
-            "Deleted files: {}",
-            d.touched.values().filter(|t| t.deleted).count()
-        )),
-        Line::raw(format!(
-            "Observed events: {} · Agent reports: {}",
-            d.total_events, d.agent_events
-        )),
-        Line::raw("Most active directories (overlapping subtrees):"),
-    ];
-    let mut dirs: Vec<_> = d
-        .directories(Filter::Modified)
-        .into_iter()
-        .filter(|(p, _)| !p.as_os_str().is_empty())
-        .collect();
-    dirs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    lines.extend(
-        dirs.into_iter()
-            .take(8)
-            .map(|(p, n)| Line::raw(format!("  {}/  {n} files", p.display()))),
-    );
-    lines.extend([
-        Line::raw(format!("Agent event source: {}", d.agent_status)),
-        Line::raw(if d.incomplete {
-            "Activity incomplete · counts cover retained observations"
-        } else {
-            "Initial state excluded; no agent attribution for filesystem events"
-        }),
-        Line::raw("s / Esc return · j/k scroll · m Map · o selected source"),
-    ]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((s.summary_scroll as u16, 0))
-            .block(panel(" SESSION SUMMARY ", true)),
-        area,
     );
 }

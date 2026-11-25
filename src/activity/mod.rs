@@ -1,4 +1,7 @@
 //! Local observations, independent of Rust semantics and terminal layout.
+pub mod focus;
+#[cfg(test)]
+mod focus_tests;
 pub mod stream;
 #[cfg(test)]
 mod tests;
@@ -21,18 +24,6 @@ pub enum Kind {
     Write,
     Search,
     Command,
-}
-impl Kind {
-    pub fn marker(self) -> &'static str {
-        match self {
-            Self::Created => "N",
-            Self::Modified => "M",
-            Self::Deleted => "D",
-            Self::Renamed => "M",
-            Self::Read => "R",
-            _ => "A",
-        }
-    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -72,8 +63,9 @@ pub struct Touched {
     pub created: bool,
     pub deleted: bool,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Filter {
+    #[default]
     All,
     Touched,
     Recent,
@@ -223,6 +215,7 @@ impl State {
                 .is_some_and(|t| t.filesystem.is_some()),
         }
     }
+    #[cfg(test)]
     pub fn directories(&self, filter: Filter) -> BTreeMap<PathBuf, usize> {
         let mut counts = BTreeMap::new();
         for path in self
