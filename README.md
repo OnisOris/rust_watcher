@@ -783,59 +783,95 @@ Analysis status. This repository ignores `/tmp/tui-qa/` so local QA source copie
 do not enter metrics. Real `tmp`, `tests` and `fixtures` directories in analyzed
 projects remain subject to those projects' own ignore rules.
 
-## Agent Focus · live repository activity
+## Activity v2 · visual Agent Focus
 
 Press **6 Activity** while another terminal changes the workspace. Activity starts
-an independent local watcher after the first frame. It works without Git or
-rust-analyzer; switching tabs does not restart discovery, semantics or metrics.
-Initial disk state, including existing uncommitted edits, is baseline. Only
-subsequent observed changes enter session counters. Filesystem evidence never
-identifies the editor or claims an AI agent is currently editing a file.
+its local watcher after the first frame, independently of Git, RA and metrics.
+Initial disk state is baseline. Without telemetry it shows **observed hotspots**,
+never claims that an agent is currently editing a file, and cannot observe reads.
 
-At widths **110+**, navigate Repository → directory → subdirectory → file in
-horizontal columns; **h/l** moves through the branch, **j/k** selects, Enter drills
-into directories. Below 110 columns a collapsible compact tree uses the same keys.
-**o / Enter** opens a file through the existing Explorer; Esc returns to Activity.
-Deleted/unavailable files retain an explanation and cannot open source. **m**
-visits the existing Map without changing its Focus or Selection.
+**Tree** (default) is a three-panel attention map: a physical Project Tree Heatmap,
+a larger central Focus, and a compact Signal Summary. Active paths auto-expand;
+directories come first, with activity ranked above cold baseline entries. Focus
+shows the hottest file, its breadcrumb, sibling changes and recent path flow.
+Manual tree selection is independent of this automatic focus; **Space** pins a
+selected file, **z** pauses/resumes following, **r** selects/follows the hottest
+file. When a pin disappears from the filtered set, Focus falls back to a matching
+file; an empty set has an explicit waiting state. **o** opens the selected exact
+file through the existing Explorer; Esc returns. Deleted/out-of-scope files cannot
+open. **m** visits the existing Module Map without moving its Focus/Selection.
 
-**f** cycles **Touched files** (default), **Recent activity** (60 seconds),
-**Modified only** (filesystem observations), **All files** (baseline plus observed
-locations). An empty filter offers All files. **d** switches directories/files;
-**t / Tab** selects the timeline, **j/k / PgUp/PgDn** traverses retained events,
-and **o / Enter** opens their source. **s** shows the live session summary;
-**s / Esc** closes it. Summary counts are unique observed files, with created and
-deleted facts reported separately; directory subtrees overlap and must not be
-summed. A correlated file rename transfers its touched identity to the new path;
-older timeline entries retain the locations observed at the time.
+**v** cycles Tree → Timeline → Map preview. **t** opens/closes Timeline: a real
+5-second bucket histogram above a selectable chronology and selected-moment
+provenance. j/k or PgUp/PgDn selects a moment; Enter/o opens that event's file.
+Map preview groups real files into physical directory cards, with j/k and paging
+for clusters. It is a bounded containment preview, not a semantic constellation.
+**s** toggles an expanded filtered Summary; j/k scrolls it.
 
-Markers supplement colors: **M** modified/renamed, **N** created, **D** deleted,
-**R** reported agent read, **A** other explicit agent activity, **?** unknown or
-incomplete status. Recent files use amber for 60 seconds, then ordinary text;
-changed directory branches retain sky emphasis and unique-file counts. Persistent
-filesystem markers remain after recent emphasis expires. NO_COLOR preserves text
-and selection. Timeline times are **observation time in UTC**, newest first;
-agent-provided time appears separately in event Details.
+Controls within Activity:
 
-The watcher shares RepositoryTree's ignore policy, including `.gitignore` even
-without Git, `.ignore`, global excludes and the fixed excluded directories. It
-never follows symlinks. Notifications coalesce over 150 ms; metadata checks touch
-affected paths, with bounded admission caching for adjacent files. Initial scan,
-ignore-policy changes and explicit OS gaps may rescan. Newly admitted files
-after a policy change establish a scope baseline, not fabricated creation events. Directory creation scans
-only that subtree. No file contents are retained for activity. Atomic saves are
-compared against the known file; supported paired file renames are correlated,
-otherwise the OS observations can appear as deletion/creation. Activity does not
-refresh semantic analyses or ranked metrics.
+| Key | Action |
+| --- | --- |
+| j/k, arrows, PgUp/PgDn | Select row, moment or cluster |
+| Enter, Right/l; Left | Expand/collapse directory; collapse/go to parent |
+| v / t / s | View cycle / Timeline / Summary |
+| z / Space / r | Follow toggle / pin selected file / follow hottest |
+| e | Manual / expand active branches / auto-focus tree |
+| h | Heat coloring on/off |
+| c | Comfortable / detailed / compact density |
+| n | Heat / name / recent sorting; always directories first |
+| a | Merged / filesystem / agent reports |
+| f | All / modified / created-deleted / renamed / agent / hot (15s) |
+| w | Retained session events / last 60s / last 15s |
+| p | Workspace / src / tests / docs / config paths |
+| b / d | All-Touched-Recent-Modified files / directories-only |
+| o / m | Existing exact Explorer / existing Module Map |
 
-Budgets: **1,024 raw notifications**, **256 delivered messages**, **1,000 retained
-events**, **5,000 touched files**, **50 timeline entries per display window** and
-the scanner's **50,000-entry** bound. The existing event loop drains bounded
-batches at its 50 ms tick; filesystem batches arrive about every 150 ms and idle
-Activity refreshes once a second. Overflow, backend gaps, invalid records or
-retention limits visibly mark **Activity incomplete**. Counts then describe
-retained observations, not a complete audit. Exiting stops and joins the watcher;
-there is no daemon, extra process per file, server, network stream or persistence.
+All filters intersect and apply to tree, Focus, statistics, histogram and timeline.
+Config scope means config/ or .toml/.yaml/.yml/.json/.gitignore/.ignore paths,
+not semantic classification. **Statistics cover retained matching events**, and
+change mix counts events, while directory badges count unique files. Overlapping
+ancestor/subtree counts must not be summed. All files also shows dim baseline
+context. An earlier session fact outside the retained event window keeps a dim
+`M*`/`N*`/`D*`/`R*`/`A*` marker; the asterisk does not enter filtered-window counts.
+
+Event colors: **M** modified cyan, **N** new green, **D** deleted rose, **R** renamed
+violet, **A** agent reports amber (including reported reads). Intensity has four
+levels: dim, normal, bold, bold+underline. Recency weights are 8/5/2/1/0 for ages
+<5s / <15s / <60s / <120s / older; a capped frequency multiplier prevents an old
+write storm from overwhelming a fresh signal. Directory heat sums unique-file
+heat. A hot Focus border changes emphasis once per second for at most 15s.
+Cold observations remain facts; no animation runs at frame rate. NO_COLOR retains
+markers, selection and text. Heat means observed recency/frequency, not importance,
+quality, productivity or proof of agent intent.
+
+Focus pattern describes the distribution of the latest 20 matching file events
+within 60s: fewer than 3 is insufficient evidence; >=75% in one immediate parent
+is concentrated, otherwise distributed. Provenance reports filesystem/agent event
+counts separately. Both sources on one file do not establish causation. Timeline
+uses observation time in UTC; adapter-reported time stays separate in Details.
+Below 110 columns the tree and Focus stay visible with a compact summary under
+Focus; at 80×20 extended flow/rankings are available through Summary. The minimum
+supported terminal size remains 80×20.
+
+Ingestion is unchanged: one `notify` watcher uses RepositoryTree ignores, never
+follows symlinks, coalesces notifications over 150 ms, checks affected paths and
+scans new directory subtrees. Initial discovery, ignore-policy changes and explicit
+OS gaps may rescan; newly admitted existing files establish scope baseline rather
+than fabricated creation events. No file contents are retained for activity.
+There is no server, daemon, network stream or additional semantic pipeline.
+
+Budgets remain 1,024 raw notifications, 256 delivered messages, 1,000 retained
+events, 5,000 touched files, a 50,000-entry repository bound and at most 50 timeline
+items per display window. The 50 ms existing input tick drains bounded batches;
+heat/projections refresh once per second, while the physical tree cache rebuilds
+on structural/filter changes rather than selection/paint. Overflow, invalid data
+and retention limits visibly mark **Activity incomplete**. Exit joins the watcher.
+
+The final limitations, actual PTY captures and local measurements are documented
+in [Activity v2 report](docs/ux/agent-focus-v2-report.md). The v1 report and its QA
+script describe the historical v1 key scheme; current reproduction uses
+`python3 scripts/activity_v2_qa.py --binary target/release/wt` with pyte/Pillow.
 
 ### Optional local agent adapter
 
