@@ -57,6 +57,13 @@ def main():
     events = []
     last_producer_at = None
 
+    def usage():
+        stat = Path(f"/proc/{proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
+        status = Path(f"/proc/{proc.pid}/status").read_text().splitlines()
+        return {"cpu_ticks": int(stat[11])+int(stat[12]),
+                "rss_kib": next(line for line in status if line.startswith("VmRSS:")),
+                "threads": next(line for line in status if line.startswith("Threads:"))}
+
     def pump(seconds):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
@@ -95,9 +102,12 @@ def main():
                 draw.text((8+x*cell_w, 8+y*cell_h), cell.data, font=font, fill=color)
         img.save(output / f"{name}.png")
 
+    change_sample = None
     try:
         for step in json.loads(Path(args.scenario).read_text()):
             if "exec" in step:
+                if step.get("track_resources"):
+                    change_sample = (time.monotonic(), usage())
                 began = time.monotonic()
                 result = subprocess.run(step["exec"], cwd=args.project, capture_output=True, text=True, timeout=30)
                 events.append({"external_process_seconds": time.monotonic()-start,
@@ -106,12 +116,6 @@ def main():
                 result.check_returncode()
                 last_producer_at = time.monotonic()
             if "measure" in step:
-                def usage():
-                    stat = Path(f"/proc/{proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
-                    status = Path(f"/proc/{proc.pid}/status").read_text().splitlines()
-                    return {"cpu_ticks": int(stat[11])+int(stat[12]),
-                            "rss_kib": next(line for line in status if line.startswith("VmRSS:")),
-                            "threads": next(line for line in status if line.startswith("Threads:"))}
                 before = usage()
                 began = time.monotonic()
                 pump(step.get("seconds", 3))
@@ -151,6 +155,14 @@ def main():
                                "after_external_ms": (time.monotonic()-last_producer_at)*1000})
                 last_producer_at = None
             pump(step.get("settle", 0.3))
+            if change_sample is not None and "wait" in step:
+                began, before = change_sample
+                after = usage()
+                seconds = time.monotonic()-began
+                events.append({"change_resource_sample": step["wait"], "before": before, "after": after,
+                               "seconds": seconds,
+                               "cpu_percent": (after["cpu_ticks"]-before["cpu_ticks"])/os.sysconf("SC_CLK_TCK")/seconds*100})
+                change_sample = None
             if "capture" in step:
                 capture(step["capture"])
             events.append({"seconds": time.monotonic()-start, "step": step})
