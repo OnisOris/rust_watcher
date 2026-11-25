@@ -150,9 +150,9 @@ files, including the prior changed file, in 306ms (v2) / 314ms (Heat) at 5,000 f
 Input-to-first-output medians 49–50ms, maximum 58.3ms, consistent with the existing
 50ms input tick. Shutdown 26–59ms in these 11 sampled sessions, every exit 0.
 No fixed timing assertions were added to CI. Measurements show bounded snapshot
-cost and a modest transient burst increase, with no observed idle/interaction
-regression in these samples. They are not cross-platform or arbitrary-repository
-performance guarantees.
+cost and a modest transient burst increase. Idle CPU at 5,000 files rose from
+0.33% to 1.00% of one core; interaction medians remained about 50ms. These are
+sampled Linux results, not cross-platform or arbitrary-repository guarantees.
 
 ## Limits
 
@@ -167,37 +167,54 @@ physical preview. Narrow displays place full measurement/source detail under s.
 Detailed color/selection rendition depends on terminal capabilities. Real QA here
 is Linux; original ANSI is retained for styles PNG replay omits.
 
-## Independent acceptance: Kilo Code requested, pending connection
+## Independent acceptance: Kilo Code — ACCEPT
 
-The user explicitly replaced OpenClaw with **Kilo Code** for final acceptance.
-Kilo Code 7.8.32 was found in the existing npm cache and launched directly using
-its `kilocode run --format json --auto --file ...` interface. No reinstall,
-provider change or persistent configuration change was performed. The assigned
-independent task is retained in KILOCODE_TASK.md.
+The user replaced OpenClaw with **Kilo Code** for final acceptance. The existing
+cached Kilo Code CLI 7.8.32 ran independent QA through the Kilo API, session
+`ses_ded44cd21ffes0jkVqz3sJi7JJ`. The per-command `kilo/kilo-auto/free` route
+selected `nvidia/nemotron-3.5-super-vl:free`. No installation or persistent
+configuration change was needed. Earlier DNS failures and a paid-route 401 are
+retained as historical diagnostics; they do not describe the successful run.
 
-Kilo has not issued a verdict: its session repeatedly reports **Network connection
-failed / DNS lookup failed**, before executing any QA tools. A basic github.com
-DNS lookup also times out in this environment. CLI receipts, network errors and
-explicitly Codex-authored connection diagnostics are retained under kilocode/.
-These are connection diagnostics, **not an independent acceptance report**.
-Final visual acceptance therefore remains **pending**, rather than ACCEPT.
+Kilo's independent verdict is **ACCEPT** against the immutable release hash above.
+Its REPORT.md, RESULTS.json, ACTIONS.jsonl, PNG/text captures and original PTY
+receipts are retained under `tmp/tui-qa/live-heat-explorer-v1/kilocode/`.
+The API transcripts are `kilocode-free-cli.jsonl` and `kilocode-final-cli.jsonl`
+in the parent QA directory. KILOCODE_TASK.md and KILOCODE_FINAL_CHECKS.md preserve
+the assigned tasks.
 
-Historical independent OpenClaw evidence for the earlier immutable `0638b759…`
-candidate remains under openclaw/ and candidate-0638b759/. It reported
-ACCEPT WITH ISSUES and identified QA-1: unmeasured agent-only Inspector displayed
-numeric zero. The final implementation fixes that issue, adds observed-staging
-atomic-replacement correctness, Unicode cell clipping and meaningful density
-suffixes, with three additional deterministic regression tests and a fresh full
-40-frame developer matrix. The old verdict is not presented as Kilo's verdict
-or as fresh independent testing of the final binary. Its broad prior checks
-covered measured heat, decay, follow, 5,000 files, 200-file burst, filters, views
-and original provenance, with source/binary identity receipts. A later OpenClaw
-attempt failed in its app-server connection and was superseded by the user's
-Kilo instruction. No acceptance failure has been hidden or reclassified as pass.
+Fresh independent execution confirmed:
 
-No push, merge, install, integration reconfiguration, product service or dependency
-has been introduced. Product implementation and developer validation are complete;
-independent Kilo acceptance requires its API connection to be restored.
+- Three files together at 180/52/18 changed lines, auto-expanded directory
+  250 Δ / 3 unique files. Pixel inspection confirmed distinct descending reds:
+  #f93f45, #e15156, #a63036. Kilo used equivalent isolated a.rs/b.rs/c.rs fixtures;
+  the developer matrix uses the requested render.rs/state.rs/tests.rs names.
+- Previously observed staging content atomically replacing an existing file:
+  destination +1/-1/churn 2, revert cumulative churn 4/net 0, identical save no
+  extra churn.
+- External JSONL read/write claims, source-mode switching and neutral heat;
+  agent-only Inspector displays Added?/Deleted?/Churn not measured.
+- Pure rename adds zero churn and retains identity; deleting a five-line file
+  records -5; deleted-source opening is refused. Timeline/Map/Summary/source
+  navigation, 80×20, NO_COLOR and density were exercised.
+- A 5,000-file fixture (5,105 total baseline files including fixture scaffolding)
+  and 200-file burst: exactly 200 unique changed files, +200/-200, churn 400.
+  The short 3s idle sample measured 0.67% of one core and about 29 MiB RSS;
+  normal q shutdown returned 0. This is a single independent sample, not a
+  replacement for the comparative developer matrix above.
+
+The 48s LIVE decay wait and full mandatory Cargo checks were **not independently
+rerun** by Kilo. They remain explicitly source/developer-evidence-reviewed.
+The wider 40-frame developer matrix, large real-workspace copy and comparative
+performance results above are developer evidence, not Kilo execution.
+Rust/Cargo source hashes and release binary identity were rechecked after QA;
+Kilo made no product-code changes.
+
+Historical OpenClaw evidence for candidate `0638b759…` remains under openclaw/
+and candidate-0638b759/. Its ACCEPT WITH ISSUES identified the now-fixed agent-only
+numeric-zero defect; that older verdict is not substituted for the final Kilo
+verdict. No push or merge was performed. No product service or new dependency
+was introduced.
 
 ## Changed files
 
