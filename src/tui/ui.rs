@@ -165,7 +165,7 @@ fn footer_text(app: &App) -> &'static str {
         Overlay::Help => " ? / Esc close help · q quit",
         Overlay::None => match app.view {
             View::Activity => {
-                " v view · z follow · h heat · a source · f types · t timeline · s summary · ?"
+                " x LIVE/SESSION · z follow · v view · a source · f types · s summary · ?"
             }
             View::Map if app.module_map.active => {
                 " Enter focus · o source · p review · v links · a details · Tab pane · Esc back"

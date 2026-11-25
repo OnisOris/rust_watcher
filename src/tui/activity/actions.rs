@@ -22,13 +22,22 @@ pub(in crate::tui) async fn handle_key(
             s.summary = !s.summary;
             s.summary_scroll = 0;
         }
+        K::Char('x') => {
+            s.query.heat_mode = s.query.heat_mode.next();
+            s.refresh();
+        }
         K::Char('h') => s.heat = !s.heat,
         K::Char('z') => {
-            s.follow = !s.follow;
+            s.follow = s.manual_until.is_some() || !s.follow;
+            s.manual_until = None;
+            s.auto = Auto::Follow;
             s.refresh();
         }
         K::Char('r') => {
             s.follow = true;
+            s.manual_until = None;
+            s.candidate = None;
+            s.focus = None;
             s.auto = Auto::Follow;
             s.refresh();
         }

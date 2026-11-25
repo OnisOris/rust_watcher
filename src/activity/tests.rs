@@ -201,6 +201,13 @@ fn real_workspace_external_process_create_modify_rename_delete_and_shutdown() {
         write(t.path(), "other/c.rs", "changed");
     }
     receive(&o, &mut s, |s| s.touched.len() == 3);
+    for event in &s.events {
+        let measured = event.measurement.unwrap().delta.unwrap();
+        assert_eq!(
+            measured.churn(),
+            if event.kind == Kind::Created { 1 } else { 2 }
+        );
+    }
     fs::rename(t.path().join("src/a.rs"), t.path().join("src/renamed.rs")).unwrap();
     fs::remove_file(t.path().join("other/c.rs")).unwrap();
     receive(&o, &mut s, |s| {

@@ -1,7 +1,11 @@
 //! Local observations, independent of Rust semantics and terminal layout.
+pub mod content;
 pub mod focus;
 #[cfg(test)]
 mod focus_tests;
+pub mod heat;
+#[cfg(test)]
+mod heat_tests;
 pub mod stream;
 #[cfg(test)]
 mod tests;
@@ -39,6 +43,7 @@ pub struct Event {
     pub path: Option<PathBuf>,
     pub old_path: Option<PathBuf>,
     pub details: Option<String>,
+    pub measurement: Option<content::Measurement>,
 }
 impl Event {
     pub fn filesystem(kind: Kind, path: PathBuf) -> Self {
@@ -50,6 +55,7 @@ impl Event {
             path: Some(path),
             old_path: None,
             details: None,
+            measurement: None,
         }
     }
 }
@@ -62,6 +68,8 @@ pub struct Touched {
     pub events: usize,
     pub created: bool,
     pub deleted: bool,
+    pub measurements: [heat::Totals; 4],
+    pub kinds: [Option<Event>; 4],
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Filter {
@@ -101,6 +109,7 @@ pub struct State {
     pub agent_events: usize,
     pub agent_status: String,
     pub revision: u64,
+    pub measurement_status: String,
 }
 impl Default for State {
     fn default() -> Self {
@@ -116,6 +125,7 @@ impl Default for State {
             agent_events: 0,
             agent_status: "Not connected".into(),
             revision: 0,
+            measurement_status: "Change measurement: starting".into(),
         }
     }
 }
@@ -138,6 +148,16 @@ impl State {
         self.revision += 1;
     }
     pub fn apply(&mut self, event: Event) {
+        if event
+            .measurement
+            .is_some_and(|m| m.delta.is_none() || m.reason.is_some())
+            && !self.measurement_status.contains("Partial")
+        {
+            self.measurement_status = self.measurement_status.replace("Complete", "Partial");
+            if !self.measurement_status.contains("Partial") {
+                self.measurement_status = "Change measurement: Partial".into();
+            }
+        }
         // A correlated move retains one file identity at its new physical path.
         // Earlier timeline entries retain their observed locations.
         if event.source == Source::Filesystem && event.kind == Kind::Renamed {
@@ -150,6 +170,12 @@ impl State {
                             current.events += prior.events;
                             current.created |= prior.created;
                             current.deleted |= prior.deleted;
+                            for i in 0..4 {
+                                current.measurements[i].merge(prior.measurements[i]);
+                                if current.kinds[i].is_none() {
+                                    current.kinds[i] = prior.kinds[i].clone();
+                                }
+                            }
                         })
                         .or_insert(prior);
                 }
@@ -171,6 +197,8 @@ impl State {
                     events: 0,
                     created: false,
                     deleted: false,
+                    measurements: Default::default(),
+                    kinds: Default::default(),
                 });
                 touched.last = event.observed;
                 touched.at = event.at;
@@ -178,6 +206,14 @@ impl State {
                 if event.source == Source::Filesystem {
                     touched.created |= event.kind == Kind::Created;
                     touched.deleted |= event.kind == Kind::Deleted;
+                    let i = match event.kind {
+                        Kind::Created => 1,
+                        Kind::Deleted => 2,
+                        Kind::Renamed => 3,
+                        _ => 0,
+                    };
+                    touched.measurements[i].add(event.measurement.and_then(|m| m.delta));
+                    touched.kinds[i] = Some(event.clone());
                 }
                 match event.source {
                     Source::Filesystem => touched.filesystem = Some(event.kind),

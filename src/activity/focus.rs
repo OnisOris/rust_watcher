@@ -1,5 +1,8 @@
 //! Bounded activity projections. Scores measure observed recency/frequency, not importance.
-use super::{Event, Filter, Kind, Source, State};
+use super::{
+    heat::{self, Mode, Totals},
+    Event, Filter, Kind, Source, State,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -167,15 +170,18 @@ pub struct Query {
     pub types: Types,
     pub scope: Scope,
     pub window: Window,
+    pub heat_mode: Mode,
 }
 impl Query {
     pub fn accepts(self, e: &Event, now: Instant) -> bool {
         let age = now.saturating_duration_since(e.observed);
-        (match self.files {
-            Filter::Recent => age.as_secs() < 60,
-            Filter::Modified => e.source == Source::Filesystem,
-            _ => true,
-        }) && self.sources.accepts(e.source)
+        (self.heat_mode == Mode::Session || age.as_secs() < 120)
+            && (match self.files {
+                Filter::Recent => age.as_secs() < 60,
+                Filter::Modified => e.source == Source::Filesystem,
+                _ => true,
+            })
+            && self.sources.accepts(e.source)
             && self.types.accepts(e, age)
             && self.scope.accepts(e.path.as_deref())
             && self.window.accepts(age)
@@ -188,11 +194,19 @@ pub struct File {
     pub agent: usize,
     pub score: u32,
     recent: u32,
+    pub volume: f64,
+    pub totals: Totals,
+    pub event: Event,
+    pub net: Option<super::content::LineDelta>,
     pub last: Instant,
     pub latest: usize,
 }
 #[derive(Clone)]
 pub struct Directory {
+    pub totals: Totals,
+    pub volume: f64,
+    pub unknown_files: usize,
+    pub changed_files: usize,
     pub files: usize,
     pub events: usize,
     pub score: u32,
@@ -211,8 +225,11 @@ pub struct Snapshot {
     pub clusters: Vec<PathBuf>,
     pub flow: Vec<PathBuf>,
     pub buckets: [usize; 12],
+    pub totals: Totals,
+    pub changed_files: usize,
     pub stability: &'static str,
 }
+#[cfg(test)]
 pub fn heat(age: Duration) -> u32 {
     match age.as_secs() {
         0..=4 => 8,
@@ -282,6 +299,10 @@ impl Snapshot {
                         agent: 0,
                         score: 0,
                         recent: 0,
+                        volume: 0.,
+                        totals: Totals::default(),
+                        event: event.clone(),
+                        net: None,
                         last: event.observed,
                         latest: index,
                     });
@@ -289,6 +310,9 @@ impl Snapshot {
                     new.filesystem += prior.filesystem;
                     new.agent += prior.agent;
                     new.recent += prior.recent;
+                    new.volume += prior.volume;
+                    new.totals.merge(prior.totals);
+                    new.net = prior.net;
                 }
             }
             let file = result.files.entry(path.clone()).or_insert(File {
@@ -297,6 +321,10 @@ impl Snapshot {
                 agent: 0,
                 score: 0,
                 recent: 0,
+                volume: 0.,
+                totals: Totals::default(),
+                event: event.clone(),
+                net: None,
                 last: event.observed,
                 latest: index,
             });
@@ -304,6 +332,13 @@ impl Snapshot {
             file.recent += u32::from(age.as_secs() < 60);
             file.last = event.observed;
             file.latest = index;
+            file.event = event.clone();
+            if event.source == Source::Filesystem {
+                file.net = event.measurement.and_then(|m| m.net);
+                let d = event.measurement.and_then(|m| m.delta);
+                file.totals.add(d);
+                file.volume += heat::weighted(d.map_or(0, |d| d.churn()), age, query.heat_mode);
+            }
             if event.source == Source::Agent {
                 file.agent += 1;
             } else {
@@ -313,9 +348,64 @@ impl Snapshot {
                 result.flow.push(path.clone());
             }
         }
+        // Durable per-file/per-kind totals outlive the bounded timeline. Time-restricted
+        // queries continue using retained events and advertise retention loss.
+        if query.heat_mode == Mode::Session
+            && query.window == Window::Retained
+            && !matches!(query.files, Filter::Recent)
+            && query.types != Types::Hot
+        {
+            result.mix[..4].fill(0);
+            for (path, touched) in &state.touched {
+                let mut totals = Totals::default();
+                let mut latest: Option<&Event> = None;
+                for (i, event) in touched.kinds.iter().enumerate() {
+                    if let Some(e) = event {
+                        let mut e = e.clone();
+                        e.path = Some(path.clone());
+                        if query.accepts(&e, now) {
+                            totals.merge(touched.measurements[i]);
+                            result.mix[i] +=
+                                touched.measurements[i].measured + touched.measurements[i].unknown;
+                            if latest
+                                .is_none_or(|old| old.observed < event.as_ref().unwrap().observed)
+                            {
+                                latest = event.as_ref();
+                            }
+                        }
+                    }
+                }
+                if let Some(event) = latest {
+                    let file = result.files.entry(path.clone()).or_insert(File {
+                        events: 0,
+                        filesystem: 0,
+                        agent: 0,
+                        score: 0,
+                        recent: 0,
+                        volume: 0.,
+                        totals: Totals::default(),
+                        last: event.observed,
+                        latest: 0,
+                        event: event.clone(),
+                        net: None,
+                    });
+                    file.filesystem = totals.measured + totals.unknown;
+                    file.events = file.filesystem + file.agent;
+                    file.net = touched
+                        .kinds
+                        .iter()
+                        .flatten()
+                        .max_by_key(|e| e.observed)
+                        .and_then(|e| e.measurement)
+                        .and_then(|m| m.net);
+                    file.totals = totals;
+                    file.volume = totals.churn() as f64;
+                }
+            }
+        }
+        result.filesystem = result.files.values().map(|f| f.filesystem).sum();
         for file in result.files.values_mut() {
-            file.score = heat(now.saturating_duration_since(file.last))
-                * (1 + file.recent.saturating_sub(1).min(3));
+            file.score = heat::level(file.volume);
         }
         for (path, file) in &result.files {
             for parent in path
@@ -327,6 +417,10 @@ impl Snapshot {
                     .directories
                     .entry(parent.to_path_buf())
                     .or_insert(Directory {
+                        totals: Totals::default(),
+                        volume: 0.,
+                        unknown_files: 0,
+                        changed_files: 0,
                         files: 0,
                         events: 0,
                         score: 0,
@@ -334,8 +428,13 @@ impl Snapshot {
                         last: file.last,
                     });
                 dir.files += 1;
+                dir.changed_files +=
+                    usize::from(file.totals.churn() > 0 || file.totals.unknown > 0);
+                dir.unknown_files += usize::from(file.totals.unknown > 0);
+                dir.totals.merge(file.totals);
+                dir.volume += file.volume;
                 dir.events += file.events;
-                dir.score = dir.score.saturating_add(file.score);
+                dir.score = heat::level(dir.volume);
                 if file.last > dir.last {
                     dir.last = file.last;
                     dir.latest = file.latest;
@@ -346,17 +445,17 @@ impl Snapshot {
         result.ranked_files.sort_by(|a, b| {
             let (a_file, b_file) = (&result.files[a], &result.files[b]);
             b_file
-                .score
-                .cmp(&a_file.score)
+                .volume
+                .total_cmp(&a_file.volume)
                 .then(b_file.last.cmp(&a_file.last))
                 .then(a.cmp(b))
         });
-        let mut clusters: BTreeMap<PathBuf, (u32, usize)> = BTreeMap::new();
+        let mut clusters: BTreeMap<PathBuf, (u64, usize)> = BTreeMap::new();
         for (p, f) in &result.files {
             let c = clusters
                 .entry(p.parent().unwrap_or(Path::new("")).to_path_buf())
                 .or_default();
-            c.0 = c.0.saturating_add(f.score);
+            c.0 = c.0.saturating_add((f.volume * 1000.) as u64);
             c.1 += f.events;
         }
         result.clusters = clusters.keys().cloned().collect();
@@ -388,6 +487,10 @@ impl Snapshot {
         } else {
             "Distributed · several directories"
         };
+        for f in result.files.values() {
+            result.totals.merge(f.totals);
+            result.changed_files += usize::from(f.totals.churn() > 0 || f.totals.unknown > 0);
+        }
         result
     }
     pub fn hottest(&self) -> Option<&PathBuf> {

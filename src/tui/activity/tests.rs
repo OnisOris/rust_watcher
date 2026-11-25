@@ -31,6 +31,8 @@ fn auto_expansion_manual_selection_and_follow_are_independent() {
     s.refresh();
     assert_eq!(s.focus, pinned);
     s.follow = true;
+    s.manual_until = None;
+    s.focus = Some("src/tui/a.rs".into());
     s.auto = Auto::Follow;
     s.refresh();
     assert_eq!(
@@ -78,7 +80,7 @@ fn responsive_modes_provenance_and_no_color_remain_readable() {
             let text = frame(&app, w, h);
             assert!(text.contains("AGENT FOCUS"));
             assert!(text.contains(match mode {
-                Mode::Tree => "FOCUS",
+                Mode::Tree => "PROJECT HEATMAP",
                 Mode::Timeline => "TIMELINE",
                 Mode::Map => "CLUSTER",
             }));
@@ -198,4 +200,100 @@ fn pinned_focus_recovers_after_filter_roundtrip_and_history_markers_persist() {
         .files
         .contains_key(Path::new("old.rs")));
     assert!(frame(&app, 120, 35).contains("old.rs M*"));
+}
+
+fn measured(s: &mut State, path: &str, lines: u32, now: Instant) {
+    let mut e = Event::filesystem(Kind::Modified, path.into());
+    e.observed = now;
+    e.measurement = Some(activity::content::Measurement {
+        delta: Some(activity::content::LineDelta {
+            added: lines,
+            deleted: 0,
+        }),
+        net: None,
+        reason: None,
+    });
+    s.data.apply(e);
+}
+#[test]
+fn smart_follow_reveals_deep_branches_stabilizes_clusters_and_pauses_for_user() {
+    let now = Instant::now();
+    let mut s = State::default();
+    measured(&mut s, "src/deep/branch/render.rs", 180, now);
+    s.refresh_at(now);
+    assert_eq!(
+        s.selected_path().as_deref(),
+        Some(Path::new("src/deep/branch/render.rs"))
+    );
+    for p in ["src", "src/deep", "src/deep/branch"] {
+        assert!(s.expanded.contains(Path::new(p)));
+    }
+    measured(&mut s, "src/deep/branch/state.rs", 52, now);
+    s.refresh_at(now);
+    assert_eq!(
+        s.focus.as_deref(),
+        Some(Path::new("src/deep/branch/render.rs"))
+    );
+    s.down(-1);
+    let selected = s.rows[s.selected].path.clone();
+    measured(&mut s, "tests/new.rs", 1000, now);
+    s.refresh_at(now);
+    s.refresh_at(now + Duration::from_secs(2));
+    assert_eq!(s.focus.as_deref(), Some(Path::new("tests/new.rs")));
+    assert_eq!(s.rows[s.selected].path, selected);
+    s.refresh_at(now + Duration::from_secs(16));
+    assert_eq!(
+        s.selected_path().as_deref(),
+        Some(Path::new("tests/new.rs"))
+    );
+}
+#[test]
+fn cluster_hysteresis_ignores_small_advantage_and_pin_survives_writes_and_rename() {
+    let now = Instant::now();
+    let mut s = State::default();
+    measured(&mut s, "src/a", 100, now);
+    s.refresh_at(now);
+    measured(&mut s, "tests/a", 120, now);
+    s.refresh_at(now);
+    s.refresh_at(now + Duration::from_secs(2));
+    assert_eq!(s.focus.as_deref(), Some(Path::new("src/a")));
+    s.follow = false;
+    for i in 0..50 {
+        measured(&mut s, &format!("tests/{i}"), 100, now);
+    }
+    s.refresh_at(now + Duration::from_secs(3));
+    assert_eq!(s.focus.as_deref(), Some(Path::new("src/a")));
+    let mut e = Event::filesystem(Kind::Renamed, "src/renamed".into());
+    e.old_path = Some("src/a".into());
+    e.observed = now + Duration::from_secs(4);
+    s.data.apply(e);
+    s.refresh_at(now + Duration::from_secs(4));
+    assert_eq!(s.focus.as_deref(), Some(Path::new("src/renamed")));
+    assert_eq!(s.selected_path().as_deref(), Some(Path::new("src/renamed")));
+}
+#[test]
+fn no_color_keeps_absolute_heat_bars_and_unknown_is_not_zero() {
+    let (_t, mut app) = app();
+    app.switch_view(View::Activity);
+    app.color_mode = crate::tui::theme::ColorMode::None;
+    let now = Instant::now();
+    for (p, n) in [
+        ("src/render.rs", 180),
+        ("src/state.rs", 52),
+        ("src/tests.rs", 18),
+    ] {
+        measured(&mut app.activity, p, n, now);
+    }
+    app.activity
+        .data
+        .apply(Event::filesystem(Kind::Modified, "src/unknown.rs".into()));
+    app.activity.refresh_at(now);
+    let text = frame(&app, 120, 35);
+    assert!(text.contains("180 Δ"));
+    assert!(text.contains("52 Δ"));
+    assert!(text.contains("18 Δ"));
+    assert!(text.contains("█▓▒░"));
+    assert!(text.contains("▓▒░·"));
+    assert!(text.contains("▒░··"));
+    assert!(text.contains("? Δ"));
 }

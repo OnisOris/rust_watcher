@@ -87,6 +87,13 @@ pub(super) fn timeline(frame: &mut Frame<'_>, area: Rect, s: &State) {
                 "Filesystem observed · editor unknown"
             }),
         ]);
+        if let Some(m) = e.measurement {
+            lines.push(Line::raw(
+                m.delta
+                    .map(|d| format!("+{} / -{} · {} Δ", d.added, d.deleted, d.churn()))
+                    .unwrap_or_else(|| "Content delta unavailable · file changed".into()),
+            ));
+        }
         if let Some(details) = &e.details {
             lines.push(Line::raw(details.clone()));
         }
@@ -110,7 +117,7 @@ pub(super) fn timeline(frame: &mut Frame<'_>, area: Rect, s: &State) {
 }
 pub(super) fn map(frame: &mut Frame<'_>, area: Rect, s: &State) {
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
-    frame.render_widget(Paragraph::new("Physical directory clusters · containment only · j/k select · o source · v Tree\nPreview: brightness = recency/frequency; no semantic or agent-intent edges").style(Style::default().fg(theme::MUTED)),rows[0]);
+    frame.render_widget(Paragraph::new("Physical directory clusters · containment only · j/k select · o source · v Tree\nPreview: red = measured line churn; no semantic or agent-intent edges").style(Style::default().fg(theme::MUTED)),rows[0]);
     if s.snapshot.clusters.is_empty() {
         frame.render_widget(
             Paragraph::new("No matching activity clusters yet.")
@@ -149,9 +156,9 @@ pub(super) fn map(frame: &mut Frame<'_>, area: Rect, s: &State) {
             .take(3)
         {
             let f = &s.snapshot.files[p];
-            let e = &s.data.events[f.latest];
+            let e = &f.event;
             lines.push(Line::styled(
-                format!("  └─ {} {} · {}", marker(e), name(p), f.events),
+                format!("  └─ {} {} · {} Δ", marker(e), name(p), measured(f.totals)),
                 heat_style(s, f.latest, f.score),
             ));
         }

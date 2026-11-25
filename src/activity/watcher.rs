@@ -19,6 +19,7 @@ pub enum Message {
     Event(Event),
     Status(String, bool),
     AgentStatus(String),
+    MeasurementStatus(String),
 }
 pub struct Observation {
     pub rx: Receiver<Message>,
@@ -129,6 +130,7 @@ struct Disk {
     known: BTreeMap<PathBuf, Stamp>,
     watched: BTreeSet<PathBuf>,
     scope: Scope,
+    content: super::content::Snapshots,
 }
 impl Disk {
     fn observe_dir(
@@ -159,7 +161,7 @@ impl Disk {
         let old = self.known.get(&path);
         let kind = match (old, &now) {
             (None, Some(_)) if self.scope.admitted(root, &path) => Some(Kind::Created),
-            (Some(a), Some(b)) if a != b => Some(Kind::Modified),
+            (Some(_), Some(_)) => Some(Kind::Modified),
             (Some(_), None) => Some(Kind::Deleted),
             _ => None,
         };
@@ -175,7 +177,13 @@ impl Disk {
             } else {
                 self.known.remove(&path);
             }
-            send(tx, lost, Message::Event(Event::filesystem(kind, path)));
+            let mut event = Event::filesystem(kind, path.clone());
+            let measurement = self.content.measure(root, &path, kind, None);
+            if kind == Kind::Modified && measurement.delta.is_some_and(|d| d.churn() == 0) {
+                return;
+            }
+            event.measurement = Some(measurement);
+            send(tx, lost, Message::Event(event));
         }
     }
 }
@@ -201,6 +209,7 @@ fn run(
         known: BTreeMap::new(),
         watched: BTreeSet::new(),
         scope: Scope::default(),
+        content: Default::default(),
     };
     disk.observe_dir(&mut watcher, root, Path::new(""))?;
     let tree = repository::scan(root)?;
@@ -213,11 +222,26 @@ fn run(
             RepoEntryKind::File => {
                 if let Some(s) = stamp(&root.join(&e.path)) {
                     disk.known.insert(e.path.clone(), s);
+                    disk.content.baseline(root, &e.path);
                 }
             }
             _ => {}
         }
     }
+    send(
+        tx,
+        lost,
+        Message::MeasurementStatus(format!(
+            "Change measurement: {} · {}/{} baseline files",
+            if disk.content.covered == disk.content.total {
+                "Complete"
+            } else {
+                "Partial"
+            },
+            disk.content.covered,
+            disk.content.total
+        )),
+    );
     send(tx, lost, Message::Snapshot(tree));
     let mut journal = stream.map(super::stream::Tail::new);
     if journal.is_some() {
@@ -286,6 +310,8 @@ fn run(
             // Ignore policy changes remove scope, not files on disk.
             disk.known
                 .retain(|p, _| allowed.contains(p) || !root.join(p).exists());
+            disk.content
+                .retain(|p| allowed.contains(p) || !root.join(p).exists());
             if ignore_change && !rescan {
                 // Newly admitted locations were not observed before this policy
                 // boundary. Discovery is baseline, not evidence of file creation.
@@ -293,6 +319,7 @@ fn run(
                     if !disk.known.contains_key(p) {
                         if let Some(stamp) = stamp(&root.join(p)) {
                             disk.known.insert(p.clone(), stamp);
+                            disk.content.baseline(root, p);
                         }
                     }
                 }
@@ -346,6 +373,8 @@ fn run(
                         disk.known.remove(old);
                         disk.known.insert(new.clone(), stamp);
                         let mut event = Event::filesystem(Kind::Renamed, new.clone());
+                        event.measurement =
+                            Some(disk.content.measure(root, new, Kind::Renamed, Some(old)));
                         event.old_path = Some(old.clone());
                         event.details = Some(format!("Renamed from {}", old.display()));
                         send(tx, lost, Message::Event(event));

@@ -14,7 +14,10 @@ impl State {
                 self.prior_dirs.insert(parent.to_path_buf());
             }
         }
-        let baseline = self.query == Query::default();
+        let baseline = Query {
+            heat_mode: crate::activity::heat::Mode::Live,
+            ..self.query
+        } == Query::default();
         let paths: BTreeSet<_> = self
             .data
             .files

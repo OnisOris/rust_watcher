@@ -3,7 +3,16 @@ use super::*;
 fn data() -> State {
     let mut s = State::default();
     for p in ["src/a.rs", "src/a.rs", "src/b.rs", "tests/test.rs"] {
-        s.apply(Event::filesystem(Kind::Modified, p.into()));
+        let mut e = Event::filesystem(Kind::Modified, p.into());
+        e.measurement = Some(content::Measurement {
+            delta: Some(content::LineDelta {
+                added: 10,
+                deleted: 0,
+            }),
+            net: None,
+            reason: None,
+        });
+        s.apply(e);
     }
     let mut e = Event::filesystem(Kind::Read, "docs/readme.md".into());
     e.source = Source::Agent;
@@ -19,7 +28,8 @@ fn heat_decays_without_erasing_facts_and_mixed_sources_remain_distinct() {
     assert_eq!(hot.directories[Path::new("src")].files, 2);
     assert_eq!(hot.mix, [4, 0, 0, 0, 1]);
     let cold = Snapshot::build(&s, Query::default(), now + Duration::from_secs(121));
-    assert_eq!(cold.files.len(), 4);
+    assert_eq!(cold.files.len(), 0);
+    assert_eq!(s.touched.len(), 4);
     assert!(cold.files.values().all(|f| f.score == 0));
     assert_eq!(heat(Duration::from_secs(0)), 8);
     assert_eq!(heat(Duration::from_secs(10)), 5);
@@ -93,13 +103,31 @@ fn rename_transfers_unique_identity_and_command_has_no_invented_path() {
 fn concentration_uses_observation_distribution_not_agent_productivity() {
     let mut s = State::default();
     for p in ["src/a", "src/b", "src/c"] {
-        s.apply(Event::filesystem(Kind::Modified, p.into()));
+        let mut e = Event::filesystem(Kind::Modified, p.into());
+        e.measurement = Some(content::Measurement {
+            delta: Some(content::LineDelta {
+                added: 10,
+                deleted: 0,
+            }),
+            net: None,
+            reason: None,
+        });
+        s.apply(e);
     }
     assert!(Snapshot::build(&s, Query::default(), Instant::now())
         .stability
         .starts_with("Concentrated"));
     for p in ["tests/a", "docs/a", "config/a"] {
-        s.apply(Event::filesystem(Kind::Modified, p.into()));
+        let mut e = Event::filesystem(Kind::Modified, p.into());
+        e.measurement = Some(content::Measurement {
+            delta: Some(content::LineDelta {
+                added: 10,
+                deleted: 0,
+            }),
+            net: None,
+            reason: None,
+        });
+        s.apply(e);
     }
     assert!(Snapshot::build(&s, Query::default(), Instant::now())
         .stability
@@ -112,9 +140,26 @@ fn an_old_write_storm_cannot_permanently_outshine_a_fresh_signal() {
     for _ in 0..50 {
         let mut e = Event::filesystem(Kind::Modified, "old.rs".into());
         e.observed = old;
+        e.measurement = Some(content::Measurement {
+            delta: Some(content::LineDelta {
+                added: 1,
+                deleted: 0,
+            }),
+            net: None,
+            reason: None,
+        });
         s.apply(e);
     }
-    s.apply(Event::filesystem(Kind::Modified, "now.rs".into()));
+    let mut e = Event::filesystem(Kind::Modified, "now.rs".into());
+    e.measurement = Some(content::Measurement {
+        delta: Some(content::LineDelta {
+            added: 100,
+            deleted: 0,
+        }),
+        net: None,
+        reason: None,
+    });
+    s.apply(e);
     assert_eq!(
         Snapshot::build(&s, Query::default(), Instant::now())
             .hottest()

@@ -2,6 +2,7 @@
 mod actions;
 mod render;
 pub(super) use actions::handle_key;
+mod follow;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -119,6 +120,8 @@ pub(super) struct State {
     summary_scroll: usize,
     revision: u64,
     refreshed: Instant,
+    manual_until: Option<Instant>,
+    candidate: Option<(PathBuf, Instant)>,
     cache: (Query, Sort, bool),
 }
 impl Default for State {
@@ -128,7 +131,7 @@ impl Default for State {
             query: Default::default(),
             snapshot: Default::default(),
             mode: Mode::Tree,
-            auto: Auto::Expand,
+            auto: Auto::Follow,
             sort: Sort::Heat,
             heat: true,
             follow: true,
@@ -145,6 +148,8 @@ impl Default for State {
             summary_scroll: 0,
             revision: u64::MAX,
             refreshed: Instant::now(),
+            manual_until: None,
+            candidate: None,
             cache: (Query::default(), Sort::Heat, false),
         }
     }
@@ -177,21 +182,30 @@ impl State {
         }
     }
     fn refresh(&mut self) {
-        let selected = self.rows.get(self.selected).map(|r| r.path.clone());
+        self.refresh_at(Instant::now());
+    }
+    fn refresh_at(&mut self, now: Instant) {
+        let mut selected = self.rows.get(self.selected).map(|r| r.path.clone());
+        for e in self
+            .data
+            .events
+            .iter()
+            .filter(|e| e.observed >= self.refreshed)
+        {
+            if e.kind == activity::Kind::Renamed && e.old_path == selected {
+                selected = e.path.clone();
+            }
+            if e.kind == activity::Kind::Renamed && e.old_path == self.focus {
+                self.focus = e.path.clone();
+            }
+        }
         let anchor = self.selected_event().map(|e| e.observed);
-        let snapshot = Snapshot::build(&self.data, self.query, Instant::now());
+        let snapshot = Snapshot::build(&self.data, self.query, now);
         let rebuild = self.revision != self.data.revision
             || self.cache != (self.query, self.sort, self.directories_only)
             || !self.snapshot.files.keys().eq(snapshot.files.keys());
         self.snapshot = snapshot;
-        if self.follow
-            || self
-                .focus
-                .as_ref()
-                .is_none_or(|p| !self.snapshot.files.contains_key(p))
-        {
-            self.focus = self.snapshot.hottest().cloned();
-        }
+        self.update_focus(now);
         let mut expanded_changed = false;
         if self.auto != Auto::Manual {
             // Retain manual collapses until the next model revision, not every tick.
@@ -202,7 +216,7 @@ impl State {
                     }
                 }
             }
-            if self.auto == Auto::Follow {
+            if self.camera_active(now) {
                 if let Some(p) = &self.focus {
                     for parent in p.ancestors().skip(1) {
                         expanded_changed |= self.expanded.insert(parent.to_path_buf());
@@ -217,7 +231,7 @@ impl State {
         self.map_selection = self
             .map_selection
             .min(self.snapshot.clusters.len().saturating_sub(1));
-        let restore = if self.auto == Auto::Follow {
+        let restore = if self.camera_active(now) {
             self.focus.as_ref()
         } else {
             selected.as_ref()
@@ -240,7 +254,7 @@ impl State {
                     .min(self.snapshot.events.len().saturating_sub(1)),
             );
         self.revision = self.data.revision;
-        self.refreshed = Instant::now();
+        self.refreshed = now;
     }
     fn down(&mut self, delta: isize) {
         if self.summary {
@@ -260,12 +274,11 @@ impl State {
                 .selected
                 .saturating_add_signed(delta)
                 .min(self.rows.len().saturating_sub(1));
-            if self.auto == Auto::Follow {
-                self.auto = Auto::Expand;
-            }
+            self.pause_camera(Instant::now());
         }
     }
     fn expand(&mut self) {
+        self.pause_camera(Instant::now());
         if let Some(r) = self.rows.get(self.selected).cloned() {
             if r.dir {
                 if !self.expanded.insert(r.path.clone()) {
@@ -276,6 +289,7 @@ impl State {
         }
     }
     fn parent(&mut self) {
+        self.pause_camera(Instant::now());
         if let Some(r) = self.rows.get(self.selected).cloned() {
             if self.expanded.remove(&r.path) {
                 self.rebuild_rows();
@@ -307,6 +321,7 @@ pub(super) fn poll(app: &mut App, observation: Option<&Observation>) -> bool {
                     s.data.watching = watching;
                 }
                 Message::AgentStatus(status) => s.data.agent_status = status,
+                Message::MeasurementStatus(status) => s.data.measurement_status = status,
             }
         }
     }

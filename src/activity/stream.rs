@@ -156,6 +156,7 @@ fn parse(root: &Path, line: &[u8]) -> Option<(Event, Vec<u8>)> {
             source: Source::Agent,
             path,
             old_path: None,
+            measurement: None,
             details: Some(format!(
                 "{} · {} · {} · reported {}",
                 r.source, r.session, r.event, r.timestamp

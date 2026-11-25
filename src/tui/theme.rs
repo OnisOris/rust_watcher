@@ -12,6 +12,13 @@ pub const GIT: Color = Color::Rgb(245, 158, 139);
 pub const NUMBER: Color = Color::Rgb(196, 181, 253);
 pub const BORDER: Color = Color::Rgb(71, 85, 105);
 
+pub const HEAT1: Color = Color::Rgb(165, 128, 132);
+pub const HEAT2: Color = Color::Rgb(194, 100, 105);
+pub const HEAT3: Color = Color::Rgb(225, 81, 86);
+pub const HEAT4: Color = Color::Rgb(249, 63, 69);
+pub const HEAT5: Color = Color::Rgb(255, 37, 48);
+pub const HEAT_SELECTION: Color = Color::Rgb(55, 26, 32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
     TrueColor,
@@ -40,6 +47,10 @@ impl ColorMode {
             Self::None => Color::Reset,
             Self::Ansi => match color {
                 TEXT => Color::White,
+                HEAT1 => Color::Gray,
+                HEAT2 | HEAT3 => Color::Red,
+                HEAT4 | HEAT5 => Color::LightRed,
+                HEAT_SELECTION => Color::Black,
                 MUTED => Color::Gray,
                 ACCENT => Color::Cyan,
                 ACTIVE | NUMBER => Color::LightMagenta,
